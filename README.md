@@ -8,9 +8,9 @@ The rapid advancement of Large Multimodal Models (LMMs) for 2D images and videos
 
 ## 🧑‍💻 Authors
 
-[Zhiwen Fan](https://zhiwenfan.github.io/)<sup>1,2&dagger;\*</sup>, [Jian Zhang](https://jzh15.github.io/)<sup>2\*</sup>, [Renjie Li](https://shadowiterator.github.io/)<sup>2</sup>, [Junge Zhang](https://andy-zd.github.io/)<sup>3</sup>, [Runjin Chen](https://chenrunjin.github.io/)<sup>1</sup>, [Hezhen Hu](https://alexhu.top/)<sup>1</sup>, [Kevin Wang](https://www.kevin-ai.com/)<sup>1</sup>, [Peihao Wang](https://peihaowang.github.io/)<sup>1</sup>, [Huaizhi Qu](https://sites.google.com/view/qhz991029)<sup>4</sup>, [Dilin Wang](https://wdilin.github.io/)<sup>5</sup>, [Zhicheng Yan](https://sites.google.com/view/zhicheng-yan)<sup>5</sup>, [Hongyu Xu](https://hyxu2006.github.io/)<sup>5</sup>, [Justin Theiss](https://www.linkedin.com/in/justin-d-theiss)<sup>5</sup>, [Tianlong Chen](https://tianlong-chen.github.io/)<sup>4</sup>, [Jiachen Li](https://jiachenli94.github.io/)<sup>3</sup>, [Zhengzhong Tu](https://vztu.github.io/)<sup>2</sup>, [Zhangyang Wang](https://vita-group.github.io/research.html)<sup>1</sup>, [Rakesh Ranjan](https://www.linkedin.com/in/rakesh-r-3848538)<sup>5</sup>
+[Zhiwen Fan](https://zhiwenfan.github.io/)<sup>1,2&dagger;\*</sup>, [Jian Zhang](https://jzh15.github.io/)<sup>2\*</sup>, [Renjie Li](https://shadowiterator.github.io/)<sup>2</sup>, [Junge Zhang](https://andy-zd.github.io/)<sup>3</sup>, [Runjin Chen](https://chenrunjin.github.io/)<sup>1</sup>, [Hezhen Hu](https://alexhu.top/)<sup>1</sup>, [Kevin Wang](https://www.kevin-ai.com/)<sup>1</sup>, [Peihao Wang](https://peihaowang.github.io/)<sup>1</sup>, [Huaizhi Qu](https://sites.google.com/view/qhz991029)<sup>4</sup>, [Shijie Zhou](https://shijiezhou-ucla.github.io/)<sup>6</sup>, [Dilin Wang](https://wdilin.github.io/)<sup>5</sup>, [Zhicheng Yan](https://sites.google.com/view/zhicheng-yan)<sup>5</sup>, [Hongyu Xu](https://hyxu2006.github.io/)<sup>5</sup>, [Justin Theiss](https://www.linkedin.com/in/justin-d-theiss)<sup>5</sup>, [Tianlong Chen](https://tianlong-chen.github.io/)<sup>4</sup>, [Jiachen Li](https://jiachenli94.github.io/)<sup>3</sup>, [Zhengzhong Tu](https://vztu.github.io/)<sup>2</sup>, [Zhangyang Wang](https://vita-group.github.io/research.html)<sup>1</sup>, [Rakesh Ranjan](https://www.linkedin.com/in/rakesh-r-3848538)<sup>5</sup>
 
-¹UT Austin   ²TAMU   ³UCR   ⁴UNC   ⁵Meta
+¹UT Austin   ²TAMU   ³UCR   ⁴UNC   ⁵Meta   ⁶UCLA
 
 †Corresponding Author. \*Equal contribution.
 
@@ -319,7 +319,7 @@ If you find VLM-3R useful for your research, please consider citing our paper:
 ```bibtex
 @misc{fan2025vlm3rvisionlanguagemodelsaugmented,
       title={VLM-3R: Vision-Language Models Augmented with Instruction-Aligned 3D Reconstruction}, 
-      author={Zhiwen Fan and Jian Zhang and Renjie Li and Junge Zhang and Runjin Chen and Hezhen Hu and Kevin Wang and Huaizhi Qu and Dilin Wang and Zhicheng Yan and Hongyu Xu and Justin Theiss and Tianlong Chen and Jiachen Li and Zhengzhong Tu and Zhangyang Wang and Rakesh Ranjan},
+      author={Zhiwen Fan and Jian Zhang and Renjie Li and Junge Zhang and Runjin Chen and Hezhen Hu and Kevin Wang and Huaizhi Qu and Shijie Zhou and Dilin Wang and Zhicheng Yan and Hongyu Xu and Justin Theiss and Tianlong Chen and Jiachen Li and Zhengzhong Tu and Zhangyang Wang and Rakesh Ranjan},
       year={2025},
       eprint={2505.20279},
       archivePrefix={arXiv},
