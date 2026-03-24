@@ -168,7 +168,14 @@ class Vlm3r(lmms):
                 else:
                     self._max_length = 2048
             else:
-                self._tokenizer, self._model, self._image_processor, self._max_length = load_pretrained_model(pretrained, model_base, self.model_name, device_map=self.device_map, overwrite_config=overwrite_config)
+                self._tokenizer, self._model, self._image_processor, self._max_length = load_pretrained_model(
+                    pretrained,
+                    model_base,
+                    self.model_name,
+                    device_map=self.device_map,
+                    overwrite_config=overwrite_config,
+                    attn_implementation=attn_implementation,
+                )
         else:
             self._tokenizer, self._model, self._image_processor, self._max_length = load_pretrained_model(
                 pretrained,
