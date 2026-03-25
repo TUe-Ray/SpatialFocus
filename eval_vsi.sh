@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=dbg_vsi_eval_vlm3r_7b_qwen2_lora
+#SBATCH --job-name=Eval_VLM3R_7B_Qwen2_LoRA
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
 #SBATCH --cpus-per-task=32
-#SBATCH --time=00:30:00
+#SBATCH --time=05:00:00
 #SBATCH --partition=boost_usr_prod  
-#SBATCH --qos=boost_qos_dbg  # normal/boost_qos_dbg/boost_qos_bprod/boost_qos_Iprod
+#SBATCH --qos=normal  # normal/boost_qos_dbg/boost_qos_bprod/boost_qos_Iprod
 #SBATCH --output=logs/eval/%x_%j.out
 #SBATCH --error=logs/eval/%x_%j.err
 #SBATCH --mem=0
@@ -29,7 +29,7 @@ echo "CPUs per Task: $SLURM_CPUS_PER_TASK"
 echo "Tasks per Node: $SLURM_NTASKS_PER_NODE"
 echo "Partition: $SLURM_JOB_PARTITION"
 echo "QOS: $SLURM_JOB_QOS"
-echo "Memory per Node: $SLURM_MEM_PER_NODE"
+echo "Memory per Node: ${SLURM_MEM_PER_NODE:-N/A}"
 echo "Output: $SLURM_STDOUT"
 echo "Error: $SLURM_STDERR"
 echo "Job Time Limit: $JOB_TIME_LIMIT"
