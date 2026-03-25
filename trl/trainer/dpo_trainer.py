@@ -27,6 +27,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 from accelerate import PartialState
 from accelerate.utils import is_deepspeed_available, tqdm
+# from datasets import Dataset
+# selft
+import importlib.util
+import site
+import sys
+
+for p in reversed(site.getsitepackages()):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+#self
 from datasets import Dataset
 from torch.utils.data import DataLoader
 from transformers import (
