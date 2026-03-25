@@ -1969,6 +1969,7 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
         actual_model_class_name = f"{model_args.model_class_name}ForCausalLM"
         model_class = getattr(transformers, actual_model_class_name)
         rank0_print(f"Using model class {model_class} from {model_args.model_class_name}")
+        # Load Model
         model = model_class.from_pretrained(
             model_args.model_name_or_path,
             cache_dir=training_args.cache_dir,
