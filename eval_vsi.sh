@@ -1,10 +1,10 @@
 #!/bin/bash
-#SBATCH --job-name=Eval_VLM3R_7B_Qwen2_LoRA
+#SBATCH --job-name=Eval_1GPU_VLM3R_with_flashattn2
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
+#SBATCH --gpus-per-node=1           # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
-#SBATCH --cpus-per-task=32
-#SBATCH --time=05:00:00
+#SBATCH --cpus-per-task=8
+#SBATCH --time=16:00:00
 #SBATCH --partition=boost_usr_prod  
 #SBATCH --qos=normal  # normal/boost_qos_dbg/boost_qos_bprod/boost_qos_Iprod
 #SBATCH --output=logs/eval/%x_%j.out
@@ -13,7 +13,7 @@
 #SBATCH --exclude=lrdn0249,lrdn0612,lrdn0568,lrdn2400,lrdn0288,lrdn0418,lrdn0119,lrdn0159,,lrdn0080,lrdn0843
 
 
-NOTE="Eval VSI with vlm-3r-7b-qwen2-lora, pretrained by Journey9ni/vlm-3r-llava-qwen2-lora, model_base=lmms-lab/LLaVA-NeXT-Video-7B-Qwen2, conv_template=qwen_1_5, max_frames_num=32"
+NOTE="Eval VLM3r on 1 GPU  " 
 
 echo "-------- Note --------"
 echo "  note: $NOTE"
@@ -182,9 +182,9 @@ PY
 
 
 # === Start Evaluation ===
-accelerate launch --num_processes=4 -m lmms_eval \
+accelerate launch --num_processes=1 -m lmms_eval \
     --model vlm_3r \
-  --model_args "pretrained=$pretrained_ref,model_base=$model_base_ref,model_name=llava_qwen_lora,attn_implementation=sdpa,conv_template=qwen_1_5,max_frames_num=32" \
+    --model_args "pretrained=$pretrained_ref,model_base=$model_base_ref,model_name=llava_qwen_lora,attn_implementation=flash_attention_2,conv_template=qwen_1_5,max_frames_num=32" \
     --tasks vsibench \
     --batch_size 1 \
     --log_samples \
