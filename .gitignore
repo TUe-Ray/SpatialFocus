@@ -78,3 +78,13 @@ work_dirs_auto_eval/
 .hypothesis/
 
 .vscode/
+
+qa*.json
+merged*.json
+CLAUDE.md
+VLM-3R-DATA/
+
+
+# files
+train_4bvggt.sh
+settings.local.json
