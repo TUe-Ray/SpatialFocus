@@ -42,7 +42,7 @@ from transformers import AutoConfig
 from transformers import BitsAndBytesConfig
 from torch.utils.data import Dataset
 from llava.constants import IGNORE_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN, IMAGE_TOKEN_INDEX
-from llava.train.llava_trainer import LLaVATrainer
+from llava.train.llava_trainer import LLaVATrainer, ProgressLoggerCallback
 
 from llava import conversation as conversation_lib
 from llava.model import *
@@ -2376,6 +2376,7 @@ def train(attn_implementation=None):
 
     data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
     trainer = LLaVATrainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)
+    trainer.add_callback(ProgressLoggerCallback())
 
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
         trainer.train(resume_from_checkpoint=True)

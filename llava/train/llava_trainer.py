@@ -10,7 +10,7 @@ from torch.utils.data import Dataset, Sampler, DataLoader
 from trl.trainer import DPOTrainer
 from trl.trainer.utils import DPODataCollatorWithPadding
 
-from transformers import Trainer
+from transformers import Trainer, TrainerCallback, TrainerState, TrainerControl
 from transformers.trainer import is_sagemaker_mp_enabled, get_parameter_names, has_length, ALL_LAYERNORM_LAYERS, logger, is_accelerate_available, is_datasets_available, GradientAccumulationPlugin
 from transformers.trainer_utils import seed_worker
 from transformers.trainer_pt_utils import get_length_grouped_indices as get_length_grouped_indices_hf
@@ -25,6 +25,27 @@ if is_datasets_available():
     import datasets
 
 from llava.utils import rank0_print
+
+
+class ProgressLoggerCallback(TrainerCallback):
+    """Progress bar friendly for SLURM .out files (no carriage returns)."""
+
+    def on_log(self, args, state: TrainerState, control: TrainerControl, logs=None, **kwargs):
+        if not state.is_local_process_zero or logs is None:
+            return
+        step = state.global_step
+        max_steps = state.max_steps or 1
+        pct = 100.0 * step / max_steps
+        bar_len = 30
+        filled = int(bar_len * step / max_steps)
+        bar = "█" * filled + "░" * (bar_len - filled)
+        epoch = state.epoch or 0.0
+        loss = logs.get("loss", logs.get("train_loss"))
+        lr = logs.get("learning_rate")
+        loss_str = f" | loss={loss:.4f}" if isinstance(loss, float) else ""
+        lr_str = f" | lr={lr:.2e}" if isinstance(lr, float) else ""
+        print(f"[{bar}] {step}/{max_steps} ({pct:.1f}%) | epoch={epoch:.3f}{loss_str}{lr_str}", flush=True)
+
 
 # Borrowed from peft.utils.get_peft_model_state_dict
 def get_peft_state_maybe_zero_3(named_params, bias):
