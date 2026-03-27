@@ -28,13 +28,38 @@ from llava.utils import rank0_print
 
 
 class ProgressLoggerCallback(TrainerCallback):
-    """Progress bar friendly for SLURM .out files (no carriage returns)."""
+    """Progress bar friendly for SLURM .out files with ETA (no carriage returns)."""
+
+    def __init__(self):
+        super().__init__()
+        self.start_time = None
+
+    @staticmethod
+    def _format_time(seconds):
+        """Format seconds as HH:MM:SS."""
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+    def on_train_begin(self, args, state: TrainerState, control: TrainerControl, **kwargs):
+        """Record the start time when training begins."""
+        import time
+        self.start_time = time.time()
 
     def on_log(self, args, state: TrainerState, control: TrainerControl, logs=None, **kwargs):
-        if not state.is_world_process_zero or logs is None:
+        if not state.is_world_process_zero or logs is None or self.start_time is None:
             return
+
+        import time
+        elapsed = time.time() - self.start_time
         step = state.global_step
         max_steps = state.max_steps or 1
+
+        # Avoid division by zero
+        if step == 0:
+            return
+
         pct = 100.0 * step / max_steps
         bar_len = 30
         filled = int(bar_len * step / max_steps)
@@ -42,9 +67,20 @@ class ProgressLoggerCallback(TrainerCallback):
         epoch = state.epoch or 0.0
         loss = logs.get("loss", logs.get("train_loss"))
         lr = logs.get("learning_rate")
+
+        # Calculate timing
+        avg_time_per_step = elapsed / step
+        remaining_steps = max_steps - step
+        eta_seconds = avg_time_per_step * remaining_steps
+
+        elapsed_str = self._format_time(elapsed)
+        eta_str = self._format_time(eta_seconds)
+        speed_str = f"{avg_time_per_step:.2f}s/it"
+
         loss_str = f" | loss={loss:.4f}" if isinstance(loss, float) else ""
         lr_str = f" | lr={lr:.2e}" if isinstance(lr, float) else ""
-        print(f"[{bar}] {step}/{max_steps} ({pct:.1f}%) | epoch={epoch:.3f}{loss_str}{lr_str}", flush=True)
+
+        print(f"[{bar}] {step}/{max_steps} ({pct:.1f}%) [{elapsed_str}<{eta_str}, {speed_str}] | epoch={epoch:.3f}{loss_str}{lr_str}", flush=True)
 
 
 # Borrowed from peft.utils.get_peft_model_state_dict
