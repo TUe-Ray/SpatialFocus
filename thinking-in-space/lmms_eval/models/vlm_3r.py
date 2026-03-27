@@ -187,6 +187,14 @@ class Vlm3r(lmms):
             )
 
         self._config = self._model.config
+        resolved_attn_implementation = getattr(self._config, "_attn_implementation", None)
+        if resolved_attn_implementation is None:
+            resolved_attn_implementation = getattr(self._config, "attn_implementation", None)
+        eval_logger.info(
+            "[ATTN][EVAL] requested_attn_implementation={}, resolved_attn_implementation={}",
+            self.attn_implementation,
+            resolved_attn_implementation,
+        )
         self.model.eval()
         if tie_weights:
             self.model.tie_weights()

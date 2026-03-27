@@ -2083,6 +2083,7 @@ def train(attn_implementation=None):
 
     parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    rank0_print(f"[ATTN] attn_implementation={training_args.attn_implementation}")
 
     # 设置随机种子以保证可复现性
     seed = training_args.seed
