@@ -1,10 +1,10 @@
 #!/bin/bash
-#SBATCH --job-name=TrainVSI
+#SBATCH --job-name=Reproduction_VLM3R
 #SBATCH --nodes=4
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
 #SBATCH --cpus-per-task=32
-#SBATCH --time=7:00:00
+#SBATCH --time=16:00:00
 #SBATCH --partition=boost_usr_prod  
 #SBATCH --qos=normal # normal/boost_qos_dbg/boost_qos_bprod/boost_qos_Iprod
 #SBATCH --output=logs/train/%x_%j.out
@@ -14,8 +14,7 @@
 #SBATCH --exclusive
 
 
-NOTE="Test run for VLM-3R 7B Qwen2 LoRA on VSI-Bench, pretrained by Journey9ni/vlm-3r-llava-qwen2-lora, model_base=lmms-lab/LLaVA-NeXT-Video-7B-Qwen2, conv_template=qwen_1_5, max_frames_num=32"
-
+NOTE="Reproducing VLM-3R training on 4 nodes x 4 GPUs with FlashAttention2 and LoRA. " 
 echo "-------- Note --------"
 echo "  note: $NOTE"
 
@@ -111,14 +110,26 @@ echo "[DDP] MASTER_PORT=$MASTER_PORT"
 echo "[DDP] NNODES=$NNODES"
 echo "[DDP] NUM_GPUS_PER_NODE=$NUM_GPUS_PER_NODE WORLD_SIZE=$WORLD_SIZE"
 
+
+
 # ============================================================
-# Resume Configuration
+# Save/Resume Configuration
 # ============================================================
-# Set to "none" for fresh training (default).
-# Set to "auto" to find the latest checkpoint-* in OUTPUT_DIR.
-# Set to an explicit path (e.g. "work_dirs.../checkpoint-500") to
-#   resume from that exact checkpoint.
-RESUME_CHECKPOINT_PATH="none"
+# Root folder where all run folders are stored.
+TRAIN_SAVE_ROOT="${TRAIN_SAVE_ROOT:-/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/train}"
+# Custom run folder name. You can override when submitting:
+#   sbatch --export=ALL,TRAIN_RUN_NAME=my_run train_vsi.sh
+TRAIN_RUN_NAME="${TRAIN_RUN_NAME:-}"
+
+# Resume mode:
+#   fresh    -> start new training (default)
+#   continue -> resume from latest checkpoint-* under OUTPUT_DIR
+RESUME_MODE="${RESUME_MODE:-fresh}"
+
+# Optional explicit checkpoint path. If set (and not "none"), it overrides RESUME_MODE.
+# Example:
+#   sbatch --export=ALL,RESUME_CHECKPOINT_PATH=/path/to/checkpoint-1000 train_vsi.sh
+RESUME_CHECKPOINT_PATH="${RESUME_CHECKPOINT_PATH:-none}"
 export RESUME_CHECKPOINT_PATH  # read by train.py
 
 # Reproducibility seed (used by HF Trainer for data shuffling & RNG).
@@ -126,9 +137,24 @@ SEED=42
 
 # Set up training config
 SUFFIX="vlm_3r_vsibench_all_tokens_cross_attn_lora"
-MID_RUN_NAME="llava_video_7b_qwen2_${SUFFIX}"
-OUTPUT_DIR="work_dirs_auto_eval/$MID_RUN_NAME"
+DEFAULT_RUN_NAME="llava_video_7b_qwen2_${SUFFIX}"
+if [[ -n "$TRAIN_RUN_NAME" ]]; then
+    MID_RUN_NAME="$TRAIN_RUN_NAME"
+else
+    MID_RUN_NAME="$DEFAULT_RUN_NAME"
+fi
+OUTPUT_DIR="$TRAIN_SAVE_ROOT/$MID_RUN_NAME"
 mkdir -p "$OUTPUT_DIR"
+
+# Derive resume behavior after OUTPUT_DIR is known.
+if [[ "$RESUME_CHECKPOINT_PATH" == "none" ]]; then
+    if [[ "$RESUME_MODE" == "continue" ]]; then
+        RESUME_CHECKPOINT_PATH="auto"
+    else
+        RESUME_CHECKPOINT_PATH="none"
+    fi
+fi
+export RESUME_CHECKPOINT_PATH
 
 LOCAL_MODEL_BASE="/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/LLaVA-NeXT-Video-7B-Qwen2"
 LOCAL_SIGLIP="/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/siglip-so400m-patch14-384"
@@ -214,7 +240,7 @@ declare -A TRAINING_ARGS=(
     [evaluation_strategy]="no"
     #[save_strategy]="epoch"
     [save_strategy]="steps"
-    [save_steps]="500"
+    [save_steps]="100"  # Save every 100 steps, adjust as needed
     [learning_rate]="2e-5"
     [weight_decay]="0."
     [warmup_ratio]="0.03"
@@ -232,6 +258,10 @@ echo " Training Configuration"
 echo "========================================"
 
 echo "--- Resume ---"
+echo "  TRAIN_SAVE_ROOT:                     $TRAIN_SAVE_ROOT"
+echo "  TRAIN_RUN_NAME:                      $MID_RUN_NAME"
+echo "  OUTPUT_DIR:                          $OUTPUT_DIR"
+echo "  RESUME_MODE:                         $RESUME_MODE"
 echo "  RESUME_CHECKPOINT_PATH:             $RESUME_CHECKPOINT_PATH"
 echo "  SEED:                               $SEED"
 if [[ "$RESUME_CHECKPOINT_PATH" != "none" ]]; then
