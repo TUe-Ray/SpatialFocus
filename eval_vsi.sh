@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=Eval_1GPU_VLM3R_with_flashattn2
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=1           # 依你的叢集格式：也可能是 --gpus-per-node=1
+#SBATCH --gpus-per-node=4           # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
 #SBATCH --cpus-per-task=8
 #SBATCH --time=16:00:00
@@ -182,7 +182,7 @@ PY
 
 
 # === Start Evaluation ===
-accelerate launch --num_processes=1 -m lmms_eval \
+accelerate launch --num_processes=4 -m lmms_eval \
     --model vlm_3r \
     --model_args "pretrained=$pretrained_ref,model_base=$model_base_ref,model_name=llava_qwen_lora,attn_implementation=flash_attention_2,conv_template=qwen_1_5,max_frames_num=32" \
     --tasks vsibench \
