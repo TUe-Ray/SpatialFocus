@@ -252,6 +252,7 @@ class DataArguments:
     frames_upbound: Optional[int] = field(default=0)
     add_time_instruction: Optional[bool] = field(default=False)
     force_sample: Optional[bool] = field(default=False)
+    zero_spatial_features: Optional[bool] = field(default=False, metadata={"help": "If True, zero out all loaded spatial feature tensors from .pt files for ablation."})
 
 
 @dataclass
@@ -1140,6 +1141,18 @@ def preprocess(sources: Sequence[str], tokenizer: transformers.PreTrainedTokeniz
     return dict(input_ids=input_ids, labels=targets)
 
 
+def zero_nested_tensors(value):
+    if isinstance(value, torch.Tensor):
+        return torch.zeros_like(value)
+    if isinstance(value, dict):
+        return {k: zero_nested_tensors(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [zero_nested_tensors(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(zero_nested_tensors(v) for v in value)
+    return value
+
+
 class LazySupervisedDataset(Dataset):
     def __init__(self, data_path: str, tokenizer: transformers.PreTrainedTokenizer, data_args: DataArguments):
         super(LazySupervisedDataset, self).__init__()
@@ -1870,6 +1883,8 @@ class LazySupervisedDataset(Dataset):
             spatial_features_path = os.path.join(video_folder, self.list_data_dict[i]['video'].replace('.mp4', '.pt').replace('videos', 'spatial_features'))
             if os.path.exists(spatial_features_path):
                 spatial_features = torch.load(spatial_features_path)
+                if self.data_args.zero_spatial_features:
+                    spatial_features = zero_nested_tensors(spatial_features)
                 data_dict["spatial_features"] = spatial_features
 
         # add point cloud
@@ -2148,6 +2163,7 @@ def train(attn_implementation=None):
     parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     rank0_print(f"[ATTN] attn_implementation={training_args.attn_implementation}")
+    rank0_print(f"[ABLATION] zero_spatial_features={data_args.zero_spatial_features}")
 
     # 设置随机种子以保证可复现性
     seed = training_args.seed

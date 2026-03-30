@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=Reproduction_VLM3R
+#SBATCH --job-name=Abla_zero_spatial_features
 #SBATCH --nodes=4
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
@@ -17,7 +17,7 @@
 # ============================================================
 # User-defined variables: General
 # ============================================================
-NOTE="Reproducing VLM-3R training on 4 nodes x 4 GPUs with FlashAttention2 and LoRA."
+NOTE="Ablation: zero spatial features. This run trains VLM3R on VSI-Bench with 4 GPU, flash attention 2, max_frames_num=32, and local SigLIP. This is a reproduction run for the paper."
 CONDA_ENV_NAME="vlm3r"
 
 # ============================================================
@@ -28,7 +28,7 @@ LOCAL_SIGLIP="/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/siglip-so400m
 DATA_ROOT="/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r"
 
 TRAIN_SAVE_ROOT="/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/train"
-TRAIN_RUN_NAME=""
+TRAIN_RUN_NAME="zero_spatial_features"
 
 WANDB_DIR="$WORK/wandb"
 WANDB_CACHE_DIR="$WORK/wandb_cache"
@@ -43,13 +43,13 @@ HUGGINGFACE_HUB_CACHE="$HF_HOME/hub"
 # ============================================================
 RESUME_MODE="fresh"                 # choices: fresh / continue
 RESUME_CHECKPOINT_PATH="none"       # e.g. /path/to/checkpoint-1000
-ZERO_SPATIAL_FEATURES="False"       # choices: False / True
+ZERO_SPATIAL_FEATURES="True"        # choices: False / True
 SEED=42
 
 # ============================================================
 # User-defined variables: Model/Data/Training presets
 # ============================================================
-SUFFIX="vlm_3r_vsibench_all_tokens_cross_attn_lora"
+SUFFIX="vlm_3r_vsibench_zero_spatial_features_cross_attn_lora"
 
 MODEL_LORA_ENABLE="True"
 MODEL_LORA_R="128"

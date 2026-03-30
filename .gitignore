@@ -88,3 +88,5 @@ VLM-3R-DATA/
 # files
 train_4bvggt.sh
 settings.local.json
+bash_eval_vsi.sh
+setup_vsibench_vlm3r.sh
