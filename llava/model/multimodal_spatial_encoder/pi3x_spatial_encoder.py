@@ -221,6 +221,9 @@ class Pi3xSpatialTower(nn.Module):
         self.is_loaded = True
 
     def forward(self, images):
+        if not self.is_loaded or not hasattr(self, "spatial_tower"):
+            self.load_model()
+
         if type(images) is list:
             image_features = []
             for image in images:

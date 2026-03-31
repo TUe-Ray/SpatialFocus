@@ -10,13 +10,33 @@
 import logging
 import os
 import warnings
+from contextlib import nullcontext
 
 from torch import Tensor
 from torch import nn
 import torch
 
 from torch.nn.functional import scaled_dot_product_attention
-from torch.nn.attention import SDPBackend
+
+try:
+    # PyTorch >= 2.2 API
+    from torch.nn.attention import SDPBackend, sdpa_kernel as _sdpa_kernel
+
+    def _select_sdpa_kernel(use_flash: bool):
+        if use_flash:
+            return _sdpa_kernel(SDPBackend.FLASH_ATTENTION)
+        return _sdpa_kernel([SDPBackend.MATH, SDPBackend.EFFICIENT_ATTENTION])
+
+except ImportError:
+    # PyTorch 2.0/2.1 API fallback
+    from torch.backends.cuda import sdp_kernel as _sdp_kernel
+
+    def _select_sdpa_kernel(use_flash: bool):
+        if not torch.cuda.is_available():
+            return nullcontext()
+        if use_flash:
+            return _sdp_kernel(enable_flash=True, enable_math=False, enable_mem_efficient=False)
+        return _sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=True)
 
 XFORMERS_ENABLED = os.environ.get("XFORMERS_DISABLED") is None
 try:
@@ -99,12 +119,8 @@ class FlashAttention(Attention):
         # q, k, v = unbind(qkv, 2)
         q, k, v = [qkv[:,:,i] for i in range(3)]
 
-        if q.dtype == torch.bfloat16:
-            with nn.attention.sdpa_kernel(SDPBackend.FLASH_ATTENTION):
-                x = scaled_dot_product_attention(q, k, v)
-        else:
-            with nn.attention.sdpa_kernel([SDPBackend.MATH, SDPBackend.EFFICIENT_ATTENTION]):
-                x = scaled_dot_product_attention(q, k, v)
+        with _select_sdpa_kernel(q.dtype == torch.bfloat16):
+            x = scaled_dot_product_attention(q, k, v)
 
         x = x.transpose(1, 2).reshape([B, N, C])
 
@@ -333,12 +349,8 @@ class FlashAttentionRope(AttentionRope):
             q = self.rope(q, xpos)
             k = self.rope(k, xpos)
 
-        if q.dtype == torch.bfloat16:
-            with nn.attention.sdpa_kernel(SDPBackend.FLASH_ATTENTION):
-                x = scaled_dot_product_attention(q, k, v)
-        else:
-            with nn.attention.sdpa_kernel([SDPBackend.MATH, SDPBackend.EFFICIENT_ATTENTION]):
-                x = scaled_dot_product_attention(q, k, v)
+        with _select_sdpa_kernel(q.dtype == torch.bfloat16):
+            x = scaled_dot_product_attention(q, k, v)
 
         x = x.transpose(1, 2).reshape([B, N, C])
 

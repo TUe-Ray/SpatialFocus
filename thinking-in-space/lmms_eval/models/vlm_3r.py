@@ -81,6 +81,7 @@ class Vlm3r(lmms):
         tie_weights: bool = True,
         model_name: str = None,
         model_base: str = None,
+        zero_spatial_features: Union[bool, str] = False,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -115,6 +116,10 @@ class Vlm3r(lmms):
         self.mm_newline_position = mm_newline_position
         self.delay_load = delay_load
         self.attn_implementation = attn_implementation
+        if isinstance(zero_spatial_features, str):
+            self.zero_spatial_features = zero_spatial_features.lower() in {"1", "true", "yes", "y", "on"}
+        else:
+            self.zero_spatial_features = bool(zero_spatial_features)
 
         if self.overwrite == True:
             overwrite_config = {}
@@ -126,6 +131,7 @@ class Vlm3r(lmms):
             overwrite_config["mm_newline_position"] = self.mm_newline_position
             overwrite_config["add_faster_video"] = False
             overwrite_config["delay_load"] = self.delay_load
+            overwrite_config["zero_spatial_features"] = self.zero_spatial_features
             # overwrite_config["attn_implementation"] = attn_implementation
 
             cfg_pretrained = AutoConfig.from_pretrained(self.pretrained)
@@ -204,6 +210,7 @@ class Vlm3r(lmms):
             )
 
         self._config = self._model.config
+        setattr(self._config, "zero_spatial_features", self.zero_spatial_features)
         resolved_attn_implementation = getattr(self._config, "_attn_implementation", None)
         if resolved_attn_implementation is None:
             resolved_attn_implementation = getattr(self._config, "attn_implementation", None)
@@ -212,6 +219,7 @@ class Vlm3r(lmms):
             self.attn_implementation,
             resolved_attn_implementation,
         )
+        eval_logger.info("[ABLATION][EVAL] zero_spatial_features={}", self.zero_spatial_features)
         self.model.eval()
         if tie_weights:
             self.model.tie_weights()

@@ -81,7 +81,9 @@ class LlavaMetaModel:
         self.config.mm_spatial_tower = cli_spatial_tower
 
         if self.get_spatial_tower() is None:
-            spatial_tower = build_spatial_tower(model_args)
+            # When creating the spatial tower for the first time, force eager load.
+            # Otherwise some towers keep only config (delay_load=True) and fail at first forward.
+            spatial_tower = build_spatial_tower(model_args, delay_load=False)
 
             if hasattr(spatial_tower.config, "to_dict"):
                 cfg_dict = spatial_tower.config.to_dict()
@@ -343,7 +345,18 @@ class LlavaMetaForCausalLM(ABC):
                 image_features = self.get_model().mm_projector(image_features)
             
             else:
-                if spatial_features is not None and 'cut3r' in spatial_encoder_type:
+                zero_spatial_features = getattr(self.get_model().config, "zero_spatial_features", False)
+                if isinstance(zero_spatial_features, str):
+                    zero_spatial_features = zero_spatial_features.lower() in {"1", "true", "yes", "y", "on"}
+
+                if zero_spatial_features and spatial_encoder_type is not None and 'cut3r' in spatial_encoder_type:
+                    # Ablation mode: skip spatial tower forward and use zero tokens with CUT3R-compatible shapes.
+                    batch_frames = image_features.shape[0]
+                    patch_token_num = image_features.shape[1]
+                    spatial_dim = int(getattr(self.get_model().config, "spatial_feature_dim", 768))
+                    camera_tokens = image_features.new_zeros((batch_frames, 1, spatial_dim))
+                    patch_tokens = image_features.new_zeros((batch_frames, patch_token_num, spatial_dim))
+                elif spatial_features is not None and 'cut3r' in spatial_encoder_type:
                     camera_tokens, patch_tokens = spatial_features[0]["camera_tokens"], spatial_features[0]["patch_tokens"]
                 else:
                     camera_tokens, patch_tokens = self.get_model().get_spatial_tower()(images)
