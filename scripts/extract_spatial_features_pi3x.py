@@ -20,7 +20,6 @@ from typing import Optional
 from llava.model.multimodal_encoder.siglip_encoder import SigLipImageProcessor # Added direct import
 
 # Add imports for direct spatial tower loading
-from llava.model.multimodal_spatial_encoder.cut3r_spatial_encoder import Cut3rSpatialConfig, Cut3rEncoder
 from llava.model.multimodal_spatial_encoder.pi3x_spatial_encoder import Pi3xSpatialConfig, Pi3xEncoder
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -153,17 +152,6 @@ def get_output_path(input_file_path: Path, input_base_dir: Path, output_base_dir
     output_filename_path = output_base_dir / relative_path.with_suffix('.pt')
     return output_filename_path
 
-def get_point_cloud_output_path(input_file_path: Path, input_base_dir: Path, point_cloud_output_base_dir: Path) -> Path:
-    """Calculates the output path for the point cloud corresponding to an input file."""
-    try:
-        relative_path = input_file_path.relative_to(input_base_dir)
-    except ValueError:
-        rank0_print(f"Warning: Input file {input_file_path} is not within the specified base input directory {input_base_dir}. Outputting point cloud directly to {point_cloud_output_base_dir}.")
-        relative_path = input_file_path.name # Use only the filename
-
-    # Change extension to .ply
-    output_filename_path = point_cloud_output_base_dir / relative_path.with_suffix('.ply')
-    return output_filename_path
 
 def get_preprocessed_frames_output_dir(input_file_path: Path, input_base_dir: Path, frames_output_base_dir: Path) -> Path:
     """Calculates the output directory for the preprocessed frames corresponding to an input file."""
@@ -198,40 +186,19 @@ def process_videos_on_gpu(rank, gpu_id, args, video_files_chunk, input_base_dir,
 
     # -- Load Model Components (within each worker process) --
     try:
-        if args.spatial_encoder == "cut3r":
-            rank0_print(f"[GPU {gpu_id}] Loading CUT3R Spatial Tower...")
-            if not args.cut3r_weights_path or not os.path.exists(args.cut3r_weights_path):
-                rank0_print(f"[GPU {gpu_id}] ERROR: CUT3R weights file not found at: {args.cut3r_weights_path}")
-                return 0, total_files_in_chunk
-
-            cut3r_config = Cut3rSpatialConfig(
-                weights_path=args.cut3r_weights_path,
-                export_point_cloud=args.export_point_cloud,
-                point_cloud_output_dir=args.point_cloud_output_dir,
-                point_cloud_voxel_size=args.point_cloud_voxel_size
-            )
-            spatial_tower = Cut3rEncoder(config=cut3r_config)
-            target_size = (432, 432)
-            rank0_print(f"[GPU {gpu_id}] CUT3R Spatial Tower initialized.")
-        elif args.spatial_encoder == "pi3x":
-            rank0_print(f"[GPU {gpu_id}] Loading PI3X Spatial Tower...")
-            if not args.pi3x_weights_path or not os.path.exists(args.pi3x_weights_path):
-                rank0_print(f"[GPU {gpu_id}] ERROR: PI3X weights path not found: {args.pi3x_weights_path}")
-                return 0, total_files_in_chunk
-
-            pi3x_config = Pi3xSpatialConfig(
-                weights_path=args.pi3x_weights_path,
-                input_size=args.pi3x_input_size,
-            )
-            spatial_tower = Pi3xEncoder(config=pi3x_config)
-            # PI3X tower handles internal resize to input_size.
-            target_size = None
-            if args.export_point_cloud:
-                rank0_print(f"[GPU {gpu_id}] Warning: --export-point-cloud is CUT3R-only and will be ignored for PI3X.")
-            rank0_print(f"[GPU {gpu_id}] PI3X Spatial Tower initialized.")
-        else:
-            rank0_print(f"[GPU {gpu_id}] ERROR: Unsupported spatial encoder '{args.spatial_encoder}'.")
+        rank0_print(f"[GPU {gpu_id}] Loading PI3X Spatial Tower...")
+        if not args.pi3x_weights_path or not os.path.exists(args.pi3x_weights_path):
+            rank0_print(f"[GPU {gpu_id}] ERROR: PI3X weights path not found: {args.pi3x_weights_path}")
             return 0, total_files_in_chunk
+
+        pi3x_config = Pi3xSpatialConfig(
+            weights_path=args.pi3x_weights_path,
+            input_size=args.pi3x_input_size,
+        )
+        spatial_tower = Pi3xEncoder(config=pi3x_config)
+        # PI3X tower handles internal resize to input_size.
+        target_size = None
+        rank0_print(f"[GPU {gpu_id}] PI3X Spatial Tower initialized.")
 
         model_dtype = torch.bfloat16 if args.precision == 'bf16' else torch.float16 if args.precision == 'fp16' else torch.float32
         spatial_tower.to(device=device, dtype=model_dtype).eval()
@@ -284,12 +251,9 @@ def process_videos_on_gpu(rank, gpu_id, args, video_files_chunk, input_base_dir,
         batch_paths = [Path(p) for p in batch_paths_str]
 
         # --- Batch Preprocessing ---
-        batch_data_to_process = [] # Stores (preprocessed_input, feature_output_filename, point_cloud_output_filename, video_full_path)
+        batch_data_to_process = [] # Stores (preprocessed_input, feature_output_filename, video_full_path)
         files_in_batch = 0
         skipped_in_batch = 0
-        max_frames_in_batch = 0
-        use_point_cloud = args.spatial_encoder == "cut3r" and args.export_point_cloud
-        point_cloud_base_dir = Path(args.point_cloud_output_dir) if use_point_cloud else None
         frames_base_dir = Path(args.save_preprocessed_frames_dir) if args.save_preprocessed_frames else None
 
         for video_full_path in batch_paths:
@@ -297,31 +261,13 @@ def process_videos_on_gpu(rank, gpu_id, args, video_files_chunk, input_base_dir,
             feature_output_filename_path = get_output_path(video_full_path, input_base_dir, output_dir)
             feature_output_filename = str(feature_output_filename_path)
 
-            point_cloud_output_filename = None
-            if use_point_cloud and point_cloud_base_dir:
-                point_cloud_output_filename_path = get_point_cloud_output_path(video_full_path, input_base_dir, point_cloud_base_dir)
-                point_cloud_output_filename = str(point_cloud_output_filename_path)
-                # Ensure parent dir for point cloud exists
-                point_cloud_output_filename_path.parent.mkdir(parents=True, exist_ok=True)
-
-
             # Check feature file existence
             feature_output_filename_path.parent.mkdir(parents=True, exist_ok=True)
             feature_exists = os.path.exists(feature_output_filename)
 
-            # Check point cloud existence (if exporting)
-            point_cloud_exists = False
-            if use_point_cloud and point_cloud_output_filename:
-                point_cloud_exists = os.path.exists(point_cloud_output_filename)
-
-            # Determine if skipping is needed
-            # Skip if NOT overwriting AND (feature exists AND (point cloud exists OR not exporting point cloud))
-            should_skip = not args.overwrite and (feature_exists and (point_cloud_exists or not use_point_cloud))
-
-            if should_skip:
+            if not args.overwrite and feature_exists:
                 skipped_in_batch += 1
                 continue
-
 
             preprocessed_input = load_and_preprocess_video_frames(
                 str(video_full_path),
@@ -332,9 +278,6 @@ def process_videos_on_gpu(rank, gpu_id, args, video_files_chunk, input_base_dir,
             )
 
             if preprocessed_input is not None and preprocessed_input.nelement() > 0:
-                # Store point cloud path only if exporting
-                pc_path_to_store = point_cloud_output_filename if args.export_point_cloud else None
-
                 # --- Save Preprocessed Frames (if enabled) ---
                 if args.save_preprocessed_frames and frames_base_dir is not None and mean_tensor is not None and std_tensor is not None:
                     try:
@@ -344,140 +287,46 @@ def process_videos_on_gpu(rank, gpu_id, args, video_files_chunk, input_base_dir,
                             frames_output_dir_path = get_preprocessed_frames_output_dir(video_full_path, input_base_dir, frames_base_dir)
                         frames_output_dir_path.mkdir(parents=True, exist_ok=True)
 
-                        # De-normalize and save each frame
-                        # Move tensor to CPU for processing/saving if it isn't already
-                        # Note: preprocessed_input is on CPU from load_and_preprocess...
-                        preprocessed_input_float = preprocessed_input.float() # Ensure float32 for calculation
+                        preprocessed_input_float = preprocessed_input.float()
                         for frame_idx in range(preprocessed_input_float.shape[0]):
-                            frame_tensor = preprocessed_input_float[frame_idx] # Shape (C, H, W)
-
-                            # De-normalize: (tensor * std + mean) / rescale_factor
-                            # Assuming rescale_factor = 1/255.0
-                            # (tensor * std + mean) * 255.0
-                            # Move mean/std to the frame's device (likely CPU here)
+                            frame_tensor = preprocessed_input_float[frame_idx]
                             denormalized_frame = (frame_tensor * std_tensor.to(frame_tensor.device) + mean_tensor.to(frame_tensor.device)) / rescale_factor_val
-
-                            # Clamp and convert to uint8
                             denormalized_frame = torch.clamp(denormalized_frame, 0, 255).to(torch.uint8)
-
-                            # Convert to PIL Image (C, H, W) -> (H, W, C)
                             pil_image = Image.fromarray(denormalized_frame.permute(1, 2, 0).cpu().numpy())
-
-                            # Construct filename
                             frame_filename = frames_output_dir_path / f"frame_{frame_idx:04d}.png"
-
-                            # Save the image
                             pil_image.save(frame_filename)
 
                     except Exception as e_save_frame:
                         rank0_print(f"[GPU {gpu_id}] Error saving preprocessed frame for {video_full_path}, frame {frame_idx}: {e_save_frame}")
-                        # Continue processing other frames/videos
 
-                # Append data for batch inference
-                batch_data_to_process.append((preprocessed_input, feature_output_filename, pc_path_to_store, video_full_path))
-                max_frames_in_batch = max(max_frames_in_batch, preprocessed_input.shape[0])
+                batch_data_to_process.append((preprocessed_input, feature_output_filename, video_full_path))
             else:
                 rank0_print(f"[GPU {gpu_id}] Failed to load/preprocess {video_full_path}. Skipping.")
                 skipped_in_batch += 1
 
-        # --- Batch Inference ---
+        # --- Batch Inference (PI3X processes one video at a time) ---
         processed_in_batch = 0
         if batch_data_to_process:
-            if args.spatial_encoder == "cut3r":
-                padded_tensors = []
-                output_info = []
-
-                for preprocessed_input, feature_output_filename, point_cloud_output_filename, video_full_path in batch_data_to_process:
-                    num_frames = preprocessed_input.shape[0]
-                    padding_needed = max_frames_in_batch - num_frames
-                    padded_tensor = torch.nn.functional.pad(
-                        preprocessed_input,
-                        (0, 0, 0, 0, 0, 0, 0, padding_needed),
-                        mode='constant',
-                        value=0
-                    )
-                    padded_tensors.append(padded_tensor)
-                    output_info.append((feature_output_filename, point_cloud_output_filename, video_full_path))
-
-                batch_tensor = torch.stack(padded_tensors, dim=0).to(device=device, dtype=model_dtype)
-                point_cloud_paths_for_batch = [info[1] for info in output_info] if use_point_cloud else None
-
-                B = batch_tensor.shape[0]
-                F_max = batch_tensor.shape[1]
-
+            for preprocessed_input, feature_output_filename, video_full_path in batch_data_to_process:
                 try:
                     with torch.no_grad():
-                        spatial_input = batch_tensor.permute(1, 0, 2, 3, 4)
-                        camera_tokens_batch, patch_tokens_batch = spatial_tower(
-                            spatial_input,
-                            point_cloud_output_paths=point_cloud_paths_for_batch
+                        camera_tokens, patch_tokens = spatial_tower(
+                            preprocessed_input.to(device=device, dtype=model_dtype)
                         )
-
-                    expected_output_len = B * F_max
-                    if camera_tokens_batch.shape[0] != expected_output_len:
-                        rank0_print(
-                            f"[GPU {gpu_id}] Warning: Output dimension mismatch. "
-                            f"Expected first dim {expected_output_len} but got {camera_tokens_batch.shape[0]}. "
-                            f"camera_tokens={tuple(camera_tokens_batch.shape)}, "
-                            f"patch_tokens={tuple(patch_tokens_batch.shape)}. Skipping save for this batch."
-                        )
-                        skipped_in_batch += B
-                    else:
-                        _, token_num_cam, token_dim_cam = camera_tokens_batch.shape
-                        _, token_num_patch, token_dim_patch = patch_tokens_batch.shape
-
-                        camera_tokens_reshaped = camera_tokens_batch.view(B, F_max, token_num_cam, token_dim_cam)
-                        patch_tokens_reshaped = patch_tokens_batch.view(B, F_max, token_num_patch, token_dim_patch)
-
-                        for idx, (feature_output_filename, _point_cloud_output_filename, video_full_path) in enumerate(output_info):
-                            try:
-                                features_to_save = {
-                                    "camera_tokens": camera_tokens_reshaped[idx].cpu(),
-                                    "patch_tokens": patch_tokens_reshaped[idx].cpu()
-                                }
-                                torch.save(features_to_save, feature_output_filename)
-                                processed_in_batch += 1
-
-                            except Exception as e_save:
-                                rank0_print(
-                                    f"[GPU {gpu_id}] Error saving features for {video_full_path} "
-                                    f"(point cloud saving handled separately): {e_save}"
-                                )
-                                skipped_in_batch += 1
-
-                                if os.path.exists(feature_output_filename):
-                                    try:
-                                        os.remove(feature_output_filename)
-                                    except OSError:
-                                        rank0_print(
-                                            f"Warning: Could not remove potentially corrupted file {feature_output_filename}"
-                                        )
-
-                except Exception as e_batch:
-                    rank0_print(f"[GPU {gpu_id}] Error during CUT3R batch inference: {e_batch}\n{traceback.format_exc()}")
-                    skipped_in_batch += len(batch_data_to_process) - processed_in_batch
-
-            elif args.spatial_encoder == "pi3x":
-                for preprocessed_input, feature_output_filename, _point_cloud_output_filename, video_full_path in batch_data_to_process:
-                    try:
-                        with torch.no_grad():
-                            camera_tokens, patch_tokens = spatial_tower(
-                                preprocessed_input.to(device=device, dtype=model_dtype)
-                            )
-                        features_to_save = {
-                            "camera_tokens": camera_tokens.cpu(),
-                            "patch_tokens": patch_tokens.cpu()
-                        }
-                        torch.save(features_to_save, feature_output_filename)
-                        processed_in_batch += 1
-                    except Exception as e_pi3x:
-                        rank0_print(f"[GPU {gpu_id}] Error during PI3X inference/save for {video_full_path}: {e_pi3x}\n{traceback.format_exc()}")
-                        skipped_in_batch += 1
-                        if os.path.exists(feature_output_filename):
-                            try:
-                                os.remove(feature_output_filename)
-                            except OSError:
-                                rank0_print(f"Warning: Could not remove potentially corrupted file {feature_output_filename}")
+                    features_to_save = {
+                        "camera_tokens": camera_tokens.cpu(),
+                        "patch_tokens": patch_tokens.cpu()
+                    }
+                    torch.save(features_to_save, feature_output_filename)
+                    processed_in_batch += 1
+                except Exception as e_pi3x:
+                    rank0_print(f"[GPU {gpu_id}] Error during PI3X inference/save for {video_full_path}: {e_pi3x}\n{traceback.format_exc()}")
+                    skipped_in_batch += 1
+                    if os.path.exists(feature_output_filename):
+                        try:
+                            os.remove(feature_output_filename)
+                        except OSError:
+                            rank0_print(f"Warning: Could not remove potentially corrupted file {feature_output_filename}")
 
         processed_count += processed_in_batch
         skipped_count += skipped_in_batch
@@ -498,25 +347,19 @@ def process_videos_on_gpu(rank, gpu_id, args, video_files_chunk, input_base_dir,
 if __name__ == "__main__":
     mp.set_start_method('spawn', force=True) # Recommended for CUDA with multiprocessing
 
-    parser = argparse.ArgumentParser(description="Extract Spatial Features using CUT3R or PI3X (Multi-GPU)")
-    parser.add_argument("--spatial-encoder", type=str, default="cut3r", choices=["cut3r", "pi3x"], help="Spatial encoder backend to use")
-    parser.add_argument("--cut3r-weights-path", type=str, default=None, help="Path to the CUT3R weights file (required when --spatial-encoder cut3r)")
-    parser.add_argument("--pi3x-weights-path", type=str, default=None, help="Path to PI3X weights/checkpoint directory (required when --spatial-encoder pi3x)")
+    parser = argparse.ArgumentParser(description="Extract Spatial Features using PI3X (Multi-GPU)")
+    parser.add_argument("--pi3x-weights-path", type=str, required=True, help="Path to PI3X weights/checkpoint directory")
     parser.add_argument("--pi3x-input-size", type=int, default=518, help="Input size used internally by PI3X (must be multiple of 14)")
     parser.add_argument("--input-dir", type=str, default=None, help="Root directory containing video files to process recursively (ignored if --input-file is provided)")
     parser.add_argument("--input-file", type=str, default=None, help="Path to a single video file to process")
     parser.add_argument("--output-dir", type=str, required=True, help="Root directory to save the extracted features, mirroring input structure")
     parser.add_argument("--processor-config-path", type=str, required=True, help="Path to the processor_config.json file for SigLipImageProcessor")
-    # parser.add_argument("--device", type=str, default="cuda:0", help="Device to use (e.g., 'cuda:0', 'cpu')") # Replaced by gpu-ids
     parser.add_argument("--gpu-ids", type=str, default="0", help="Comma-separated list of GPU IDs to use (e.g., '0,1,2') or 'all'")
-    parser.add_argument("--precision", type=str, default="fp16", choices=['fp16', 'bf16', 'fp32'], help="Computation precision")
+    parser.add_argument("--precision", type=str, default="bf16", choices=['fp16', 'bf16', 'fp32'], help="Computation precision")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing feature files")
     parser.add_argument("--video-fps", type=int, default=1, help="FPS for video frame sampling")
-    parser.add_argument("--frames-upbound", type=int, default=10, help="Max frames to sample per video")
-    parser.add_argument("--batch-size", type=int, default=1, help="Number of videos to process per batch *per GPU*") # Clarified batch size scope
-    parser.add_argument("--export-point-cloud", action="store_true", help="Export generated point cloud for each video")
-    parser.add_argument("--point-cloud-output-dir", type=str, default="point_clouds", help="Directory to save exported point clouds (used if --export-point-cloud is set)")
-    parser.add_argument("--point-cloud-voxel-size", type=float, default=0.01, help="Voxel size for downsampling exported point clouds")
+    parser.add_argument("--frames-upbound", type=int, default=32, help="Max frames to sample per video")
+    parser.add_argument("--batch-size", type=int, default=1, help="Number of videos to process per batch *per GPU*")
     parser.add_argument("--save-preprocessed-frames", action="store_true", help="Save the preprocessed frames used for feature extraction as images")
     parser.add_argument("--save-preprocessed-frames-dir", type=str, default="preprocessed_frames", help="Directory to save preprocessed frames (used if --save-preprocessed-frames is set)")
     parser.add_argument("--save-preprocessed-frames-layout", type=str, default="global", choices=["global", "sibling"], help="'global': mirror structure under --save-preprocessed-frames-dir, 'sibling': save under folders next to each extracted .pt")
@@ -530,14 +373,8 @@ if __name__ == "__main__":
         rank0_print("Warning: Both --input-dir and --input-file provided. --input-file will be used.")
         args.input_dir = None # Prioritize input_file
 
-    if args.spatial_encoder == "cut3r":
-        if not args.cut3r_weights_path:
-            parser.error("--cut3r-weights-path is required when --spatial-encoder cut3r")
-    elif args.spatial_encoder == "pi3x":
-        if not args.pi3x_weights_path:
-            parser.error("--pi3x-weights-path is required when --spatial-encoder pi3x")
-        if args.pi3x_input_size % 14 != 0:
-            parser.error("--pi3x-input-size must be a multiple of 14 for PI3X patching")
+    if args.pi3x_input_size % 14 != 0:
+        parser.error("--pi3x-input-size must be a multiple of 14 for PI3X patching")
 
     # --- Determine GPUs to Use ---
     if args.gpu_ids.lower() == 'all':
@@ -578,13 +415,7 @@ if __name__ == "__main__":
 
     # --- Prepare Output Directory ---
     output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True) # Use Path.mkdir
-    if args.export_point_cloud and args.spatial_encoder == "cut3r":
-        pc_output_dir = Path(args.point_cloud_output_dir)
-        pc_output_dir.mkdir(parents=True, exist_ok=True)
-        rank0_print(f"Point clouds will be saved to: {args.point_cloud_output_dir}")
-    elif args.export_point_cloud and args.spatial_encoder != "cut3r":
-        rank0_print(f"Warning: --export-point-cloud is supported only for CUT3R. Requested encoder: {args.spatial_encoder}")
+    output_dir.mkdir(parents=True, exist_ok=True)
     if args.save_preprocessed_frames:
         if args.save_preprocessed_frames_layout == "global":
             frames_output_dir = Path(args.save_preprocessed_frames_dir)
