@@ -27,11 +27,16 @@ export HF_HUB_OFFLINE=1
 
 REPO=/leonardo/home/userexternal/shuang00/VLM-3R
 
+DATA_ROOT=/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r
+
 python $REPO/scripts/extract_spatial_features_pi3x.py \
-  --input-dir /leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r/scannet/videos \
-  --output-dir /leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r/scannet/spatial_features_pi3x \
+  --input-dir $DATA_ROOT/scannet/videos \
+  --output-dir $DATA_ROOT/scannet/spatial_features_pi3x \
   --pi3x-weights-path /leonardo_scratch/fast/EUHPC_D32_006/hf_models/Pi3X \
   --processor-config-path $REPO/processor_config.json \
+  --filter-by-jsons \
+    $DATA_ROOT/VLM-3R-DATA/vsibench_train/merged_qa_scannet_train.json \
+    $DATA_ROOT/VLM-3R-DATA/vsibench_train/merged_qa_route_plan_train.json \
   --gpu-ids 0 \
   --batch-size 1 \
   --frames-upbound 32 \

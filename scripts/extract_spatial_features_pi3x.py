@@ -121,6 +121,42 @@ def load_and_preprocess_video_frames(video_path, data_args, processor, target_si
         rank0_print(f"[GPU {rank}] Error processing video {video_path}: {e}")
         return None
 
+# --- JSON Filtering ---
+
+def load_allowed_stems_from_jsons(json_paths: list) -> set:
+    """Load all unique video stems referenced by a list of JSON files.
+    Supports both direct JSON paths and YAML data configs (with 'datasets' key)."""
+    import yaml as _yaml
+    resolved_json_paths = []
+    for p in json_paths:
+        if p.endswith('.yaml') or p.endswith('.yml'):
+            with open(p, 'r') as f:
+                cfg = _yaml.safe_load(f)
+            for ds in cfg.get('datasets', []):
+                jp = ds.get('json_path')
+                if jp:
+                    resolved_json_paths.append(jp)
+        else:
+            resolved_json_paths.append(p)
+
+    stems = set()
+    for jp in resolved_json_paths:
+        try:
+            with open(jp, 'r') as f:
+                data = json.load(f)
+            for item in data:
+                vid = item.get('video')
+                if vid:
+                    stems.add(Path(vid).stem)
+                elif 'scene_name' in item:
+                    stems.add(item['scene_name'])
+            rank0_print(f"  Loaded {len(data)} entries from {jp}")
+        except Exception as e:
+            rank0_print(f"  Warning: Could not load {jp}: {e}")
+    rank0_print(f"Total unique video stems from JSONs: {len(stems)}")
+    return stems
+
+
 # --- Main Extraction Logic ---
 
 def find_video_files(input_dir):
@@ -360,6 +396,9 @@ if __name__ == "__main__":
     parser.add_argument("--video-fps", type=int, default=1, help="FPS for video frame sampling")
     parser.add_argument("--frames-upbound", type=int, default=32, help="Max frames to sample per video")
     parser.add_argument("--batch-size", type=int, default=1, help="Number of videos to process per batch *per GPU*")
+    parser.add_argument("--filter-by-jsons", type=str, nargs='+', default=None,
+                        help="Only extract features for videos referenced in these JSON/YAML files. "
+                             "Accepts JSON paths or YAML data configs (e.g. scripts/VLM_3R/vsibench_data.yaml)")
     parser.add_argument("--save-preprocessed-frames", action="store_true", help="Save the preprocessed frames used for feature extraction as images")
     parser.add_argument("--save-preprocessed-frames-dir", type=str, default="preprocessed_frames", help="Directory to save preprocessed frames (used if --save-preprocessed-frames is set)")
     parser.add_argument("--save-preprocessed-frames-layout", type=str, default="global", choices=["global", "sibling"], help="'global': mirror structure under --save-preprocessed-frames-dir, 'sibling': save under folders next to each extracted .pt")
@@ -446,6 +485,18 @@ if __name__ == "__main__":
         # This case should be caught by parser.error earlier
         rank0_print("Error: No input specified.")
         sys.exit(1)
+
+    # --- Filter by JSON references (if requested) ---
+    if args.filter_by_jsons:
+        rank0_print(f"Filtering videos by {len(args.filter_by_jsons)} JSON/YAML source(s)...")
+        allowed_stems = load_allowed_stems_from_jsons(args.filter_by_jsons)
+        before_count = len(all_video_files_paths)
+        all_video_files_paths = [p for p in all_video_files_paths if p.stem in allowed_stems]
+        rank0_print(f"Filtered: {before_count} -> {len(all_video_files_paths)} videos "
+                    f"({before_count - len(all_video_files_paths)} excluded).")
+        if not all_video_files_paths:
+            rank0_print("No videos remain after filtering. Exiting.")
+            sys.exit(0)
 
     # --- Distribute Files Among Workers ---
     files_per_worker = [[] for _ in range(num_workers)]
