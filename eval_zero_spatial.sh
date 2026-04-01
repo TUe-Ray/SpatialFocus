@@ -41,9 +41,10 @@ echo "Job Time Limit: $JOB_TIME_LIMIT"
 # ==================================================User-defined variables ==================================================
 benchmark=vsibench # choices: [vsibench, cvbench, blink_spatial]
 output_path=/leonardo_scratch/fast/EUHPC_D32_006/eval/logs/VLM3R/$(date "+%Y%m%d_%H%M%S")
-pretrained_local=/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/train/Reproduction
+pretrained_local=/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/train/zero_spatial_features
 model_base_local=/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/LLaVA-NeXT-Video-7B-Qwen2
 siglip_local=/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/siglip-so400m-patch14-384
+zero_spatial_features_eval=True
 # ================================================== User-defined variables ==================================================
 
 
@@ -54,6 +55,7 @@ echo "Output Path: $output_path"
 echo "Pretrained (local): $pretrained_local"
 echo "Model base (local): $model_base_local"
 echo "SigLIP (local): $siglip_local"
+echo "Zero spatial features (eval): $zero_spatial_features_eval"
 
 set -eo pipefail
 export HF_HOME="$FAST/hf_cache"
@@ -183,9 +185,9 @@ PY
 # === Start Evaluation ===
 accelerate launch --num_processes=4 -m lmms_eval \
     --model vlm_3r \
-    --model_args "pretrained=$pretrained_ref,model_base=$model_base_ref,model_name=llava_qwen_lora,conv_template=qwen_1_5,max_frames_num=32" \
+    --model_args "pretrained=$pretrained_ref,model_base=$model_base_ref,model_name=llava_qwen_lora,conv_template=qwen_1_5,max_frames_num=32,zero_spatial_features=$zero_spatial_features_eval" \
     --tasks vsibench \
     --batch_size 1 \
     --log_samples \
-    --log_samples_suffix vlm_3r_7b_qwen2_lora \
+    --log_samples_suffix vlm_3r_7b_qwen2_lora_zero_spatial \
     --output_path $output_path

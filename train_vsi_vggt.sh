@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=Abla_pi3x_2_spatial_encoder
+#SBATCH --job-name=Abla_vggt_spatial_encoder
 #SBATCH --nodes=4
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
@@ -17,7 +17,7 @@
 # ============================================================
 # User-defined variables: General
 # ============================================================
-NOTE="Ablation: Pi3X spatial encoder. This run trains VLM3R on VSI-Bench with Pi3X as the spatial encoder (replacing CUT3R). Features are computed on-the-fly (no pre-extracted .pt files)."
+NOTE="Ablation: VGGT spatial encoder. This run trains VLM3R on VSI-Bench with VGGT as the spatial encoder (replacing CUT3R). Features are computed on-the-fly (no pre-extracted .pt files)."
 CONDA_ENV_NAME="vlm3r"
 
 # ============================================================
@@ -28,7 +28,7 @@ LOCAL_SIGLIP="/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/siglip-so400m
 DATA_ROOT="/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r"
 
 TRAIN_SAVE_ROOT="/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/train"
-TRAIN_RUN_NAME="pi3x_spatial_encoder"
+TRAIN_RUN_NAME="vggt_spatial_encoder"
 
 WANDB_DIR="$WORK/wandb"
 WANDB_CACHE_DIR="$WORK/wandb_cache"
@@ -38,25 +38,30 @@ HF_HOME="/leonardo_scratch/fast/EUHPC_D32_006/hf_cache"
 HF_DATASETS_CACHE="$HF_HOME/datasets"
 HUGGINGFACE_HUB_CACHE="$HF_HOME/hub"
 
+# VGGT runtime paths (required by llava/model/multimodal_spatial_encoder/vggt_spatial_encoder.py)
+REPO_ROOT="/leonardo/home/userexternal/shuang00/VLM-3R"
+LOCAL_VGGT_ROOT="$REPO_ROOT/vggt"
+LOCAL_VGGT_WEIGHTS="/leonardo_scratch/fast/EUHPC_D32_006/hf_models/vggt"
+
 # ============================================================
 # User-defined variables: Resume / Ablation
 # ============================================================
 RESUME_MODE="fresh"                 # choices: fresh / continue
 RESUME_CHECKPOINT_PATH="none"       # e.g. /path/to/checkpoint-1000
-ZERO_SPATIAL_FEATURES="False"       # choices: False / True (not needed for Pi3X)
+ZERO_SPATIAL_FEATURES="False"       # choices: False / True (typically not used for VGGT/Pi3X on-the-fly features)
 SEED=42
 
 # ============================================================
 # User-defined variables: Model/Data/Training presets
 # ============================================================
-SUFFIX="vlm_3r_vsibench_pi3x_cross_attn_lora"
+SUFFIX="vlm_3r_vsibench_vggt_cross_attn_lora"
 
 MODEL_LORA_ENABLE="True"
 MODEL_LORA_R="128"
 MODEL_LORA_ALPHA="256"
-MODEL_SPATIAL_TOWER="pi3x"
+MODEL_SPATIAL_TOWER="vggt"
 MODEL_SPATIAL_TOWER_SELECT_FEATURE="all_tokens"
-MODEL_SPATIAL_FEATURE_DIM="2048"
+MODEL_SPATIAL_FEATURE_DIM="1024"
 MODEL_FUSION_BLOCK="cross_attention"
 MODEL_TUNE_SPATIAL_TOWER="False"
 MODEL_TUNE_FUSION_BLOCK="True"
@@ -239,9 +244,22 @@ if [[ ! -d "$LOCAL_SIGLIP" ]]; then
     echo "[ERROR] Local SigLIP not found: $LOCAL_SIGLIP"
     exit 1
 fi
+if [[ ! -d "$LOCAL_VGGT_ROOT" ]]; then
+    echo "[ERROR] Local VGGT repo not found: $LOCAL_VGGT_ROOT"
+    echo "        Expected by vggt_spatial_encoder import path logic."
+    exit 1
+fi
+if [[ ! -d "$LOCAL_VGGT_WEIGHTS" ]]; then
+    echo "[ERROR] Local VGGT weights not found: $LOCAL_VGGT_WEIGHTS"
+    echo "        Expected by vggt_spatial_encoder default weights path."
+    exit 1
+fi
 
 echo "[LOCAL MODEL] model_name_or_path=$LOCAL_MODEL_BASE"
 echo "[LOCAL MODEL] vision_tower=$LOCAL_SIGLIP"
+echo "[LOCAL MODEL] spatial_tower=vggt"
+echo "[LOCAL MODEL] vggt_repo=$LOCAL_VGGT_ROOT"
+echo "[LOCAL MODEL] vggt_weights=$LOCAL_VGGT_WEIGHTS"
 
 denom=$((WORLD_SIZE * PER_DEVICE_TRAIN_BATCH_SIZE))
 if (( TARGET_GLOBAL_BATCH_SIZE % denom != 0 )); then
