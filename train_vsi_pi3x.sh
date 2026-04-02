@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=Abla_pi3x_2_spatial_encoder
+#SBATCH --job-name=speed_pi3x_2_spatial_encoder
 #SBATCH --nodes=4
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
@@ -17,7 +17,7 @@
 # ============================================================
 # User-defined variables: General
 # ============================================================
-NOTE="Ablation: Pi3X spatial encoder. This run trains VLM3R on VSI-Bench with Pi3X as the spatial encoder (replacing CUT3R). Loads pre-extracted .pt files from spatial_features_pi3x/ subdirectory."
+NOTE="Test speed: Pi3X spatial encoder. This run trains VLM3R on VSI-Bench with Pi3X as the spatial encoder (replacing CUT3R). Loads pre-extracted .pt files from spatial_features_pi3x/ subdirectory."
 CONDA_ENV_NAME="vlm3r"
 
 # ============================================================
@@ -63,9 +63,9 @@ MODEL_TUNE_FUSION_BLOCK="True"
 MODEL_TUNE_MM_MLP_ADAPTER="True"
 MODEL_VERSION="qwen_1_5"
 MODEL_MM_PROJECTOR_TYPE="mlp2x_gelu"
-MODEL_MM_VISION_SELECT_LAYER="-2"
-MODEL_MM_USE_IM_START_END="False"
-MODEL_MM_USE_IM_PATCH_TOKEN="False"
+MODEL_MM_VISION_SELECT_LAYER="-1"   #  从视觉编码器选择第几层特征
+MODEL_MM_USE_IM_START_END="False"   #是否添加特殊的图像起止标记 <image>...</image>
+MODEL_MM_USE_IM_PATCH_TOKEN="False" #是否使用图像补丁标记（如 <im_patch_0>）来保留空间位置信息，通常配合融合模块的空间池化使用
 MODEL_IMAGE_ASPECT_RATIO="anyres_max_9"
 MODEL_IMAGE_GRID_PINPOINTS="(1x1),...,(6x6)"
 MODEL_MM_PATCH_MERGE_TYPE="spatial_unpad"
