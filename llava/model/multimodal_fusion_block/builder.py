@@ -66,6 +66,103 @@ class CrossAttentionFusion(nn.Module):
         
         return fused_features, attn_weights
 
+
+class PatchCrossAttentionCameraConcatFusion(nn.Module):
+    def __init__(self, d_clip, d_spatial_encoder, d_attn, num_heads, dropout_rate=0.1):
+        super(PatchCrossAttentionCameraConcatFusion, self).__init__()
+
+        self.clip_norm = nn.LayerNorm(d_clip)
+        self.patch_norm = nn.LayerNorm(d_spatial_encoder)
+        self.camera_norm = nn.LayerNorm(d_spatial_encoder)
+
+        self.clip_query_proj = nn.Linear(d_clip, d_attn)
+        self.patch_key_proj = nn.Linear(d_spatial_encoder, d_attn)
+        self.patch_value_proj = nn.Linear(d_spatial_encoder, d_attn)
+        self.cross_attention = nn.MultiheadAttention(embed_dim=d_attn, num_heads=num_heads, batch_first=True)
+
+        self.out_proj = nn.Linear(d_attn, d_clip)
+        self.out_norm = nn.LayerNorm(d_clip)
+        self.camera_to_clip_proj = nn.Linear(d_spatial_encoder, d_clip)
+        self.dropout = nn.Dropout(dropout_rate)
+
+    def forward(self, clip_features, patch_tokens, camera_tokens):
+        clip_query = self.clip_query_proj(self.clip_norm(clip_features))
+        patch_tokens_norm = self.patch_norm(patch_tokens)
+        patch_key = self.patch_key_proj(patch_tokens_norm)
+        patch_value = self.patch_value_proj(patch_tokens_norm)
+
+        attn_output, attn_weights = self.cross_attention(
+            query=clip_query,
+            key=patch_key,
+            value=patch_value,
+        )
+
+        attn_output = self.out_proj(attn_output)
+        attn_output = self.dropout(attn_output)
+        fused_2d_tokens = self.out_norm(clip_features + attn_output)
+
+        projected_camera_tokens = self.camera_to_clip_proj(self.camera_norm(camera_tokens))
+        final_tokens = torch.cat((projected_camera_tokens, fused_2d_tokens), dim=1)
+        return final_tokens, attn_weights
+
+
+class GeometryBridgeFusion(nn.Module):
+    def __init__(self, d_clip, d_spatial_encoder, d_attn, num_heads, dropout_rate=0.1):
+        super(GeometryBridgeFusion, self).__init__()
+
+        # Stage 1: camera query attends to spatial patch tokens.
+        self.camera_norm = nn.LayerNorm(d_spatial_encoder)
+        self.patch_norm = nn.LayerNorm(d_spatial_encoder)
+        self.camera_query_proj = nn.Linear(d_spatial_encoder, d_attn)
+        self.patch_key_proj = nn.Linear(d_spatial_encoder, d_attn)
+        self.patch_value_proj = nn.Linear(d_spatial_encoder, d_attn)
+        self.geometry_attention = nn.MultiheadAttention(embed_dim=d_attn, num_heads=num_heads, batch_first=True)
+
+        # Stage 2: 2D tokens attend to geometry-aware 3D tokens from stage 1.
+        self.clip_norm = nn.LayerNorm(d_clip)
+        self.clip_query_proj = nn.Linear(d_clip, d_attn)
+        self.geometry_key_proj = nn.Linear(d_attn, d_attn)
+        self.geometry_value_proj = nn.Linear(d_attn, d_attn)
+        self.bridge_attention = nn.MultiheadAttention(embed_dim=d_attn, num_heads=num_heads, batch_first=True)
+
+        self.out_proj = nn.Linear(d_attn, d_clip)
+        self.out_norm = nn.LayerNorm(d_clip)
+        self.dropout = nn.Dropout(dropout_rate)
+
+    def forward(self, clip_features, camera_tokens, patch_tokens):
+        camera_tokens_norm = self.camera_norm(camera_tokens)
+        patch_tokens_norm = self.patch_norm(patch_tokens)
+
+        camera_query = self.camera_query_proj(camera_tokens_norm)
+        patch_key = self.patch_key_proj(patch_tokens_norm)
+        patch_value = self.patch_value_proj(patch_tokens_norm)
+
+        geometry_tokens, camera_patch_attn = self.geometry_attention(
+            query=camera_query,
+            key=patch_key,
+            value=patch_value,
+        )
+
+        clip_query = self.clip_query_proj(self.clip_norm(clip_features))
+        geometry_key = self.geometry_key_proj(geometry_tokens)
+        geometry_value = self.geometry_value_proj(geometry_tokens)
+
+        fused_features, clip_geometry_attn = self.bridge_attention(
+            query=clip_query,
+            key=geometry_key,
+            value=geometry_value,
+        )
+
+        fused_features = self.out_proj(fused_features)
+        fused_features = self.dropout(fused_features)
+        fused_features = self.out_norm(clip_features + fused_features)
+
+        attn_weights = {
+            "camera_to_patch": camera_patch_attn,
+            "clip_to_geometry": clip_geometry_attn,
+        }
+        return fused_features, attn_weights
+
 class TransformerFusion(nn.Module):
     def __init__(self, d_clip, d_spatial_encoder, d_attn, num_heads, dropout_rate=0.1):
         super(TransformerFusion, self).__init__()
@@ -307,12 +404,28 @@ def build_multimodal_fusion_block(config, delay_load=False, **kwargs):
             mlp_ratio=4.0,
             proj_drop=0.1
         )
-    elif fusion_block_type == "cross_attention":
+    elif fusion_block_type in ["cross_attention", "svf_baseline"]:
         return CrossAttentionFusion(
             d_clip=d_clip,
             d_spatial_encoder=d_spatial_encoder,
             d_attn=d_attn,
             num_heads=18
+        )
+    elif fusion_block_type == "svf_patch_cam_concat":
+        return PatchCrossAttentionCameraConcatFusion(
+            d_clip=d_clip,
+            d_spatial_encoder=d_spatial_encoder,
+            d_attn=d_attn,
+            num_heads=18,
+            dropout_rate=0.1,
+        )
+    elif fusion_block_type == "svf_geometry_bridge":
+        return GeometryBridgeFusion(
+            d_clip=d_clip,
+            d_spatial_encoder=d_spatial_encoder,
+            d_attn=d_attn,
+            num_heads=18,
+            dropout_rate=0.1,
         )
     elif fusion_block_type == "mlp_after_clip_proj":
         return MLPFusion(

@@ -365,49 +365,47 @@ class LlavaMetaForCausalLM(ABC):
                 else:
                     camera_tokens, patch_tokens = self.get_model().get_spatial_tower()(images)
                 
-                if fusion_block_type == 'cross_attention':
-                    # fuse with spatial features
-                    spatial_tower_select_feature = getattr(self.config, "spatial_tower_select_feature", "patch_tokens")
-                    spatial_tower_select_feature_list = spatial_tower_select_feature.split(",")
-                    final_image_features = []
-                    for spatial_tower_select_feature in spatial_tower_select_feature_list:
-                        if spatial_tower_select_feature == "camera_tokens":
-                            final_image_features.append(camera_tokens)
-                        elif spatial_tower_select_feature == "patch_tokens":
-                            final_image_features.append(patch_tokens)
-                        elif spatial_tower_select_feature in ["all", "all_tokens"]:
-                            final_image_features = [camera_tokens, patch_tokens]
-                        else:
-                            raise ValueError(f"Unexpected spatial_tower_select_feature: {spatial_tower_select_feature}")
-                    final_image_features = torch.cat(final_image_features, dim=1).to(self.dtype)
-
-                    # DEBUG: check fusion inputs for Pi3X
-                    if spatial_encoder_type == 'pi3x':
-                        from llava.utils import rank0_print
-                        # rank0_print(f"[FUSION DEBUG] clip_features: shape={image_features.shape}, dtype={image_features.dtype}, "
-                        #              f"min={image_features.min().item():.4f}, max={image_features.max().item():.4f}, "
-                        #              f"mean={image_features.mean().item():.4f}, has_nan={image_features.isnan().any().item()}")
-                        # rank0_print(f"[FUSION DEBUG] spatial_features: shape={final_image_features.shape}, dtype={final_image_features.dtype}, "
-                        #              f"min={final_image_features.min().item():.4f}, max={final_image_features.max().item():.4f}, "
-                        #              f"mean={final_image_features.mean().item():.4f}, has_nan={final_image_features.isnan().any().item()}")
+                if fusion_block_type in ['cross_attention', 'svf_baseline']:
+                    # Build spatial KV tokens.
+                    if fusion_block_type == 'svf_baseline':
+                        # Ablation-1: Q=2D, KV=[camera, patch], output=2D+cross_attn.
+                        final_image_features = torch.cat((camera_tokens, patch_tokens), dim=1).to(self.dtype)
+                    else:
+                        # Legacy cross_attention keeps runtime-selectable spatial token composition.
+                        spatial_tower_select_feature = getattr(self.config, "spatial_tower_select_feature", "patch_tokens")
+                        spatial_tower_select_feature_list = spatial_tower_select_feature.split(",")
+                        selected_tokens = []
+                        for spatial_tower_select_feature in spatial_tower_select_feature_list:
+                            if spatial_tower_select_feature == "camera_tokens":
+                                selected_tokens.append(camera_tokens)
+                            elif spatial_tower_select_feature == "patch_tokens":
+                                selected_tokens.append(patch_tokens)
+                            elif spatial_tower_select_feature in ["all", "all_tokens"]:
+                                selected_tokens = [camera_tokens, patch_tokens]
+                            else:
+                                raise ValueError(f"Unexpected spatial_tower_select_feature: {spatial_tower_select_feature}")
+                        final_image_features = torch.cat(selected_tokens, dim=1).to(self.dtype)
 
                     image_features, attn_weights = self.get_model().get_fusion_block()(image_features, final_image_features)
-
-                    # DEBUG: check fusion output for Pi3X
-                    # if spatial_encoder_type == 'pi3x':
-                    #     rank0_print(f"[FUSION DEBUG] after fusion: shape={image_features.shape}, "
-                    #                  f"min={image_features.min().item():.4f}, max={image_features.max().item():.4f}, "
-                    #                  f"mean={image_features.mean().item():.4f}, has_nan={image_features.isnan().any().item()}, "
-                    #                  f"has_inf={image_features.isinf().any().item()}")
-
                     image_features = self.get_model().mm_projector(image_features)
 
-                    # DEBUG: check after MLP projector for Pi3X
-                    # if spatial_encoder_type == 'pi3x':
-                    #     rank0_print(f"[FUSION DEBUG] after mm_projector: shape={image_features.shape}, "
-                    #                  f"min={image_features.min().item():.4f}, max={image_features.max().item():.4f}, "
-                    #                  f"mean={image_features.mean().item():.4f}, has_nan={image_features.isnan().any().item()}, "
-                    #                  f"has_inf={image_features.isinf().any().item()}")
+                elif fusion_block_type == 'svf_patch_cam_concat':
+                    # Ablation-2: Q=2D, KV=patch only, then prepend projected camera tokens.
+                    image_features, attn_weights = self.get_model().get_fusion_block()(
+                        image_features,
+                        patch_tokens.to(self.dtype),
+                        camera_tokens.to(self.dtype),
+                    )
+                    image_features = self.get_model().mm_projector(image_features)
+
+                elif fusion_block_type == 'svf_geometry_bridge':
+                    # Ablation-3: camera->patch attention builds geometry-aware tokens, then 2D queries those tokens.
+                    image_features, attn_weights = self.get_model().get_fusion_block()(
+                        image_features,
+                        camera_tokens.to(self.dtype),
+                        patch_tokens.to(self.dtype),
+                    )
+                    image_features = self.get_model().mm_projector(image_features)
                 
                 elif fusion_block_type == 'cross_attention_with_mlp':
                     image_features, attn_weights = self.get_model().get_fusion_block()(image_features, patch_tokens)
@@ -426,6 +424,9 @@ class LlavaMetaForCausalLM(ABC):
 
                     image_features = self.get_model().mm_projector(image_features)
                     image_features = self.get_model().get_fusion_block()(image_features, patch_tokens)
+
+                else:
+                    raise ValueError(f"Unexpected fusion block type: {fusion_block_type}")
 
         elif self.get_model().get_spatial_tower() is None and self.get_model().get_fusion_block() is not None:
             assert point_maps is not None
