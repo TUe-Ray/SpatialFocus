@@ -1,3 +1,6 @@
 [submodule "CUT3R"]
 	path = CUT3R
 	url = https://github.com/Jian-Zhang-3DV/CUT3R.git
+[submodule "third_party/eomt"]
+	path = third_party/eomt
+	url = https://github.com/tue-mps/eomt.git
