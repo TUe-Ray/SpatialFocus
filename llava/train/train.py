@@ -189,7 +189,12 @@ class ModelArguments:
     spatial_feature_dim: Optional[int] = field(default=None)
     tune_spatial_tower: bool = field(default=False)
     ## fusion block
-    fusion_block: Optional[str] = field(default=None)
+    fusion_block: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Fusion strategy. New ablations: svf_baseline, svf_patch_cam_concat, svf_geometry_bridge"
+        },
+    )
     tune_fusion_block: bool = field(default=False)
 
     unfreeze_mm_vision_tower: bool = field(default=False)
@@ -252,6 +257,9 @@ class DataArguments:
     frames_upbound: Optional[int] = field(default=0)
     add_time_instruction: Optional[bool] = field(default=False)
     force_sample: Optional[bool] = field(default=False)
+    train_data_percentage: float = field(default=100.0, metadata={"help": "Percentage of loaded training samples to keep (0 < value <= 100)."})
+    train_data_percentage_seed: int = field(default=42, metadata={"help": "Seed used for deterministic subset selection and dataset-level shuffle."})
+    train_data_shuffle: bool = field(default=True, metadata={"help": "If True, shuffle loaded training samples before training."})
     zero_spatial_features: Optional[bool] = field(default=False, metadata={"help": "If True, zero out all loaded spatial feature tensors from .pt files for ablation."})
     spatial_tower_type: Optional[str] = field(default=None, metadata={"help": "Spatial tower type (e.g. cut3r, vggt, pi3x). Set automatically from model_args. Controls whether .pt files are loaded."})
     spatial_features_subdir: Optional[str] = field(default="spatial_features", metadata={"help": "Subdirectory used to locate pre-extracted spatial features relative to video paths (default: spatial_features)."})
@@ -1288,8 +1296,34 @@ class LazySupervisedDataset(Dataset):
                 cur_data_dict = json.load(file)
                 rank0_print(f"Loaded {len(cur_data_dict)} samples from {data_path}")
                 self.list_data_dict.extend(cur_data_dict)
-        # shuffle the data
-        random.shuffle(self.list_data_dict)
+        total_loaded = len(self.list_data_dict)
+        if data_args.train_data_percentage <= 0 or data_args.train_data_percentage > 100:
+            raise ValueError(
+                f"train_data_percentage must be in (0, 100], got {data_args.train_data_percentage}."
+            )
+
+        subset_rng = random.Random(data_args.train_data_percentage_seed)
+        if data_args.train_data_percentage < 100 and total_loaded > 0:
+            keep_count = math.ceil(total_loaded * data_args.train_data_percentage / 100.0)
+            keep_indices = subset_rng.sample(range(total_loaded), keep_count)
+            keep_indices.sort()
+            self.list_data_dict = [self.list_data_dict[idx] for idx in keep_indices]
+            rank0_print(
+                f"[DATA SUBSET] Keeping {len(self.list_data_dict)}/{total_loaded} samples "
+                f"({data_args.train_data_percentage:.2f}%) with seed {data_args.train_data_percentage_seed}."
+            )
+        else:
+            rank0_print(
+                f"[DATA SUBSET] Using full dataset ({total_loaded}/{total_loaded} samples)."
+            )
+
+        if data_args.train_data_shuffle:
+            subset_rng.shuffle(self.list_data_dict)
+            rank0_print(
+                f"[DATA SHUFFLE] Enabled dataset-level shuffle with seed {data_args.train_data_percentage_seed}."
+            )
+        else:
+            rank0_print("[DATA SHUFFLE] Disabled dataset-level shuffle.")
         rank0_print(f"Loaded {len(self.list_data_dict)} samples from {data_path}")
         rank0_print("Formatting inputs...Skip in lazy mode")
         self.tokenizer = tokenizer

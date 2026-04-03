@@ -432,7 +432,11 @@ class LLaVATrainer(Trainer):
         }
 
         if not isinstance(train_dataset, torch.utils.data.IterableDataset):
-            dataloader_params["sampler"] = self._get_train_sampler()
+            train_sampler = self._get_train_sampler()
+            if train_sampler is not None:
+                dataloader_params["sampler"] = train_sampler
+            else:
+                dataloader_params["shuffle"] = True
             dataloader_params["drop_last"] = self.args.dataloader_drop_last
             dataloader_params["worker_init_fn"] = seed_worker
             dataloader_params["prefetch_factor"] = self.args.dataloader_num_workers * 2 if self.args.dataloader_num_workers != 0 else None
