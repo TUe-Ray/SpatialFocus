@@ -1,24 +1,23 @@
 #!/bin/bash
-#!/bin/bash
-#SBATCH --job-name=ablation_svf_baseline_100percent
+#SBATCH --job-name=ablation_svf_geometry_bridge_25percent
 #SBATCH --nodes=4
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
 #SBATCH --cpus-per-task=32
-#SBATCH --time=00:30:00
+#SBATCH --time=06:00:00
 #SBATCH --partition=boost_usr_prod  
-#SBATCH --qos=boost_qos_dbg # normal/boost_qos_dbg
+#SBATCH --qos=normal # normal/boost_qos_dbg
 #SBATCH --output=logs/train/%x_%j.out
 #SBATCH --error=logs/train/%x_%j.err
 #SBATCH --mem=0
 #SBATCH --exclude=lrdn0249,lrdn0612,lrdn0568,lrdn2400,lrdn0288,lrdn0418,lrdn0119,lrdn0159,lrdn0080,lrdn0843
 #SBATCH --exclusive
 
-
+SUFFIX="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
 # ============================================================
 # User-defined variables: General
 # ============================================================
-NOTE="dbg ablation svf_baseline 100% data, 4 nodes x 4 GPUs, 1 epoch (adjust as needed), no evaluation during training, just to verify training runs and can overfit small data"
+NOTE="Ablation: SVF geometry bridge fusion method, 25% training data, spatial features zeroed out (to test if model can learn to ignore them)."
 CONDA_ENV_NAME="vlm3r"
 
 # ============================================================
@@ -50,7 +49,7 @@ SEED=42
 # ============================================================
 # User-defined variables: Model/Data/Training presets
 # ============================================================
-SUFFIX="vlm_3r_vsibench_pi3x_ablation_lora"
+
 
 MODEL_LORA_ENABLE="True"
 MODEL_LORA_R="128"
@@ -70,9 +69,9 @@ MODEL_SPATIAL_FEATURE_DIM="2048"
 #    stage-2: Q=2D visual tokens, K/V=geometry-aware 3D tokens, then mm_projector
 # Legacy option kept for compatibility:
 # - cross_attention (uses spatial_tower_select_feature to choose camera/patch/all)
-MODEL_FUSION_BLOCK="svf_baseline"
+MODEL_FUSION_BLOCK="svf_geometry_bridge"
 # ============== Training percentage and shuffling (for ablation) ==============
-TRAIN_DATA_PERCENTAGE="100"
+TRAIN_DATA_PERCENTAGE="25"
 TRAIN_DATA_PERCENTAGE_SEED="$SEED"
 TRAIN_DATA_SHUFFLE="True"
 
