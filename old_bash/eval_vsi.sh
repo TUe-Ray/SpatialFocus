@@ -1,10 +1,10 @@
 #!/bin/bash
-#SBATCH --job-name=Eval_zero_spatial_feature
+#SBATCH --job-name=Eval_Reproduce_model
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=4           # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
-#SBATCH --cpus-per-task=8
-#SBATCH --time=16:00:00
+#SBATCH --cpus-per-task=32
+#SBATCH --time=03:00:00
 #SBATCH --partition=boost_usr_prod  
 #SBATCH --qos=normal  # normal/boost_qos_dbg/boost_qos_bprod/boost_qos_Iprod
 #SBATCH --output=logs/eval/%x_%j.out
@@ -14,7 +14,7 @@
 
 
 # ================================================== User-defined variables ==================================================
-NOTE="Eval self-trained ablation study of zero spatial feature on VSI-Bench. Model: LLaVA-NeXT-Video-7B-Qwen2 + SigLIP patch14-384. See eval_vsi.sh for details." 
+NOTE="Evaluation for reproducing VLM3R results on VSI-Bench. " 
 # ================================================== User-defined variables ==================================================
 
 
@@ -38,7 +38,6 @@ echo "Error: $SLURM_STDERR"
 echo "Job Time Limit: $JOB_TIME_LIMIT"
 
 
-# ==================================================User-defined variables ==================================================
 benchmark=vsibench # choices: [vsibench, cvbench, blink_spatial]
 output_root=/leonardo_scratch/fast/EUHPC_D32_006/eval/logs/VLM3R
 stale_tmp_hours="${STALE_TMP_HOURS:-24}"
@@ -55,6 +54,7 @@ find "$output_root" \
   -mmin +"$stale_tmp_minutes" \
   -print -exec rm -rf {} + 2>/dev/null || true
 
+# ==================================================User-defined variables ==================================================
 staging_output_path="$(mktemp -d "${output_root}/.lmms_eval_tmp_${safe_job_name}.XXXXXX")"
 pretrained_local=/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/train/Reproduction
 model_base_local=/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/LLaVA-NeXT-Video-7B-Qwen2
@@ -214,7 +214,7 @@ ds = load_dataset(
     }
 )
 print(ds)
-print("num_examples =", len(ds["test"]))
+print("num_examples =", len(ds["train"]))
 PY
 
 
