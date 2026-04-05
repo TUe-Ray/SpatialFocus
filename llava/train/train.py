@@ -2349,6 +2349,7 @@ def train(attn_implementation=None):
         data_args.spatial_tower_type = model_args.spatial_tower
 
     if model_args.fusion_block is not None:
+        model.config.fusion_block = model_args.fusion_block
         model.get_model().initialize_fusion_block(model_args=model_args, fsdp=training_args.fsdp)
         fusion_block = model.get_fusion_block()
         fusion_block.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)

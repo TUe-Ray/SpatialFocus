@@ -1,6 +1,6 @@
 #!/bin/bash
 #!/bin/bash
-#SBATCH --job-name=speed_pi3x_spatial_encoder
+#SBATCH --job-name=ablation_svf_baseline_100percent
 #SBATCH --nodes=4
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
@@ -18,7 +18,7 @@
 # ============================================================
 # User-defined variables: General
 # ============================================================
-NOTE="Test speed: Pi3X spatial encoder. This run trains VLM3R on VSI-Bench with Pi3X as the spatial encoder (replacing CUT3R). Loads pre-extracted .pt files from spatial_features_pi3x/ subdirectory."
+NOTE="dbg ablation svf_baseline 100% data, 4 nodes x 4 GPUs, 1 epoch (adjust as needed), no evaluation during training, just to verify training runs and can overfit small data"
 CONDA_ENV_NAME="vlm3r"
 
 # ============================================================
@@ -71,6 +71,10 @@ MODEL_SPATIAL_FEATURE_DIM="2048"
 # Legacy option kept for compatibility:
 # - cross_attention (uses spatial_tower_select_feature to choose camera/patch/all)
 MODEL_FUSION_BLOCK="svf_baseline"
+# ============== Training percentage and shuffling (for ablation) ==============
+TRAIN_DATA_PERCENTAGE="100"
+TRAIN_DATA_PERCENTAGE_SEED="$SEED"
+TRAIN_DATA_SHUFFLE="True"
 
 
 MODEL_TUNE_SPATIAL_TOWER="False"
@@ -100,10 +104,6 @@ MODEL_MM_SPATIAL_POOL_STRIDE="2"
 DATA_PATH_YAML="scripts/VLM_3R/vsibench_data.yaml"
 DATA_GROUP_BY_MODALITY_LENGTH="True"
 
-# ============== Training percentage and shuffling (for ablation) ==============
-TRAIN_DATA_PERCENTAGE="100"
-TRAIN_DATA_PERCENTAGE_SEED="$SEED"
-TRAIN_DATA_SHUFFLE="True"
 
 PER_DEVICE_TRAIN_BATCH_SIZE=1
 TARGET_GLOBAL_BATCH_SIZE=128
@@ -116,7 +116,7 @@ WEIGHT_DECAY="0."
 WARMUP_RATIO="0.03"
 LR_SCHEDULER_TYPE="cosine"
 LOGGING_STEPS="5"
-DATALOADER_NUM_WORKERS="8"
+DATALOADER_NUM_WORKERS="6"
 REPORT_TO="wandb"
 DATALOADER_DROP_LAST="True"
 

@@ -117,8 +117,45 @@ class LlavaMetaModel:
             spatial_tower.load_model()
 
     def initialize_fusion_block(self, model_args, fsdp=None):
-        # initialize the fusion block
-        if getattr(self, "fusion_block", None) is None:
+        requested_fusion_block = getattr(model_args, "fusion_block", None)
+        if requested_fusion_block is not None:
+            self.config.fusion_block = requested_fusion_block
+
+        def _expected_class_name(fusion_block_type):
+            if fusion_block_type in ["cross_attention", "svf_baseline"]:
+                return "CrossAttentionFusion"
+            if fusion_block_type == "svf_patch_cam_concat":
+                return "PatchCrossAttentionCameraConcatFusion"
+            if fusion_block_type == "svf_geometry_bridge":
+                return "GeometryBridgeFusion"
+            if fusion_block_type == "cross_attention_with_mlp":
+                return "CrossAttentionFusionWithMLP"
+            if fusion_block_type == "mlp_after_clip_proj":
+                return "MLPFusion"
+            if fusion_block_type == "transformer":
+                return "TransformerFusion"
+            if fusion_block_type == "concat_mlp":
+                return "ConcatMLPFusion"
+            if fusion_block_type == "concat_self_attention":
+                return "ConcatSelfAttentionFusion"
+            if fusion_block_type == "llava_3d_fusion_block":
+                return "llava_3d_fusion_block"
+            if fusion_block_type == "video_3d_llm_fusion_block":
+                return "video_3d_llm_fusion_block"
+            if isinstance(fusion_block_type, str) and fusion_block_type.endswith("_layer_cross_attention"):
+                return "MultiLayerCrossAttentionFusion"
+            return None
+
+        existing_fusion_block = self.get_fusion_block()
+        current_type = getattr(self.config, "fusion_block", None)
+        expected_cls = _expected_class_name(current_type)
+        needs_rebuild = (
+            existing_fusion_block is None
+            or (expected_cls is not None and existing_fusion_block.__class__.__name__ != expected_cls)
+        )
+
+        # Build/rebuild to keep the instantiated module aligned with config.fusion_block.
+        if needs_rebuild:
             self.fusion_block = build_multimodal_fusion_block(self.config)
         else:
             # In case it is frozen by LoRA
