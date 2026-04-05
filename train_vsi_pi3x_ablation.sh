@@ -28,7 +28,6 @@ LOCAL_SIGLIP="/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/siglip-so400m
 DATA_ROOT="/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r"
 
 TRAIN_SAVE_ROOT="/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/train"
-TRAIN_RUN_NAME="pi3x_spatial_encoder"
 
 WANDB_DIR="$WORK/wandb"
 WANDB_CACHE_DIR="$WORK/wandb_cache"
@@ -231,12 +230,7 @@ echo "[DDP] NUM_GPUS_PER_NODE=$NUM_GPUS_PER_NODE WORLD_SIZE=$WORLD_SIZE"
 # ============================================================
 # Save/Resume Configuration
 # ============================================================
-DEFAULT_RUN_NAME="llava_video_7b_qwen2_${SUFFIX}"
-if [[ -n "$TRAIN_RUN_NAME" ]]; then
-    MID_RUN_NAME="$TRAIN_RUN_NAME"
-else
-    MID_RUN_NAME="$DEFAULT_RUN_NAME"
-fi
+MID_RUN_NAME="$SUFFIX"
 OUTPUT_DIR="$TRAIN_SAVE_ROOT/$MID_RUN_NAME"
 mkdir -p "$OUTPUT_DIR"
 
@@ -390,7 +384,7 @@ echo "========================================"
 
 echo "--- Resume ---"
 echo "  TRAIN_SAVE_ROOT:                     $TRAIN_SAVE_ROOT"
-echo "  TRAIN_RUN_NAME:                      $MID_RUN_NAME"
+echo "  OUTPUT_RUN_NAME (job+id):            $MID_RUN_NAME"
 echo "  OUTPUT_DIR:                          $OUTPUT_DIR"
 echo "  RESUME_MODE:                         $RESUME_MODE"
 echo "  RESUME_CHECKPOINT_PATH:             $RESUME_CHECKPOINT_PATH"
