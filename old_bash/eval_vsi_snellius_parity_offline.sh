@@ -1,35 +1,29 @@
 #!/bin/bash
-#SBATCH --job-name=Eval_Reproduction
+#SBATCH --job-name=Eval_VLM3R_SnelliusParity_Offline_secondtry
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=4
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=32
-#SBATCH --time=04:00:00
+#SBATCH --time=06:00:00
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=normal
 #SBATCH --output=logs/eval/%x_%j.out
 #SBATCH --error=logs/eval/%x_%j.err
 #SBATCH --mem=0
 
-# ================================================== User-defined variables ==================================================
-NOTE="Evaluation for reproducing VLM3R results on VSI-Bench. " 
-# ================================================== User-defined variables ==================================================
-echo "-------- Note --------"
-echo "  note: $NOTE"
-
 set -euo pipefail
 
 # Run this on compute nodes WITHOUT internet access.
 # It reuses online-prefetched cache and runs using the Snellius lmms_eval files.
 
-PRETRAINED_LOCAL="/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/train/Reproduction"
-NUM_PROCESSES="4"
-
 SNELLIUS_REPO_DIR="${SNELLIUS_REPO_DIR:-/leonardo/home/userexternal/shuang00/VLM-3R_snellius}"
 SUBMODULE_DIR="${SUBMODULE_DIR:-$SNELLIUS_REPO_DIR/thinking-in-space}"
+
 FAST_ROOT="${FAST_ROOT:-/leonardo_scratch/fast/EUHPC_D32_006}"
 HF_HOME="${HF_HOME:-$FAST_ROOT/hf_cache}"
 MODEL_ROOT="${MODEL_ROOT:-$FAST_ROOT/hf_models/VLM3R}"
+
+PRETRAINED_LOCAL="${PRETRAINED_LOCAL:-$MODEL_ROOT/Journey9ni/vlm-3r-llava-qwen2-lora}"
 MODEL_BASE_LOCAL="${MODEL_BASE_LOCAL:-$MODEL_ROOT/LLaVA-NeXT-Video-7B-Qwen2}"
 SIGLIP_LOCAL="${SIGLIP_LOCAL:-$MODEL_ROOT/siglip-so400m-patch14-384}"
 CUT3R_CKPT_EXPECTED="${CUT3R_CKPT_EXPECTED:-$SNELLIUS_REPO_DIR/CUT3R/src/cut3r_512_dpt_4_64.pth}"
@@ -37,18 +31,11 @@ CUT3R_CKPT_FALLBACK="${CUT3R_CKPT_FALLBACK:-$SNELLIUS_REPO_DIR/CUT3R_backup_inco
 
 CONDA_BASE="${CONDA_BASE:-$WORK/miniconda3}"
 CONDA_ENV="${CONDA_ENV:-vsibench}"
-TASK="vsibench"
-TASK_DIR="${TASK_DIR:-$SNELLIUS_REPO_DIR/thinking-in-space/lmms_eval/tasks/vsibench}"
-
-# Normalize commonly overridden values to avoid subtle submission typos.
-PRETRAINED_LOCAL="$(echo "$PRETRAINED_LOCAL" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/[}]$//')"
-TASK="$(echo "$TASK" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-export TASK
-
+TASK="${TASK:-vsibench}"
+NUM_PROCESSES="${NUM_PROCESSES:-4}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
 MAX_FRAMES_NUM="${MAX_FRAMES_NUM:-32}"
 CONV_TEMPLATE="${CONV_TEMPLATE:-qwen_1_5}"
-MODEL_NAME="${MODEL_NAME:-llava_qwen_lora}"
 
 OUTPUT_PATH="${OUTPUT_PATH:-/leonardo_scratch/fast/EUHPC_D32_006/eval/logs/VLM3R/$(date +%Y%m%d_%H%M%S)_snellius_parity_offline}"
 
@@ -62,23 +49,7 @@ echo "PRETRAINED_LOCAL=$PRETRAINED_LOCAL"
 echo "MODEL_BASE_LOCAL=$MODEL_BASE_LOCAL"
 echo "SIGLIP_LOCAL=$SIGLIP_LOCAL"
 echo "CUT3R_CKPT_EXPECTED=$CUT3R_CKPT_EXPECTED"
-echo "TASK=$TASK"
-echo "TASK_DIR=$TASK_DIR"
-echo "MODEL_NAME=$MODEL_NAME"
 echo "=================="
-
-if [[ -z "$TASK" ]]; then
-  echo "[ERROR] TASK is empty. Set TASK to a valid lmms_eval task name (e.g., vsibench)."
-  exit 1
-fi
-if [[ ! -d "$TASK_DIR" ]]; then
-  echo "[ERROR] Missing task directory: $TASK_DIR"
-  exit 1
-fi
-if [[ ! -f "$TASK_DIR/vsibench.yaml" ]]; then
-  echo "[ERROR] Missing task yaml: $TASK_DIR/vsibench.yaml"
-  exit 1
-fi
 
 if [[ ! -d "$PRETRAINED_LOCAL" ]]; then
   echo "[ERROR] Missing PRETRAINED_LOCAL: $PRETRAINED_LOCAL"
@@ -155,32 +126,6 @@ mkdir -p "$OUTPUT_PATH"
 
 cd "$SNELLIUS_REPO_DIR"
 
-python - <<'PY'
-import os
-
-task_arg = (os.environ.get("TASK") or "").strip()
-if not task_arg:
-  raise SystemExit("[ERROR] TASK is empty after normalization.")
-
-from lmms_eval.tasks import TaskManager
-
-tm = TaskManager()
-available = set(tm.all_tasks)
-requested = [t.strip() for t in task_arg.split(",") if t.strip()]
-missing = [t for t in requested if t not in available]
-
-print(f"[TASK CHECK] requested={requested}")
-if missing:
-  preview = sorted(list(available))[:40]
-  print(f"[ERROR] Unknown task(s): {missing}")
-  print("[HINT] Available task examples:")
-  for name in preview:
-    print(f"  - {name}")
-  raise SystemExit(2)
-
-print("[TASK CHECK] all requested tasks are available.")
-PY
-
 if ! ls CUT3R/src/croco/models/curope/*.so >/dev/null 2>&1; then
   echo "[INFO] curope extension not found; building in-place..."
   (
@@ -213,8 +158,8 @@ accelerate launch \
   --num_processes="$NUM_PROCESSES" \
   -m lmms_eval \
   --model vlm_3r \
-  --model_args "pretrained=$PRETRAINED_LOCAL,model_base=$MODEL_BASE_LOCAL,model_name=$MODEL_NAME,conv_template=$CONV_TEMPLATE,max_frames_num=$MAX_FRAMES_NUM" \
-  --tasks "$TASK_DIR" \
+  --model_args "pretrained=$PRETRAINED_LOCAL,model_base=$MODEL_BASE_LOCAL,conv_template=$CONV_TEMPLATE,max_frames_num=$MAX_FRAMES_NUM" \
+  --tasks "$TASK" \
   --batch_size "$BATCH_SIZE" \
   --log_samples \
   --log_samples_suffix "vlm_3r_7b_qwen2_lora_snellius_parity_offline" \
