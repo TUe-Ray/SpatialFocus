@@ -1,5 +1,7 @@
 import copy
 import math
+import os
+from pathlib import Path
 from datetime import timedelta
 from typing import List, Optional, Tuple, Union
 
@@ -17,7 +19,11 @@ from lmms_eval.api.model import lmms
 from lmms_eval.api.registry import register_model
 from lmms_eval.models.model_utils.load_video import read_video_pyav
 
-import sys; sys.path = ["../../VLM-3R/"] + sys.path
+import sys
+_default_repo_root = str(Path(__file__).resolve().parents[3])
+_repo_root = os.environ.get("VLM3R_CODE_ROOT", _default_repo_root)
+if _repo_root not in sys.path:
+    sys.path = [_repo_root] + sys.path
 try:
     from llava.constants import (
         DEFAULT_IM_END_TOKEN,

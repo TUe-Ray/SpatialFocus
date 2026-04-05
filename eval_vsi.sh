@@ -74,6 +74,8 @@ echo "Model base (local): $model_base_local"
 echo "SigLIP (local): $siglip_local"
 
 set -eo pipefail
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export VLM3R_CODE_ROOT="$script_dir"
 export HF_HOME="$FAST/hf_cache"
 export HF_DATASETS_CACHE="$FAST/hf_cache/datasets"
 export HF_HUB_CACHE="$FAST/hf_cache/hub"
@@ -203,13 +205,16 @@ for k in [
     print(f"{k}={os.environ.get(k)}")
 
 ds = load_dataset(
-    "json",
+  "parquet",
     data_files={
-        "train": "/leonardo_scratch/fast/EUHPC_D32_006/hf_cache/hub/datasets--nyu-visionx--VSI-Bench/snapshots/d7cb1a3960b79dd3e20d4990b83005e96e1bcd9d/test.jsonl"
+    "test": [
+      "/leonardo_scratch/fast/EUHPC_D32_006/hf_cache/hub/datasets--nyu-visionx--VSI-Bench/snapshots/d7cb1a3960b79dd3e20d4990b83005e96e1bcd9d/test_pruned.parquet",
+      "/leonardo_scratch/fast/EUHPC_D32_006/hf_cache/hub/datasets--nyu-visionx--VSI-Bench/snapshots/d7cb1a3960b79dd3e20d4990b83005e96e1bcd9d/test_debiased.parquet",
+    ]
     }
 )
 print(ds)
-print("num_examples =", len(ds["train"]))
+print("num_examples =", len(ds["test"]))
 PY
 
 
