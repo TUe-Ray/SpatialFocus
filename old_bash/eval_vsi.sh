@@ -1,10 +1,10 @@
 #!/bin/bash
-#SBATCH --job-name=Eval_1GPU_VLM3R_with_flashattn2
+#SBATCH --job-name=Eval_Reproduce_model
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=1           # 依你的叢集格式：也可能是 --gpus-per-node=1
+#SBATCH --gpus-per-node=4           # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
-#SBATCH --cpus-per-task=8
-#SBATCH --time=16:00:00
+#SBATCH --cpus-per-task=32
+#SBATCH --time=03:00:00
 #SBATCH --partition=boost_usr_prod  
 #SBATCH --qos=normal  # normal/boost_qos_dbg/boost_qos_bprod/boost_qos_Iprod
 #SBATCH --output=logs/eval/%x_%j.out
@@ -13,11 +13,14 @@
 #SBATCH --exclude=lrdn0249,lrdn0612,lrdn0568,lrdn2400,lrdn0288,lrdn0418,lrdn0119,lrdn0159,,lrdn0080,lrdn0843
 
 
-NOTE="Eval VLM3r on 1 GPU  " 
+# ================================================== User-defined variables ==================================================
+NOTE="Evaluation for reproducing VLM3R results on VSI-Bench. " 
+# ================================================== User-defined variables ==================================================
+
+
 
 echo "-------- Note --------"
 echo "  note: $NOTE"
-
 JOB_TIME_LIMIT=$(squeue -j $SLURM_JOB_ID -h -o "%l")
 echo "=== SLURM Job Specifications ==="
 echo "Job Name: $SLURM_JOB_NAME"
@@ -35,26 +38,44 @@ echo "Error: $SLURM_STDERR"
 echo "Job Time Limit: $JOB_TIME_LIMIT"
 
 
-# === User-defined variables ===
 benchmark=vsibench # choices: [vsibench, cvbench, blink_spatial]
-output_path=/leonardo_scratch/fast/EUHPC_D32_006/eval/logs/VLM3R/$(date "+%Y%m%d_%H%M%S")
+output_root=/leonardo_scratch/fast/EUHPC_D32_006/eval/logs/VLM3R
+stale_tmp_hours="${STALE_TMP_HOURS:-24}"
+stale_tmp_minutes=$((stale_tmp_hours * 60))
+job_name="${SLURM_JOB_NAME:-vlm3r_eval_${benchmark}}"
+safe_job_name="$(echo "$job_name" | tr -c 'A-Za-z0-9._-' '_')"
+output_path="$output_root/$safe_job_name"
+mkdir -p "$output_root"
 
-pretrained_local=/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/vlm-3r-lora
+# Best-effort cleanup of abandoned lmms_eval staging directories.
+find "$output_root" \
+  -mindepth 1 -maxdepth 1 \
+  -type d -name ".lmms_eval_tmp_*" \
+  -mmin +"$stale_tmp_minutes" \
+  -print -exec rm -rf {} + 2>/dev/null || true
+
+# ==================================================User-defined variables ==================================================
+staging_output_path="$(mktemp -d "${output_root}/.lmms_eval_tmp_${safe_job_name}.XXXXXX")"
+pretrained_local=/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/train/Reproduction
 model_base_local=/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/LLaVA-NeXT-Video-7B-Qwen2
 siglip_local=/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/siglip-so400m-patch14-384
+# ================================================== User-defined variables ==================================================
+
+
 
 echo "=== Evaluation Configuration ==="
 echo "Benchmark: $benchmark"
-echo "Output Path: $output_path"
+echo "Output Root: $output_root"
+echo "Job Name: $job_name"
+echo "Output Path (final): $output_path"
+echo "Output Path (staging): $staging_output_path"
 echo "Pretrained (local): $pretrained_local"
 echo "Model base (local): $model_base_local"
 echo "SigLIP (local): $siglip_local"
 
 set -eo pipefail
-
-
-
-
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export VLM3R_CODE_ROOT="$script_dir"
 export HF_HOME="$FAST/hf_cache"
 export HF_DATASETS_CACHE="$FAST/hf_cache/datasets"
 export HF_HUB_CACHE="$FAST/hf_cache/hub"
@@ -64,15 +85,13 @@ export HF_DATASETS_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export HF_HUB_OFFLINE=1
 export HF_MODULES_CACHE="$FAST/hf_cache/modules"
-
 # 讓 datasets 不要一直想去網路 check
 export HF_UPDATE_DOWNLOAD_COUNTS=0
 
 
 
-# ======================
+
 # Cluster-specific modules (依你的 launch_training.sh 的想法補完整)
-# ======================
 HOSTNAME=$(hostname)
 which nvidia-smi || true
 nvidia-smi -L || true
@@ -125,9 +144,24 @@ if [[ ! -d "$siglip_local" ]]; then
 fi
 
 # Build a runtime copy of LoRA config and force mm_vision_tower to local SigLIP directory.
-runtime_pretrained="$output_path/runtime_pretrained"
-mkdir -p "$runtime_pretrained"
-cp -a "$pretrained_ref/." "$runtime_pretrained/"
+# Keep this outside output_path so eval logs only contain evaluation artifacts.
+runtime_pretrained="$(mktemp -d "${TMPDIR:-/tmp}/vlm3r_runtime_pretrained.XXXXXX")"
+echo "[INFO] Runtime pretrained temp dir: $runtime_pretrained"
+cleanup_runtime_pretrained() {
+  rm -rf "$runtime_pretrained"
+  rm -rf "$staging_output_path"
+}
+trap cleanup_runtime_pretrained EXIT
+
+shopt -s dotglob nullglob
+for item in "$pretrained_ref"/*; do
+  base_name="$(basename "$item")"
+  if [[ "$base_name" == checkpoint-* ]]; then
+    continue
+  fi
+  cp -a "$item" "$runtime_pretrained/"
+done
+shopt -u dotglob nullglob
 
 python - "$runtime_pretrained/config.json" "$siglip_local" <<'PY'
 import json
@@ -171,9 +205,12 @@ for k in [
     print(f"{k}={os.environ.get(k)}")
 
 ds = load_dataset(
-    "json",
+  "parquet",
     data_files={
-        "train": "/leonardo_scratch/fast/EUHPC_D32_006/hf_cache/hub/datasets--nyu-visionx--VSI-Bench/snapshots/d7cb1a3960b79dd3e20d4990b83005e96e1bcd9d/test.jsonl"
+    "test": [
+      "/leonardo_scratch/fast/EUHPC_D32_006/hf_cache/hub/datasets--nyu-visionx--VSI-Bench/snapshots/d7cb1a3960b79dd3e20d4990b83005e96e1bcd9d/test_pruned.parquet",
+      "/leonardo_scratch/fast/EUHPC_D32_006/hf_cache/hub/datasets--nyu-visionx--VSI-Bench/snapshots/d7cb1a3960b79dd3e20d4990b83005e96e1bcd9d/test_debiased.parquet",
+    ]
     }
 )
 print(ds)
@@ -182,11 +219,27 @@ PY
 
 
 # === Start Evaluation ===
-accelerate launch --num_processes=1 -m lmms_eval \
+log_samples_suffix="$safe_job_name"
+accelerate launch --num_processes=4 -m lmms_eval \
     --model vlm_3r \
-    --model_args "pretrained=$pretrained_ref,model_base=$model_base_ref,model_name=llava_qwen_lora,attn_implementation=flash_attention_2,conv_template=qwen_1_5,max_frames_num=32" \
+    --model_args "pretrained=$pretrained_ref,model_base=$model_base_ref,model_name=llava_qwen_lora,conv_template=qwen_1_5,max_frames_num=32" \
     --tasks vsibench \
     --batch_size 1 \
     --log_samples \
-    --log_samples_suffix vlm_3r_7b_qwen2_lora \
-    --output_path $output_path
+    --log_samples_suffix "$log_samples_suffix" \
+    --output_path "$staging_output_path"
+
+generated_output_dir="$(find "$staging_output_path" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+if [[ -z "$generated_output_dir" ]]; then
+  echo "[ERROR] Cannot find lmms_eval output under staging path: $staging_output_path"
+  exit 1
+fi
+
+if [[ -d "$output_path" ]]; then
+  backup_output_path="${output_path}_backup_$(date "+%Y%m%d_%H%M%S")"
+  echo "[WARN] Existing output path found, moving it to: $backup_output_path"
+  mv "$output_path" "$backup_output_path"
+fi
+
+mv "$generated_output_dir" "$output_path"
+echo "[INFO] Final evaluation output: $output_path"

@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=Abla_zero_spatial_features
+#SBATCH --job-name=speed_pi3x_spatial_encoder
 #SBATCH --nodes=4
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
 #SBATCH --cpus-per-task=32
-#SBATCH --time=16:00:00
+#SBATCH --time=00:30:00
 #SBATCH --partition=boost_usr_prod  
-#SBATCH --qos=normal # normal/boost_qos_dbg/boost_qos_bprod/boost_qos_Iprod
+#SBATCH --qos=boost_qos_dbg # normal/boost_qos_dbg
 #SBATCH --output=logs/train/%x_%j.out
 #SBATCH --error=logs/train/%x_%j.err
 #SBATCH --mem=0
@@ -17,7 +17,7 @@
 # ============================================================
 # User-defined variables: General
 # ============================================================
-NOTE="Ablation: zero spatial features. This run trains VLM3R on VSI-Bench with 4 GPU, flash attention 2, max_frames_num=32, and local SigLIP. This is a reproduction run for the paper."
+NOTE="Test speed: Pi3X spatial encoder. This run trains VLM3R on VSI-Bench with Pi3X as the spatial encoder (replacing CUT3R). Loads pre-extracted .pt files from spatial_features_pi3x/ subdirectory."
 CONDA_ENV_NAME="vlm3r"
 
 # ============================================================
@@ -28,7 +28,7 @@ LOCAL_SIGLIP="/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/siglip-so400m
 DATA_ROOT="/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r"
 
 TRAIN_SAVE_ROOT="/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/train"
-TRAIN_RUN_NAME="zero_spatial_features"
+TRAIN_RUN_NAME="pi3x_spatial_encoder"
 
 WANDB_DIR="$WORK/wandb"
 WANDB_CACHE_DIR="$WORK/wandb_cache"
@@ -43,29 +43,29 @@ HUGGINGFACE_HUB_CACHE="$HF_HOME/hub"
 # ============================================================
 RESUME_MODE="fresh"                 # choices: fresh / continue
 RESUME_CHECKPOINT_PATH="none"       # e.g. /path/to/checkpoint-1000
-ZERO_SPATIAL_FEATURES="True"        # choices: False / True
+ZERO_SPATIAL_FEATURES="False"       # choices: False / True (not needed for Pi3X)
 SEED=42
 
 # ============================================================
 # User-defined variables: Model/Data/Training presets
 # ============================================================
-SUFFIX="vlm_3r_vsibench_zero_spatial_features_cross_attn_lora"
+SUFFIX="vlm_3r_vsibench_pi3x_cross_attn_lora"
 
 MODEL_LORA_ENABLE="True"
 MODEL_LORA_R="128"
 MODEL_LORA_ALPHA="256"
-MODEL_SPATIAL_TOWER="cut3r"
+MODEL_SPATIAL_TOWER="pi3x"
 MODEL_SPATIAL_TOWER_SELECT_FEATURE="all_tokens"
-MODEL_SPATIAL_FEATURE_DIM="768"
+MODEL_SPATIAL_FEATURE_DIM="2048"
 MODEL_FUSION_BLOCK="cross_attention"
 MODEL_TUNE_SPATIAL_TOWER="False"
 MODEL_TUNE_FUSION_BLOCK="True"
 MODEL_TUNE_MM_MLP_ADAPTER="True"
 MODEL_VERSION="qwen_1_5"
 MODEL_MM_PROJECTOR_TYPE="mlp2x_gelu"
-MODEL_MM_VISION_SELECT_LAYER="-2"
-MODEL_MM_USE_IM_START_END="False"
-MODEL_MM_USE_IM_PATCH_TOKEN="False"
+MODEL_MM_VISION_SELECT_LAYER="-1"   #  从视觉编码器选择第几层特征
+MODEL_MM_USE_IM_START_END="False"   #是否添加特殊的图像起止标记 <image>...</image>
+MODEL_MM_USE_IM_PATCH_TOKEN="False" #是否使用图像补丁标记（如 <im_patch_0>）来保留空间位置信息，通常配合融合模块的空间池化使用
 MODEL_IMAGE_ASPECT_RATIO="anyres_max_9"
 MODEL_IMAGE_GRID_PINPOINTS="(1x1),...,(6x6)"
 MODEL_MM_PATCH_MERGE_TYPE="spatial_unpad"
@@ -299,6 +299,7 @@ declare -A DATA_ARGS=(
     [image_folder]="$DATA_ROOT"
     [video_folder]="$DATA_ROOT"
     [zero_spatial_features]="$ZERO_SPATIAL_FEATURES"
+    [spatial_features_subdir]="spatial_features_pi3x"
     [group_by_modality_length]="$DATA_GROUP_BY_MODALITY_LENGTH"   #控制 dataloader sampler 是否按模態長度分組（
                                         #通常可減少 padding、讓 batch 更穩定）
 )

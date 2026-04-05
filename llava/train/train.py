@@ -189,7 +189,12 @@ class ModelArguments:
     spatial_feature_dim: Optional[int] = field(default=None)
     tune_spatial_tower: bool = field(default=False)
     ## fusion block
-    fusion_block: Optional[str] = field(default=None)
+    fusion_block: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Fusion strategy. New ablations: svf_baseline, svf_patch_cam_concat, svf_geometry_bridge"
+        },
+    )
     tune_fusion_block: bool = field(default=False)
 
     unfreeze_mm_vision_tower: bool = field(default=False)
@@ -252,6 +257,12 @@ class DataArguments:
     frames_upbound: Optional[int] = field(default=0)
     add_time_instruction: Optional[bool] = field(default=False)
     force_sample: Optional[bool] = field(default=False)
+    train_data_percentage: float = field(default=100.0, metadata={"help": "Percentage of loaded training samples to keep (0 < value <= 100)."})
+    train_data_percentage_seed: int = field(default=42, metadata={"help": "Seed used for deterministic subset selection and dataset-level shuffle."})
+    train_data_shuffle: bool = field(default=True, metadata={"help": "If True, shuffle loaded training samples before training."})
+    zero_spatial_features: Optional[bool] = field(default=False, metadata={"help": "If True, zero out all loaded spatial feature tensors from .pt files for ablation."})
+    spatial_tower_type: Optional[str] = field(default=None, metadata={"help": "Spatial tower type (e.g. cut3r, vggt, pi3x). Set automatically from model_args. Controls whether .pt files are loaded."})
+    spatial_features_subdir: Optional[str] = field(default="spatial_features", metadata={"help": "Subdirectory used to locate pre-extracted spatial features relative to video paths (default: spatial_features)."})
 
 
 @dataclass
@@ -421,6 +432,70 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: st
         cpu_state_dict = {key: value.cpu() for key, value in state_dict.items()}
         del state_dict
         trainer._save(output_dir, state_dict=cpu_state_dict)  # noqa
+
+
+def _guess_causallm_architecture_name(model):
+    """Best-effort architecture detection for checkpoint metadata."""
+    queue = [model]
+    visited = set()
+
+    while queue:
+        current = queue.pop(0)
+        if current is None:
+            continue
+
+        obj_id = id(current)
+        if obj_id in visited:
+            continue
+        visited.add(obj_id)
+
+        cls_name = current.__class__.__name__
+        if cls_name.endswith("ForCausalLM") and not cls_name.startswith("Peft"):
+            return cls_name
+
+        for attr_name in ["module", "base_model", "model"]:
+            child = getattr(current, attr_name, None)
+            if child is not None:
+                queue.append(child)
+
+        get_base_model = getattr(current, "get_base_model", None)
+        if callable(get_base_model):
+            try:
+                queue.append(get_base_model())
+            except TypeError:
+                pass
+
+    return None
+
+
+def ensure_checkpoint_config_metadata(model, source_model_name_or_path=None):
+    """Ensure saved config keeps architecture metadata for downstream loaders."""
+    cfg = getattr(model, "config", None)
+    if cfg is None:
+        return
+
+    existing_architectures = getattr(cfg, "architectures", None)
+    if existing_architectures:
+        return
+
+    inferred_architectures = None
+    if source_model_name_or_path:
+        try:
+            source_cfg = AutoConfig.from_pretrained(source_model_name_or_path)
+            source_architectures = getattr(source_cfg, "architectures", None)
+            if source_architectures:
+                inferred_architectures = list(source_architectures)
+        except Exception as err:
+            rank0_print(f"[CONFIG] Failed to read source architectures from {source_model_name_or_path}: {err}")
+
+    if inferred_architectures is None:
+        guessed_arch = _guess_causallm_architecture_name(model)
+        if guessed_arch:
+            inferred_architectures = [guessed_arch]
+
+    if inferred_architectures:
+        cfg.architectures = inferred_architectures
+        rank0_print(f"[CONFIG] Set missing architectures to {cfg.architectures}")
 
 
 def smart_tokenizer_and_embedding_resize(
@@ -1076,6 +1151,18 @@ def preprocess(sources: Sequence[str], tokenizer: transformers.PreTrainedTokeniz
     return dict(input_ids=input_ids, labels=targets)
 
 
+def zero_nested_tensors(value):
+    if isinstance(value, torch.Tensor):
+        return torch.zeros_like(value)
+    if isinstance(value, dict):
+        return {k: zero_nested_tensors(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [zero_nested_tensors(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(zero_nested_tensors(v) for v in value)
+    return value
+
+
 class LazySupervisedDataset(Dataset):
     def __init__(self, data_path: str, tokenizer: transformers.PreTrainedTokenizer, data_args: DataArguments):
         super(LazySupervisedDataset, self).__init__()
@@ -1209,8 +1296,34 @@ class LazySupervisedDataset(Dataset):
                 cur_data_dict = json.load(file)
                 rank0_print(f"Loaded {len(cur_data_dict)} samples from {data_path}")
                 self.list_data_dict.extend(cur_data_dict)
-        # shuffle the data
-        random.shuffle(self.list_data_dict)
+        total_loaded = len(self.list_data_dict)
+        if data_args.train_data_percentage <= 0 or data_args.train_data_percentage > 100:
+            raise ValueError(
+                f"train_data_percentage must be in (0, 100], got {data_args.train_data_percentage}."
+            )
+
+        subset_rng = random.Random(data_args.train_data_percentage_seed)
+        if data_args.train_data_percentage < 100 and total_loaded > 0:
+            keep_count = math.ceil(total_loaded * data_args.train_data_percentage / 100.0)
+            keep_indices = subset_rng.sample(range(total_loaded), keep_count)
+            keep_indices.sort()
+            self.list_data_dict = [self.list_data_dict[idx] for idx in keep_indices]
+            rank0_print(
+                f"[DATA SUBSET] Keeping {len(self.list_data_dict)}/{total_loaded} samples "
+                f"({data_args.train_data_percentage:.2f}%) with seed {data_args.train_data_percentage_seed}."
+            )
+        else:
+            rank0_print(
+                f"[DATA SUBSET] Using full dataset ({total_loaded}/{total_loaded} samples)."
+            )
+
+        if data_args.train_data_shuffle:
+            subset_rng.shuffle(self.list_data_dict)
+            rank0_print(
+                f"[DATA SHUFFLE] Enabled dataset-level shuffle with seed {data_args.train_data_percentage_seed}."
+            )
+        else:
+            rank0_print("[DATA SHUFFLE] Disabled dataset-level shuffle.")
         rank0_print(f"Loaded {len(self.list_data_dict)} samples from {data_path}")
         rank0_print("Formatting inputs...Skip in lazy mode")
         self.tokenizer = tokenizer
@@ -1800,12 +1913,23 @@ class LazySupervisedDataset(Dataset):
 
         data_dict["id"] = self.list_data_dict[i].get("id", i)
 
-        # add spatial features
-        if "video" in self.list_data_dict[i]:
+        # add spatial features (load pre-extracted .pt files for encoders that support external spatial features)
+        spatial_tower_type = getattr(self.data_args, 'spatial_tower_type', None)
+        use_preextracted_features = (
+            spatial_tower_type is not None
+            and ('cut3r' in spatial_tower_type or 'pi3x' in spatial_tower_type)
+        )
+        if use_preextracted_features and "video" in self.list_data_dict[i]:
             video_folder = self.data_args.video_folder
-            spatial_features_path = os.path.join(video_folder, self.list_data_dict[i]['video'].replace('.mp4', '.pt').replace('videos', 'spatial_features'))
+            spatial_features_subdir = getattr(self.data_args, 'spatial_features_subdir', 'spatial_features') or 'spatial_features'
+            video_rel_path = self.list_data_dict[i]['video']
+            spatial_rel_path = os.path.splitext(video_rel_path)[0] + '.pt'
+            spatial_rel_path = spatial_rel_path.replace('videos', spatial_features_subdir)
+            spatial_features_path = os.path.join(video_folder, spatial_rel_path)
             if os.path.exists(spatial_features_path):
                 spatial_features = torch.load(spatial_features_path)
+                if self.data_args.zero_spatial_features:
+                    spatial_features = zero_nested_tensors(spatial_features)
                 data_dict["spatial_features"] = spatial_features
 
         # add point cloud
@@ -2084,6 +2208,7 @@ def train(attn_implementation=None):
     parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     rank0_print(f"[ATTN] attn_implementation={training_args.attn_implementation}")
+    rank0_print(f"[ABLATION] zero_spatial_features={data_args.zero_spatial_features}")
 
     # 设置随机种子以保证可复现性
     seed = training_args.seed
@@ -2128,6 +2253,7 @@ def train(attn_implementation=None):
         )
 
     model = get_model(model_args, training_args, bnb_model_from_pretrained_args)
+    ensure_checkpoint_config_metadata(model, source_model_name_or_path=model_args.model_name_or_path)
     model.config.use_cache = False
     if model_args.rope_scaling_factor is not None and model_args.rope_scaling_type is not None:
         model.config.rope_scaling = {
@@ -2220,8 +2346,10 @@ def train(attn_implementation=None):
         model.config.spatial_tower_select_feature = model_args.spatial_tower_select_feature
         model.config.spatial_tower_select_layer = model_args.spatial_tower_select_layer
         model.config.spatial_feature_dim = model_args.spatial_feature_dim
+        data_args.spatial_tower_type = model_args.spatial_tower
 
     if model_args.fusion_block is not None:
+        model.config.fusion_block = model_args.fusion_block
         model.get_model().initialize_fusion_block(model_args=model_args, fsdp=training_args.fsdp)
         fusion_block = model.get_fusion_block()
         fusion_block.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)

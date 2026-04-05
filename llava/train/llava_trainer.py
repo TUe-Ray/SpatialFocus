@@ -195,8 +195,8 @@ def get_modality_length_grouped_indices(lengths, batch_size, world_size, generat
     mm_indices, mm_lengths = zip(*[(i, l) for i, l in enumerate(lengths) if l > 0])
     lang_indices, lang_lengths = zip(*[(i, -l) for i, l in enumerate(lengths) if l < 0])
 
-    mm_shuffle = [mm_indices[i] for i in get_length_grouped_indices(mm_lengths, batch_size, world_size, generator=None)]
-    lang_shuffle = [lang_indices[i] for i in get_length_grouped_indices(lang_lengths, batch_size, world_size, generator=None)]
+    mm_shuffle = [mm_indices[i] for i in get_length_grouped_indices(mm_lengths, batch_size, world_size, generator=generator)]
+    lang_shuffle = [lang_indices[i] for i in get_length_grouped_indices(lang_lengths, batch_size, world_size, generator=generator)]
     megabatch_size = world_size * batch_size
     mm_megabatches = [mm_shuffle[i : i + megabatch_size] for i in range(0, len(mm_shuffle), megabatch_size)]
     lang_megabatches = [lang_shuffle[i : i + megabatch_size] for i in range(0, len(lang_shuffle), megabatch_size)]
@@ -261,8 +261,8 @@ def get_modality_length_grouped_indices_auto(lengths, batch_size, world_size, ge
     mm_indices, mm_lengths = zip(*[(i, l) for i, l in enumerate(lengths) if l > 0])
     lang_indices, lang_lengths = zip(*[(i, -l) for i, l in enumerate(lengths) if l < 0])
 
-    mm_shuffle = [mm_indices[i] for i in get_length_grouped_indices_auto_single(mm_lengths, batch_size, world_size, generator=None)]
-    lang_shuffle = [lang_indices[i] for i in get_length_grouped_indices_auto_single(lang_lengths, batch_size, world_size, generator=None)]
+    mm_shuffle = [mm_indices[i] for i in get_length_grouped_indices_auto_single(mm_lengths, batch_size, world_size, generator=generator)]
+    lang_shuffle = [lang_indices[i] for i in get_length_grouped_indices_auto_single(lang_lengths, batch_size, world_size, generator=generator)]
     megabatch_size = world_size * batch_size
     mm_megabatches = [mm_shuffle[i : i + megabatch_size] for i in range(0, len(mm_shuffle), megabatch_size)]
     lang_megabatches = [lang_shuffle[i : i + megabatch_size] for i in range(0, len(lang_shuffle), megabatch_size)]
@@ -327,6 +327,15 @@ class LengthGroupedSampler(Sampler):
 
 class LLaVATrainer(Trainer):
 
+    def _build_sampler_generator(self):
+        seed = getattr(self.args, "data_seed", None)
+        if seed is None:
+            seed = getattr(self.args, "seed", 42)
+
+        generator = torch.Generator()
+        generator.manual_seed(int(seed))
+        return generator
+
     def create_accelerator_and_postprocess(self):
         grad_acc_kwargs = {"num_steps": self.args.gradient_accumulation_steps}
         grad_acc_kwargs["sync_with_dataloader"] = False
@@ -361,6 +370,7 @@ class LLaVATrainer(Trainer):
     def _get_train_sampler(self) -> Optional[torch.utils.data.Sampler]:
         if self.train_dataset is None or not has_length(self.train_dataset):
             return None
+        sampler_generator = self._build_sampler_generator()
 
         if self.args.group_by_length:
             lengths = self.train_dataset.lengths
@@ -370,6 +380,7 @@ class LLaVATrainer(Trainer):
                 # world_size=self.args.world_size,
                 world_size=self.args.world_size * self.args.gradient_accumulation_steps,  # TODO: seems that this may work?
                 lengths=lengths,
+                generator=sampler_generator,
             )
         elif self.args.group_by_modality_length:
             lengths = self.train_dataset.modality_lengths
@@ -380,6 +391,7 @@ class LLaVATrainer(Trainer):
                 world_size=self.args.world_size * self.args.gradient_accumulation_steps,  # TODO: seems that this may work?
                 lengths=lengths,
                 group_by_modality=True,
+                generator=sampler_generator,
             )
         elif self.args.group_by_modality_length_auto:
             lengths = self.train_dataset.modality_lengths
@@ -390,6 +402,7 @@ class LLaVATrainer(Trainer):
                 world_size=self.args.world_size * self.args.gradient_accumulation_steps,  # TODO: seems that this may work?
                 lengths=lengths,
                 group_by_modality_auto=True,
+                generator=sampler_generator,
             )
         elif self.args.group_by_varlen:
             lengths = self.train_dataset.lengths
@@ -400,6 +413,7 @@ class LLaVATrainer(Trainer):
                 world_size=self.args.world_size * self.args.gradient_accumulation_steps,  # TODO: seems that this may work?
                 lengths=lengths,
                 variable_length=True,
+                generator=sampler_generator,
             )
         else:
             return super()._get_train_sampler()
@@ -432,7 +446,11 @@ class LLaVATrainer(Trainer):
         }
 
         if not isinstance(train_dataset, torch.utils.data.IterableDataset):
-            dataloader_params["sampler"] = self._get_train_sampler()
+            train_sampler = self._get_train_sampler()
+            if train_sampler is not None:
+                dataloader_params["sampler"] = train_sampler
+            else:
+                dataloader_params["shuffle"] = True
             dataloader_params["drop_last"] = self.args.dataloader_drop_last
             dataloader_params["worker_init_fn"] = seed_worker
             dataloader_params["prefetch_factor"] = self.args.dataloader_num_workers * 2 if self.args.dataloader_num_workers != 0 else None

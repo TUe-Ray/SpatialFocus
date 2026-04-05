@@ -1,5 +1,7 @@
 import copy
 import math
+import os
+from pathlib import Path
 from datetime import timedelta
 from typing import List, Optional, Tuple, Union
 
@@ -17,7 +19,11 @@ from lmms_eval.api.model import lmms
 from lmms_eval.api.registry import register_model
 from lmms_eval.models.model_utils.load_video import read_video_pyav
 
-import sys; sys.path = ["../../VLM-3R/"] + sys.path
+import sys
+_default_repo_root = str(Path(__file__).resolve().parents[3])
+_repo_root = os.environ.get("VLM3R_CODE_ROOT", _default_repo_root)
+if _repo_root not in sys.path:
+    sys.path = [_repo_root] + sys.path
 try:
     from llava.constants import (
         DEFAULT_IM_END_TOKEN,
@@ -81,6 +87,7 @@ class Vlm3r(lmms):
         tie_weights: bool = True,
         model_name: str = None,
         model_base: str = None,
+        zero_spatial_features: Union[bool, str] = False,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -115,6 +122,10 @@ class Vlm3r(lmms):
         self.mm_newline_position = mm_newline_position
         self.delay_load = delay_load
         self.attn_implementation = attn_implementation
+        if isinstance(zero_spatial_features, str):
+            self.zero_spatial_features = zero_spatial_features.lower() in {"1", "true", "yes", "y", "on"}
+        else:
+            self.zero_spatial_features = bool(zero_spatial_features)
 
         if self.overwrite == True:
             overwrite_config = {}
@@ -126,11 +137,29 @@ class Vlm3r(lmms):
             overwrite_config["mm_newline_position"] = self.mm_newline_position
             overwrite_config["add_faster_video"] = False
             overwrite_config["delay_load"] = self.delay_load
+            overwrite_config["zero_spatial_features"] = self.zero_spatial_features
             # overwrite_config["attn_implementation"] = attn_implementation
 
             cfg_pretrained = AutoConfig.from_pretrained(self.pretrained)
+            architectures = getattr(cfg_pretrained, "architectures", None) or []
+            model_architecture = architectures[0] if len(architectures) > 0 else None
 
-            if cfg_pretrained.architectures[0] == "LlavaLlamaForCausalLM":  # Ugly code, only used in  vicuna that needs ROPE
+            # Some LoRA/PEFT checkpoints do not persist `architectures` in config.json.
+            # Fall back to model_base for architecture-specific branching when needed.
+            if model_architecture is None and model_base is not None:
+                try:
+                    cfg_base = AutoConfig.from_pretrained(model_base)
+                    base_architectures = getattr(cfg_base, "architectures", None) or []
+                    if len(base_architectures) > 0:
+                        model_architecture = base_architectures[0]
+                        eval_logger.info(
+                            "[CFG] Missing architectures in pretrained config; fallback to model_base architecture={}.",
+                            model_architecture,
+                        )
+                except Exception as err:
+                    eval_logger.warning("[CFG] Failed to load model_base config for architecture fallback: {}", err)
+
+            if model_architecture == "LlavaLlamaForCausalLM":  # Ugly code, only used in  vicuna that needs ROPE
                 if "224" in cfg_pretrained.mm_vision_tower:
                     least_token_number = self.max_frames_num * (16 // self.mm_spatial_pool_stride) ** 2 + 1000
                 else:
@@ -187,6 +216,7 @@ class Vlm3r(lmms):
             )
 
         self._config = self._model.config
+        setattr(self._config, "zero_spatial_features", self.zero_spatial_features)
         resolved_attn_implementation = getattr(self._config, "_attn_implementation", None)
         if resolved_attn_implementation is None:
             resolved_attn_implementation = getattr(self._config, "attn_implementation", None)
@@ -195,6 +225,7 @@ class Vlm3r(lmms):
             self.attn_implementation,
             resolved_attn_implementation,
         )
+        eval_logger.info("[ABLATION][EVAL] zero_spatial_features={}", self.zero_spatial_features)
         self.model.eval()
         if tie_weights:
             self.model.tie_weights()

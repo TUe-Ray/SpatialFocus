@@ -81,7 +81,9 @@ class LlavaMetaModel:
         self.config.mm_spatial_tower = cli_spatial_tower
 
         if self.get_spatial_tower() is None:
-            spatial_tower = build_spatial_tower(model_args)
+            # When creating the spatial tower for the first time, force eager load.
+            # Otherwise some towers keep only config (delay_load=True) and fail at first forward.
+            spatial_tower = build_spatial_tower(model_args, delay_load=False)
 
             if hasattr(spatial_tower.config, "to_dict"):
                 cfg_dict = spatial_tower.config.to_dict()
@@ -115,8 +117,45 @@ class LlavaMetaModel:
             spatial_tower.load_model()
 
     def initialize_fusion_block(self, model_args, fsdp=None):
-        # initialize the fusion block
-        if getattr(self, "fusion_block", None) is None:
+        requested_fusion_block = getattr(model_args, "fusion_block", None)
+        if requested_fusion_block is not None:
+            self.config.fusion_block = requested_fusion_block
+
+        def _expected_class_name(fusion_block_type):
+            if fusion_block_type in ["cross_attention", "svf_baseline"]:
+                return "CrossAttentionFusion"
+            if fusion_block_type == "svf_patch_cam_concat":
+                return "PatchCrossAttentionCameraConcatFusion"
+            if fusion_block_type == "svf_geometry_bridge":
+                return "GeometryBridgeFusion"
+            if fusion_block_type == "cross_attention_with_mlp":
+                return "CrossAttentionFusionWithMLP"
+            if fusion_block_type == "mlp_after_clip_proj":
+                return "MLPFusion"
+            if fusion_block_type == "transformer":
+                return "TransformerFusion"
+            if fusion_block_type == "concat_mlp":
+                return "ConcatMLPFusion"
+            if fusion_block_type == "concat_self_attention":
+                return "ConcatSelfAttentionFusion"
+            if fusion_block_type == "llava_3d_fusion_block":
+                return "llava_3d_fusion_block"
+            if fusion_block_type == "video_3d_llm_fusion_block":
+                return "video_3d_llm_fusion_block"
+            if isinstance(fusion_block_type, str) and fusion_block_type.endswith("_layer_cross_attention"):
+                return "MultiLayerCrossAttentionFusion"
+            return None
+
+        existing_fusion_block = self.get_fusion_block()
+        current_type = getattr(self.config, "fusion_block", None)
+        expected_cls = _expected_class_name(current_type)
+        needs_rebuild = (
+            existing_fusion_block is None
+            or (expected_cls is not None and existing_fusion_block.__class__.__name__ != expected_cls)
+        )
+
+        # Build/rebuild to keep the instantiated module aligned with config.fusion_block.
+        if needs_rebuild:
             self.fusion_block = build_multimodal_fusion_block(self.config)
         else:
             # In case it is frozen by LoRA
@@ -343,27 +382,66 @@ class LlavaMetaForCausalLM(ABC):
                 image_features = self.get_model().mm_projector(image_features)
             
             else:
-                if spatial_features is not None and 'cut3r' in spatial_encoder_type:
+                zero_spatial_features = getattr(self.get_model().config, "zero_spatial_features", False)
+                if isinstance(zero_spatial_features, str):
+                    zero_spatial_features = zero_spatial_features.lower() in {"1", "true", "yes", "y", "on"}
+
+                supports_preextracted = spatial_encoder_type is not None and (
+                    'cut3r' in spatial_encoder_type or 'pi3x' in spatial_encoder_type
+                )
+
+                if zero_spatial_features and supports_preextracted:
+                    # Ablation mode: skip spatial tower forward and use zero tokens with CUT3R-compatible shapes.
+                    batch_frames = image_features.shape[0]
+                    patch_token_num = image_features.shape[1]
+                    spatial_dim = int(getattr(self.get_model().config, "spatial_feature_dim", 768))
+                    camera_tokens = image_features.new_zeros((batch_frames, 1, spatial_dim))
+                    patch_tokens = image_features.new_zeros((batch_frames, patch_token_num, spatial_dim))
+                elif spatial_features is not None and supports_preextracted:
                     camera_tokens, patch_tokens = spatial_features[0]["camera_tokens"], spatial_features[0]["patch_tokens"]
                 else:
                     camera_tokens, patch_tokens = self.get_model().get_spatial_tower()(images)
                 
-                if fusion_block_type == 'cross_attention':
-                    # fuse with spatial features
-                    spatial_tower_select_feature = getattr(self.config, "spatial_tower_select_feature", "patch_tokens")
-                    spatial_tower_select_feature_list = spatial_tower_select_feature.split(",")
-                    final_image_features = []
-                    for spatial_tower_select_feature in spatial_tower_select_feature_list:
-                        if spatial_tower_select_feature == "camera_tokens":
-                            final_image_features.append(camera_tokens)
-                        elif spatial_tower_select_feature == "patch_tokens":
-                            final_image_features.append(patch_tokens)
-                        elif spatial_tower_select_feature in ["all", "all_tokens"]:
-                            final_image_features = [camera_tokens, patch_tokens]
-                        else:
-                            raise ValueError(f"Unexpected spatial_tower_select_feature: {spatial_tower_select_feature}")
-                    final_image_features = torch.cat(final_image_features, dim=1).to(self.dtype)
+                if fusion_block_type in ['cross_attention', 'svf_baseline']:
+                    # Build spatial KV tokens.
+                    if fusion_block_type == 'svf_baseline':
+                        # Ablation-1: Q=2D, KV=[camera, patch], output=2D+cross_attn.
+                        final_image_features = torch.cat((camera_tokens, patch_tokens), dim=1).to(self.dtype)
+                    else:
+                        # Legacy cross_attention keeps runtime-selectable spatial token composition.
+                        spatial_tower_select_feature = getattr(self.config, "spatial_tower_select_feature", "patch_tokens")
+                        spatial_tower_select_feature_list = spatial_tower_select_feature.split(",")
+                        selected_tokens = []
+                        for spatial_tower_select_feature in spatial_tower_select_feature_list:
+                            if spatial_tower_select_feature == "camera_tokens":
+                                selected_tokens.append(camera_tokens)
+                            elif spatial_tower_select_feature == "patch_tokens":
+                                selected_tokens.append(patch_tokens)
+                            elif spatial_tower_select_feature in ["all", "all_tokens"]:
+                                selected_tokens = [camera_tokens, patch_tokens]
+                            else:
+                                raise ValueError(f"Unexpected spatial_tower_select_feature: {spatial_tower_select_feature}")
+                        final_image_features = torch.cat(selected_tokens, dim=1).to(self.dtype)
+
                     image_features, attn_weights = self.get_model().get_fusion_block()(image_features, final_image_features)
+                    image_features = self.get_model().mm_projector(image_features)
+
+                elif fusion_block_type == 'svf_patch_cam_concat':
+                    # Ablation-2: Q=2D, KV=patch only, then prepend projected camera tokens.
+                    image_features, attn_weights = self.get_model().get_fusion_block()(
+                        image_features,
+                        patch_tokens.to(self.dtype),
+                        camera_tokens.to(self.dtype),
+                    )
+                    image_features = self.get_model().mm_projector(image_features)
+
+                elif fusion_block_type == 'svf_geometry_bridge':
+                    # Ablation-3: camera->patch attention builds geometry-aware tokens, then 2D queries those tokens.
+                    image_features, attn_weights = self.get_model().get_fusion_block()(
+                        image_features,
+                        camera_tokens.to(self.dtype),
+                        patch_tokens.to(self.dtype),
+                    )
                     image_features = self.get_model().mm_projector(image_features)
                 
                 elif fusion_block_type == 'cross_attention_with_mlp':
@@ -383,6 +461,9 @@ class LlavaMetaForCausalLM(ABC):
 
                     image_features = self.get_model().mm_projector(image_features)
                     image_features = self.get_model().get_fusion_block()(image_features, patch_tokens)
+
+                else:
+                    raise ValueError(f"Unexpected fusion block type: {fusion_block_type}")
 
         elif self.get_model().get_spatial_tower() is None and self.get_model().get_fusion_block() is not None:
             assert point_maps is not None

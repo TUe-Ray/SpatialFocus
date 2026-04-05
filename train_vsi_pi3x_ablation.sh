@@ -1,12 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=Abla_zero_spatial_features
+#!/bin/bash
+#SBATCH --job-name=ablation_svf_baseline_100percent
 #SBATCH --nodes=4
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
 #SBATCH --cpus-per-task=32
-#SBATCH --time=16:00:00
+#SBATCH --time=00:30:00
 #SBATCH --partition=boost_usr_prod  
-#SBATCH --qos=normal # normal/boost_qos_dbg/boost_qos_bprod/boost_qos_Iprod
+#SBATCH --qos=boost_qos_dbg # normal/boost_qos_dbg
 #SBATCH --output=logs/train/%x_%j.out
 #SBATCH --error=logs/train/%x_%j.err
 #SBATCH --mem=0
@@ -17,7 +18,7 @@
 # ============================================================
 # User-defined variables: General
 # ============================================================
-NOTE="Ablation: zero spatial features. This run trains VLM3R on VSI-Bench with 4 GPU, flash attention 2, max_frames_num=32, and local SigLIP. This is a reproduction run for the paper."
+NOTE="dbg ablation svf_baseline 100% data, 4 nodes x 4 GPUs, 1 epoch (adjust as needed), no evaluation during training, just to verify training runs and can overfit small data"
 CONDA_ENV_NAME="vlm3r"
 
 # ============================================================
@@ -28,7 +29,7 @@ LOCAL_SIGLIP="/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/siglip-so400m
 DATA_ROOT="/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r"
 
 TRAIN_SAVE_ROOT="/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/train"
-TRAIN_RUN_NAME="zero_spatial_features"
+TRAIN_RUN_NAME="pi3x_spatial_encoder"
 
 WANDB_DIR="$WORK/wandb"
 WANDB_CACHE_DIR="$WORK/wandb_cache"
@@ -43,29 +44,47 @@ HUGGINGFACE_HUB_CACHE="$HF_HOME/hub"
 # ============================================================
 RESUME_MODE="fresh"                 # choices: fresh / continue
 RESUME_CHECKPOINT_PATH="none"       # e.g. /path/to/checkpoint-1000
-ZERO_SPATIAL_FEATURES="True"        # choices: False / True
+ZERO_SPATIAL_FEATURES="False"       # choices: False / True (not needed for Pi3X)
 SEED=42
 
 # ============================================================
 # User-defined variables: Model/Data/Training presets
 # ============================================================
-SUFFIX="vlm_3r_vsibench_zero_spatial_features_cross_attn_lora"
+SUFFIX="vlm_3r_vsibench_pi3x_ablation_lora"
 
 MODEL_LORA_ENABLE="True"
 MODEL_LORA_R="128"
 MODEL_LORA_ALPHA="256"
-MODEL_SPATIAL_TOWER="cut3r"
+MODEL_SPATIAL_TOWER="pi3x"
 MODEL_SPATIAL_TOWER_SELECT_FEATURE="all_tokens"
-MODEL_SPATIAL_FEATURE_DIM="768"
-MODEL_FUSION_BLOCK="cross_attention"
+MODEL_SPATIAL_FEATURE_DIM="2048"
+# Fusion options for ablation:
+# 1) svf_baseline
+#    Q=2D visual tokens, K/V=[camera tokens, patch tokens]
+#    output = 2D + cross_attn residual, then mm_projector
+# 2) svf_patch_cam_concat
+#    Q=2D visual tokens, K/V=patch tokens only
+#    output = [projected camera tokens, fused 2D tokens] concat, then mm_projector
+# 3) svf_geometry_bridge
+#    stage-1: Q=camera tokens, K/V=patch tokens -> geometry-aware 3D tokens
+#    stage-2: Q=2D visual tokens, K/V=geometry-aware 3D tokens, then mm_projector
+# Legacy option kept for compatibility:
+# - cross_attention (uses spatial_tower_select_feature to choose camera/patch/all)
+MODEL_FUSION_BLOCK="svf_baseline"
+# ============== Training percentage and shuffling (for ablation) ==============
+TRAIN_DATA_PERCENTAGE="100"
+TRAIN_DATA_PERCENTAGE_SEED="$SEED"
+TRAIN_DATA_SHUFFLE="True"
+
+
 MODEL_TUNE_SPATIAL_TOWER="False"
 MODEL_TUNE_FUSION_BLOCK="True"
 MODEL_TUNE_MM_MLP_ADAPTER="True"
 MODEL_VERSION="qwen_1_5"
 MODEL_MM_PROJECTOR_TYPE="mlp2x_gelu"
-MODEL_MM_VISION_SELECT_LAYER="-2"
-MODEL_MM_USE_IM_START_END="False"
-MODEL_MM_USE_IM_PATCH_TOKEN="False"
+MODEL_MM_VISION_SELECT_LAYER="-1"   #  从视觉编码器选择第几层特征
+MODEL_MM_USE_IM_START_END="False"   #是否添加特殊的图像起止标记 <image>...</image>
+MODEL_MM_USE_IM_PATCH_TOKEN="False" #是否使用图像补丁标记（如 <im_patch_0>）来保留空间位置信息，通常配合融合模块的空间池化使用
 MODEL_IMAGE_ASPECT_RATIO="anyres_max_9"
 MODEL_IMAGE_GRID_PINPOINTS="(1x1),...,(6x6)"
 MODEL_MM_PATCH_MERGE_TYPE="spatial_unpad"
@@ -85,6 +104,7 @@ MODEL_MM_SPATIAL_POOL_STRIDE="2"
 DATA_PATH_YAML="scripts/VLM_3R/vsibench_data.yaml"
 DATA_GROUP_BY_MODALITY_LENGTH="True"
 
+
 PER_DEVICE_TRAIN_BATCH_SIZE=1
 TARGET_GLOBAL_BATCH_SIZE=128
 NUM_TRAIN_EPOCHS="1"
@@ -96,7 +116,7 @@ WEIGHT_DECAY="0."
 WARMUP_RATIO="0.03"
 LR_SCHEDULER_TYPE="cosine"
 LOGGING_STEPS="5"
-DATALOADER_NUM_WORKERS="8"
+DATALOADER_NUM_WORKERS="6"
 REPORT_TO="wandb"
 DATALOADER_DROP_LAST="True"
 
@@ -259,6 +279,38 @@ echo "[BATCH] GRADIENT_ACCUMULATION_STEPS=$GRADIENT_ACCUMULATION_STEPS"
 #   True  -> load .pt and zero all tensor values
 echo "[ABLATION] ZERO_SPATIAL_FEATURES=$ZERO_SPATIAL_FEATURES"
 
+# Validate fusion option and print method summary for reproducibility.
+VALID_FUSION_BLOCKS=("cross_attention" "svf_baseline" "svf_patch_cam_concat" "svf_geometry_bridge")
+IS_VALID_FUSION="False"
+for fusion_name in "${VALID_FUSION_BLOCKS[@]}"; do
+    if [[ "$MODEL_FUSION_BLOCK" == "$fusion_name" ]]; then
+        IS_VALID_FUSION="True"
+        break
+    fi
+done
+
+if [[ "$IS_VALID_FUSION" != "True" ]]; then
+    echo "[ERROR] Unsupported MODEL_FUSION_BLOCK: $MODEL_FUSION_BLOCK"
+    echo "[ERROR] Supported values: ${VALID_FUSION_BLOCKS[*]}"
+    exit 1
+fi
+
+echo "[FUSION] MODEL_FUSION_BLOCK=$MODEL_FUSION_BLOCK"
+case "$MODEL_FUSION_BLOCK" in
+    svf_baseline)
+        echo "[FUSION] svf_baseline: Q=2D, KV=[camera,patch], output=2D+attn, then mm_projector"
+        ;;
+    svf_patch_cam_concat)
+        echo "[FUSION] svf_patch_cam_concat: Q=2D, KV=patch, output=[camera,fused2D] concat, then mm_projector"
+        ;;
+    svf_geometry_bridge)
+        echo "[FUSION] svf_geometry_bridge: camera->patch attention builds geometry tokens, then 2D attends geometry tokens"
+        ;;
+    cross_attention)
+        echo "[FUSION] cross_attention (legacy): token source controlled by MODEL_SPATIAL_TOWER_SELECT_FEATURE"
+        ;;
+esac
+
 declare -A MODEL_ARGS=(
     [model_name_or_path]="$LOCAL_MODEL_BASE"
     [lora_enable]="$MODEL_LORA_ENABLE"
@@ -299,6 +351,10 @@ declare -A DATA_ARGS=(
     [image_folder]="$DATA_ROOT"
     [video_folder]="$DATA_ROOT"
     [zero_spatial_features]="$ZERO_SPATIAL_FEATURES"
+    [spatial_features_subdir]="spatial_features_pi3x"
+    [train_data_percentage]="$TRAIN_DATA_PERCENTAGE"
+    [train_data_percentage_seed]="$TRAIN_DATA_PERCENTAGE_SEED"
+    [train_data_shuffle]="$TRAIN_DATA_SHUFFLE"
     [group_by_modality_length]="$DATA_GROUP_BY_MODALITY_LENGTH"   #控制 dataloader sampler 是否按模態長度分組（
                                         #通常可減少 padding、讓 batch 更穩定）
 )
