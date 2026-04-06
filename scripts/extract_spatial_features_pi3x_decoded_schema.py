@@ -132,6 +132,7 @@ import torch.nn as nn
 import torch.multiprocessing as mp # Added for multiprocessing
 import json
 import math
+import numpy as np
 from PIL import Image, ImageFile
 from pathlib import Path # For path manipulation
 import traceback # For error reporting in subprocesses
@@ -292,7 +293,8 @@ def extract_decoded_features_and_pos(spatial_tower, pixel_values):
 
     with torch.no_grad():
         autocast_enabled = pixel_values.is_cuda and pixel_values.dtype in (torch.float16, torch.bfloat16)
-        with torch.cuda.amp.autocast(enabled=autocast_enabled, dtype=pixel_values.dtype if autocast_enabled else torch.float16):
+        autocast_dtype = pixel_values.dtype if autocast_enabled else torch.float16
+        with torch.amp.autocast(device_type='cuda', enabled=autocast_enabled, dtype=autocast_dtype):
             imgs_norm = (imgs - spatial_tower.pi3.image_mean) / spatial_tower.pi3.image_std
             B, N, C, H, W = imgs_norm.shape
             imgs_flat = imgs_norm.reshape(B * N, C, H, W)
