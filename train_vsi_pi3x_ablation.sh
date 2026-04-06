@@ -124,6 +124,8 @@ PROFILE_TRAINING_STAGES="True"
 PROFILE_WARMUP_STEPS="10"
 ENABLE_NVTX_RANGES="True"
 NSYS_CAPTURE_AFTER_WARMUP="True"
+NSYS_CAPTURE_START_STEP="25"
+NSYS_CAPTURE_END_STEP="30"
 
 # Nsight Systems timeline profiling (set True for a short profiling run).
 # Recommended: use 1 node x 1 GPU when ENABLE_NSYS_PROFILE=True to reduce trace size.
@@ -406,6 +408,8 @@ declare -A TRAINING_ARGS=(
     [profile_warmup_steps]="$PROFILE_WARMUP_STEPS"
     [enable_nvtx_ranges]="$ENABLE_NVTX_RANGES"
     [nsys_capture_after_warmup]="$NSYS_CAPTURE_AFTER_WARMUP"
+    [nsys_capture_start_step]="$NSYS_CAPTURE_START_STEP"
+    [nsys_capture_end_step]="$NSYS_CAPTURE_END_STEP"
     [seed]="$SEED"
     [data_seed]="$SEED"
 )
@@ -465,7 +469,7 @@ done
 
 for key in "${!TRAINING_ARGS[@]}"; do
     case "$key" in
-        profile_training_stages|profile_warmup_steps|enable_nvtx_ranges|nsys_capture_after_warmup)
+        profile_training_stages|profile_warmup_steps|enable_nvtx_ranges|nsys_capture_after_warmup|nsys_capture_start_step|nsys_capture_end_step)
             continue
             ;;
     esac
@@ -500,6 +504,8 @@ if [[ -f "$TRAIN_PY_PATH" ]]; then
         "profile_warmup_steps"
         "enable_nvtx_ranges"
         "nsys_capture_after_warmup"
+        "nsys_capture_start_step"
+        "nsys_capture_end_step"
     )
     for key in "${OPTIONAL_TRAIN_ARG_KEYS[@]}"; do
         if supports_arg "$key"; then
@@ -529,7 +535,7 @@ if [[ "$ENABLE_NSYS_PROFILE" == "True" ]]; then
         -o "$NSYS_OUT_DIR/nsys_%h_rank%q{SLURM_PROCID}"
     )
     echo "[NSYS] Enabled delayed timeline capture for ${NSYS_DURATION_SEC}s"
-    echo "[NSYS] Capture will start after warmup steps: ${PROFILE_WARMUP_STEPS}"
+    echo "[NSYS] Capture window (global steps): ${NSYS_CAPTURE_START_STEP}~${NSYS_CAPTURE_END_STEP}"
     echo "[NSYS] Output prefix: $NSYS_OUT_DIR"
 fi
 

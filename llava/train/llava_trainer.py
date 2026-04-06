@@ -367,6 +367,19 @@ class LLaVATrainer(Trainer):
     def _nsys_delayed_capture_enabled(self):
         return bool(getattr(self.args, "nsys_capture_after_warmup", False) and torch.cuda.is_available())
 
+    def _nsys_capture_start_step(self):
+        start_step = int(getattr(self.args, "nsys_capture_start_step", 0) or 0)
+        if start_step > 0:
+            return start_step
+        warmup_steps = max(0, int(getattr(self.args, "profile_warmup_steps", 5)))
+        return warmup_steps + 1
+
+    def _nsys_capture_end_step(self):
+        end_step = int(getattr(self.args, "nsys_capture_end_step", 0) or 0)
+        if end_step > 0:
+            return end_step
+        return None
+
     def _try_start_nsys_capture(self, current_step: int):
         if not self._nsys_delayed_capture_enabled():
             return
@@ -375,8 +388,15 @@ class LLaVATrainer(Trainer):
         if getattr(self, "_nsys_capture_start_failed", False):
             return
 
-        warmup_steps = max(0, int(getattr(self.args, "profile_warmup_steps", 5)))
-        if current_step <= warmup_steps:
+        start_step = self._nsys_capture_start_step()
+        end_step = self._nsys_capture_end_step()
+        if end_step is not None and end_step < start_step:
+            if self.is_world_process_zero:
+                rank0_print(f"[NSYS][WARN] Invalid capture window: start_step={start_step}, end_step={end_step}.")
+            self._nsys_capture_start_failed = True
+            return
+
+        if current_step < start_step:
             return
 
         try:
@@ -385,20 +405,26 @@ class LLaVATrainer(Trainer):
             torch.cuda.cudart().cudaProfilerStart()
             self._nsys_capture_started = True
             if self.is_world_process_zero:
-                rank0_print(f"[NSYS] Delayed capture started at global_step={current_step} (warmup_steps={warmup_steps}).")
+                rank0_print(f"[NSYS] Delayed capture started at global_step={current_step} (start_step={start_step}, end_step={end_step}).")
         except Exception as exc:
             self._nsys_capture_start_failed = True
             if self.is_world_process_zero:
                 rank0_print(f"[NSYS][WARN] Failed to start delayed capture: {exc}")
 
-    def _try_stop_nsys_capture(self):
+    def _try_stop_nsys_capture(self, current_step: Optional[int] = None):
         if not getattr(self, "_nsys_capture_started", False):
+            return
+        end_step = self._nsys_capture_end_step()
+        if current_step is not None and end_step is not None and current_step < end_step:
             return
         try:
             torch.cuda.synchronize()
             torch.cuda.cudart().cudaProfilerStop()
             if self.is_world_process_zero:
-                rank0_print("[NSYS] Delayed capture stopped at train end.")
+                if current_step is None:
+                    rank0_print("[NSYS] Delayed capture stopped at train end.")
+                else:
+                    rank0_print(f"[NSYS] Delayed capture stopped after global_step={current_step}.")
         except Exception as exc:
             if self.is_world_process_zero:
                 rank0_print(f"[NSYS][WARN] Failed to stop delayed capture: {exc}")
@@ -621,6 +647,9 @@ class LLaVATrainer(Trainer):
 
         if profiling_on:
             self._stage_profile_last_step_end = step_end
+
+        if nsys_on:
+            self._try_stop_nsys_capture(current_step=current_step)
         return loss
 
     def log(self, logs):
