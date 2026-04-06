@@ -8,11 +8,28 @@ from llava.utils import rank0_print
 from einops import rearrange
 import sys
 
-# Add pi3x package path
-pi3x_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'pi3x'))
-if pi3x_path not in sys.path:
-    sys.path.append(pi3x_path)
-from pi3x.models.pi3 import Pi3
+def _resolve_pi3_root():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    vlm_3r_root = os.path.abspath(os.path.join(script_dir, '..', '..', '..'))
+    candidates = [
+        os.path.join(vlm_3r_root, 'third_party', 'Pi3'),
+        os.path.join(vlm_3r_root, 'pi3x'),
+        os.path.join(vlm_3r_root, 'Pi3'),
+    ]
+    for path in candidates:
+        if os.path.isdir(path):
+            return path
+    return candidates[0]
+
+
+_PI3_ROOT = _resolve_pi3_root()
+if _PI3_ROOT not in sys.path:
+    sys.path.append(_PI3_ROOT)
+
+try:
+    from pi3.models.pi3 import Pi3
+except ImportError:
+    from pi3x.models.pi3 import Pi3
 
 
 class Pi3xSpatialConfig(PretrainedConfig):

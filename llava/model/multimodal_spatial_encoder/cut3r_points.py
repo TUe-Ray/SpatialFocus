@@ -6,6 +6,27 @@ from typing import Union, Optional, Tuple
 import os
 from llava.utils import rank0_print
 from einops import rearrange
+import sys
+
+
+def _resolve_cut3r_root():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    vlm_3r_root = os.path.abspath(os.path.join(script_dir, '..', '..', '..'))
+    candidates = [
+        os.path.join(vlm_3r_root, 'third_party', 'CUT3R'),
+        os.path.join(vlm_3r_root, 'CUT3R'),
+    ]
+    for path in candidates:
+        if os.path.isdir(path):
+            return path
+    return candidates[0]
+
+
+_CUT3R_ROOT = _resolve_cut3r_root()
+_DEFAULT_CUT3R_WEIGHTS_PATH = os.path.join(_CUT3R_ROOT, 'src', 'cut3r_512_dpt_4_64.pth')
+if _CUT3R_ROOT not in sys.path:
+    sys.path.append(_CUT3R_ROOT)
+
 from src.dust3r.model import ARCroco3DStereo
 import numpy as np
 
@@ -14,7 +35,7 @@ class Cut3rPointsConfig(PretrainedConfig):
 
     def __init__(
         self,
-        weights_path="../CUT3R/src/cut3r_512_dpt_4_64.pth",
+        weights_path=_DEFAULT_CUT3R_WEIGHTS_PATH,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -264,11 +285,7 @@ class Cut3rPointsSpatialTower(nn.Module):
 
         self.is_loaded = False
 
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        vlm_3r_root = os.path.abspath(os.path.join(script_dir, '..', '..', '..'))
-        dynamic_weights_path = os.path.join(vlm_3r_root, 'CUT3R', 'src', 'cut3r_512_dpt_4_64.pth')
-
-        self.config = Cut3rPointsConfig(weights_path=dynamic_weights_path)
+        self.config = Cut3rPointsConfig(weights_path=_DEFAULT_CUT3R_WEIGHTS_PATH)
 
         self.spatial_tower_name = spatial_tower
 
