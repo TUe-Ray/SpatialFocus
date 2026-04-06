@@ -7,7 +7,26 @@ import os
 from llava.utils import rank0_print
 from einops import rearrange
 import sys
-sys.path.append('CUT3R')
+
+
+def _resolve_cut3r_root():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    vlm_3r_root = os.path.abspath(os.path.join(script_dir, '..', '..', '..'))
+    candidates = [
+        os.path.join(vlm_3r_root, 'third_party', 'CUT3R'),
+        os.path.join(vlm_3r_root, 'CUT3R'),
+    ]
+    for path in candidates:
+        if os.path.isdir(path):
+            return path
+    return candidates[0]
+
+
+_CUT3R_ROOT = _resolve_cut3r_root()
+_DEFAULT_CUT3R_WEIGHTS_PATH = os.path.join(_CUT3R_ROOT, 'src', 'cut3r_512_dpt_4_64.pth')
+if _CUT3R_ROOT not in sys.path:
+    sys.path.append(_CUT3R_ROOT)
+
 from src.dust3r.model import ARCroco3DStereo
 import numpy as np
 
@@ -23,7 +42,7 @@ class Cut3rSpatialConfig(PretrainedConfig):
 
     def __init__(
         self,
-        weights_path="../CUT3R/src/cut3r_512_dpt_4_64.pth",
+        weights_path=_DEFAULT_CUT3R_WEIGHTS_PATH,
         spatial_tower_select_feature="patch",
         spatial_tower_select_layer=-1,
         export_point_cloud: bool = False,
@@ -504,12 +523,8 @@ class Cut3rSpatialTower(nn.Module):
 
         self.is_loaded = False
 
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        vlm_3r_root = os.path.abspath(os.path.join(script_dir, '..', '..', '..'))
-        dynamic_weights_path = os.path.join(vlm_3r_root, 'CUT3R', 'src', 'cut3r_512_dpt_4_64.pth')
-
         self.config = Cut3rSpatialConfig(
-            weights_path=dynamic_weights_path,
+            weights_path=_DEFAULT_CUT3R_WEIGHTS_PATH,
             spatial_tower_select_feature=getattr(spatial_tower_cfg, 'spatial_tower_select_feature', 'patch'),
             spatial_tower_select_layer=getattr(spatial_tower_cfg, 'spatial_tower_select_layer', -1)
         )

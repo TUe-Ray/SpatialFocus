@@ -18,9 +18,11 @@ The project explores query-guided visual representations that emphasize spatiall
 ```text
 SpatialFocus/
 |-- llava/                    # Core LLaVA-NeXT / VLM-3R model code
-|-- CUT3R/                    # Geometry encoder submodule
+|-- third_party/
+|   |-- CUT3R/                # Geometry encoder submodule
+|   |-- EoMT/                 # EoMT submodule
+|   `-- Pi3/                  # Pi3 submodule
 |-- thinking-in-space/        # VSiBench / VSTiBench evaluation framework
-|-- EOMT/                     # EOMT submodule
 |-- scripts/                  # Training, inference, and utility scripts
 |-- vlm_3r_data_process/      # Data processing pipeline
 |-- playground/demo/          # Demo videos and images
@@ -93,7 +95,7 @@ Run the following from the repository root with the vlm3r environment activated:
 ```bash
 conda activate vlm3r
 
-cd CUT3R
+cd third_party/CUT3R
 pip install -r requirements.txt
 
 cd src/croco/models/curope/
@@ -104,10 +106,10 @@ cd ../../../..
 To download the CUT3R checkpoint:
 
 ```bash
-cd CUT3R/src
+cd third_party/CUT3R/src
 pip install gdown
 gdown --fuzzy https://drive.google.com/file/d/1Asz-ZB3FfpzZYwunhQvNPZEUA8XUNAYD/view?usp=drive_link
-cd ../..
+cd ../../..
 ```
 
 ## Offline Cluster Setup 🧊
@@ -186,7 +188,7 @@ Use the extraction pipeline to precompute spatial features before training:
 python scripts/extract_spatial_features.py \
   --input-dir /path/to/video/dataset \
   --output-dir /path/to/save/extracted_features \
-  --cut3r-weights-path CUT3R/src/cut3r_512_dpt_4_64.pth \
+  --cut3r-weights-path third_party/CUT3R/src/cut3r_512_dpt_4_64.pth \
   --processor-config-path processor_config.json \
   --gpu-ids 0,1,2,3
 ```

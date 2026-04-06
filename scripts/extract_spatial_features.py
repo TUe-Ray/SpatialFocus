@@ -31,6 +31,24 @@ from llava.model.multimodal_encoder.siglip_encoder import SigLipImageProcessor #
 
 # Add imports for direct spatial tower loading
 from llava.model.multimodal_spatial_encoder.cut3r_spatial_encoder import Cut3rSpatialConfig, Cut3rEncoder
+
+
+def _resolve_cut3r_root():
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+    candidates = [
+        os.path.join(repo_root, 'third_party', 'CUT3R'),
+        os.path.join(repo_root, 'CUT3R'),
+    ]
+    for path in candidates:
+        if os.path.isdir(path):
+            return path
+    return candidates[0]
+
+
+_CUT3R_ROOT = _resolve_cut3r_root()
+if _CUT3R_ROOT not in sys.path:
+    sys.path.append(_CUT3R_ROOT)
+
 from src.dust3r.model import ARCroco3DStereo # Import CUT3R model class
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
