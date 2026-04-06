@@ -1,57 +1,38 @@
-# 🔭 SpatialFocus
+# SpatialFocus 🔭
 
-> **Spatial understanding from monocular video — built on VLM-3R.**
+SpatialFocus is an ongoing research codebase for spatial reasoning from monocular video, built on top of [VLM-3R](https://github.com/VITA-Group/VLM-3R).
 
-This project extends [VLM-3R](https://github.com/VITA-Group/VLM-3R) with 3D reconstructive instruction tuning for training and evaluating Vision-Language Models on spatial reasoning tasks. Designed to run on **offline GPU clusters** where compute nodes have no internet access.
+The project explores query-guided visual representations that emphasize spatially relevant information for vision-language reasoning. It extends the VLM-3R framework with components for training, evaluation, offline deployment, and spatial feature extraction in GPU cluster environments.
 
-**Author:** Ruei · s.huang5@student.tue.nl
+> This repository is under active development. Some components may change as the research evolves.
 
----
+## Prerequisites ✅
 
-## 📋 Table of Contents
+- Linux environment with GPU support
+- Conda (Miniconda or Mambaforge recommended)
+- CUDA-compatible GPUs
+- Fast local or scratch storage for model caches and datasets
 
-- [Prerequisites](#prerequisites)
-- [Project Structure](#project-structure)
-- [Installation](#installation)
-- [Offline Setup](#offline-setup-no-internet-compute-nodes)
-- [Evaluation](#evaluation)
-- [Inference (Demo)](#inference-demo)
-- [Pre-extracting Spatial Features](#pre-extracting-spatial-features-optional)
-- [Security Notes](#security-notes)
-- [License](#license)
-- [Acknowledgements](#acknowledgements)
+## Project Structure 🗂️
 
----
-
-## ✅ Prerequisites
-
-- HPC cluster with GPU nodes
-- Conda (Miniconda or Mambaforge)
-- Fast scratch storage for model cache (models are large, ~20GB+)
-
----
-
-## 🗂️ Project Structure
-
-```
+```text
 SpatialFocus/
-├── llava/                    # Core LLaVA-NeXT model code
-├── CUT3R/                    # Geometry encoder (submodule)
-├── thinking-in-space/        # VSiBench / VSTiBench eval framework (submodule)
-├── third_party/eomt/         # EOMT (submodule)
-├── scripts/                  # Training, inference, and utility scripts
-├── vlm_3r_data_process/      # Data generation pipeline
-├── playground/demo/          # Demo videos/images
-├── prepare_offline_cache.sh  # 📥 Pre-cache assets for offline nodes
-├── eval_offline.sh           # 🚀 Offline eval SBATCH job
-└── README.md
+|-- llava/                    # Core LLaVA-NeXT / VLM-3R model code
+|-- CUT3R/                    # Geometry encoder submodule
+|-- thinking-in-space/        # VSiBench / VSTiBench evaluation framework
+|-- EOMT/                     # EOMT submodule
+|-- scripts/                  # Training, inference, and utility scripts
+|-- vlm_3r_data_process/      # Data processing pipeline
+|-- playground/demo/          # Demo videos and images
+|-- eval_vsi_snellius.sh      # Example cluster evaluation job
+`-- README.md
 ```
 
----
+External dependencies are included as git submodules where needed.
 
-## 🛠️ Installation
+## Installation 🛠️
 
-### 1. Clone and Initialize Submodules
+### 1. Clone the repository
 
 ```bash
 git clone <your-repo-url> SpatialFocus
@@ -59,9 +40,7 @@ cd SpatialFocus
 git submodule update --init --recursive
 ```
 
----
-
-### 2. 🧠 Environment: `vlm3r` — Training & Inference
+### 2. Create the training and inference environment
 
 ```bash
 conda create -n vlm3r python=3.10 -y
@@ -75,54 +54,41 @@ pip install flash-attn==2.7.1.post1 --no-build-isolation
 pip install decord openai accelerate==0.29.1
 ```
 
-<details>
-<summary>📦 Key packages</summary>
+Tested package versions in this environment include:
 
-| Package | Version |
-|---|---|
-| PyTorch | 2.1.1 (CUDA 12.1) |
-| FlashAttention | 2.7.1.post1 |
-| DeepSpeed | 0.14.4 |
-| Transformers | 4.40.0.dev0 |
-| PEFT | 0.4.0 |
-| Accelerate | 0.29.1 |
+- PyTorch 2.1.1 (CUDA 12.1)
+- FlashAttention 2.7.1.post1
+- DeepSpeed 0.14.4
+- Transformers 4.40.0.dev0
+- PEFT 0.4.0
+- Accelerate 0.29.1
 
-</details>
-
----
-
-### 3. 📊 Environment: `vsibench` — Evaluation
+### 3. Create the evaluation environment
 
 ```bash
 conda create -n vsibench python=3.10 -y
 conda activate vsibench
 
 conda install pytorch==2.1.1 torchvision==0.16.1 torchaudio==2.1.1 pytorch-cuda=12.1 -c pytorch -c nvidia -y
+pip install -r requirements.vsibench.txt
 
 cd thinking-in-space
 pip install -e .
 pip install s2wrapper@git+https://github.com/bfshi/scaling_on_scales
-pip install flash-attn==2.7.3 --no-build-isolation
-pip install transformers==4.40.0 peft==0.10.0 huggingface_hub[hf_xet]
 cd ..
 ```
 
-<details>
-<summary>📦 Key packages</summary>
+Tested package versions in this environment include:
 
-| Package | Version |
-|---|---|
-| PyTorch | 2.1.1 (CUDA 12.1) |
-| FlashAttention | 2.7.3 |
-| Transformers | 4.40.0 |
-| PEFT | 0.10.0 |
-| s2wrapper | 0.1 |
+- PyTorch 2.1.1 (CUDA 12.1)
+- FlashAttention 2.7.3
+- Transformers 4.40.0
+- PEFT 0.10.0
+- s2wrapper 0.1
 
-</details>
+### 4. Build CUT3R
 
----
-
-### 4. ⚙️ Build CUT3R (Geometry Encoder)
+Run the following from the repository root with the vlm3r environment activated:
 
 ```bash
 conda activate vlm3r
@@ -130,62 +96,66 @@ conda activate vlm3r
 cd CUT3R
 pip install -r requirements.txt
 
-# Build the RoPE CUDA extension
 cd src/croco/models/curope/
 python setup.py build_ext --inplace
 cd ../../../..
+```
 
-# Download the CUT3R checkpoint
-cd src
+To download the CUT3R checkpoint:
+
+```bash
+cd CUT3R/src
 pip install gdown
 gdown --fuzzy https://drive.google.com/file/d/1Asz-ZB3FfpzZYwunhQvNPZEUA8XUNAYD/view?usp=drive_link
 cd ../..
 ```
 
----
+## Offline Cluster Setup 🧊
 
-## 📦 Offline Setup (No-Internet Compute Nodes)
+This repository supports offline GPU cluster workflows, where compute nodes do not have internet access.
 
-Compute nodes without internet need all models and datasets pre-cached **before** submitting a job.
+Before submitting jobs to offline nodes, all required models and datasets should be cached in advance.
 
-### Step 1 — Pre-cache on a Node with Internet
+### Step 1. Pre-cache assets on a node with internet access
+
+If you use the legacy helper script:
 
 ```bash
 bash prepare_offline_cache.sh
 ```
 
-This downloads and symlinks into `$MODEL_ROOT`:
+Expected cached assets include:
 
-| Asset | Type |
-|---|---|
-| `Journey9ni/vlm-3r-llava-qwen2-lora` | LoRA weights |
-| `lmms-lab/LLaVA-NeXT-Video-7B-Qwen2` | Base model |
-| `google/siglip-so400m-patch14-384` | Vision encoder |
-| `nyu-visionx/VSI-Bench` | Evaluation dataset |
+- Journey9ni/vlm-3r-llava-qwen2-lora (LoRA weights)
+- lmms-lab/LLaVA-NeXT-Video-7B-Qwen2 (base model)
+- google/siglip-so400m-patch14-384 (vision encoder)
+- nyu-visionx/VSI-Bench (evaluation dataset)
 
-> 💡 Set `HF_TOKEN` in your environment if any repo requires authentication.
+If any repository requires authentication, set HF_TOKEN in your environment before downloading. 🔐
 
-### Step 2 — Submit the Evaluation Job
+### Step 2. Submit an evaluation job
 
 ```bash
-sbatch eval_offline.sh
+sbatch eval_vsi_snellius.sh
 ```
 
-Runs on 1 node / 4 GPUs with `HF_*_OFFLINE=1` enforced. Configure via environment variables:
+The script is configured for offline execution with HF_*_OFFLINE=1 enabled.
+
+Useful environment variables include:
 
 | Variable | Default | Description |
 |---|---|---|
-| `FAST_ROOT` | `/path/to/scratch` | Fast scratch storage root |
-| `HF_HOME` | `$FAST_ROOT/hf_cache` | HuggingFace cache directory |
-| `MODEL_ROOT` | `$FAST_ROOT/hf_models/VLM3R` | Local model directory |
-| `NUM_PROCESSES` | `4` | Number of GPUs |
-| `MAX_FRAMES_NUM` | `32` | Max video frames per sample |
+| FAST_ROOT | /path/to/scratch | Fast scratch storage root |
+| HF_HOME | $FAST_ROOT/hf_cache | Hugging Face cache directory |
+| MODEL_ROOT | $FAST_ROOT/hf_models/VLM3R | Local model directory |
+| NUM_PROCESSES | 4 | Number of GPUs |
+| MAX_FRAMES_NUM | 32 | Maximum video frames per sample |
 
----
+## Evaluation 📏
 
-## 📏 Evaluation
+### VSiBench (thinking-in-space native script)
 
-### VSiBench
+Run from the thinking-in-space directory with the vsibench environment activated:
 
 ```bash
 conda activate vsibench
@@ -193,7 +163,7 @@ cd thinking-in-space
 bash eval_vlm_3r_vsibench.sh
 ```
 
-### VSTiBench
+### VSTiBench (thinking-in-space native script)
 
 ```bash
 conda activate vsibench
@@ -201,90 +171,49 @@ cd thinking-in-space
 bash eval_vlm_3r_vstibench.sh
 ```
 
----
+### VSiBench (cluster parity script at repository root)
 
-## 🎬 Inference (Demo)
-
-**From video:**
 ```bash
-conda activate vlm3r
-CUDA_VISIBLE_DEVICES=0 bash scripts/video/demo/video_demo.sh \
-    Journey9ni/vlm-3r-llava-qwen2-lora \
-    qwen_1_5 32 2 average grid True \
-    playground/demo/47334096.mp4 \
-    lmms-lab/LLaVA-NeXT-Video-7B-Qwen2
+conda activate vsibench
+sbatch eval_vsi_snellius.sh
 ```
 
-**From images:**
-```bash
-conda activate vlm3r
-bash scripts/image/demo/image_demo.sh \
-    Journey9ni/vlm-3r-llava-qwen2-lora \
-    qwen_1_5 2 average grid True \
-    playground/demo/scene_47334096_imgs \
-    lmms-lab/LLaVA-NeXT-Video-7B-Qwen2
-```
+## Pre-extracting Spatial Features ⚡
 
----
-
-## ⚡ Pre-extracting Spatial Features (Optional)
-
-Pre-compute CUT3R features to speed up training — the training script detects and loads them automatically.
+Use the extraction pipeline to precompute spatial features before training:
 
 ```bash
 python scripts/extract_spatial_features.py \
-    --input-dir /path/to/video/dataset \
-    --output-dir /path/to/save/extracted_features \
-    --cut3r-weights-path CUT3R/src/CUT3R_weights.pth \
-    --processor-config-path processor_config.json \
-    --gpu-ids 0,1,2,3
+  --input-dir /path/to/video/dataset \
+  --output-dir /path/to/save/extracted_features \
+  --cut3r-weights-path CUT3R/src/cut3r_512_dpt_4_64.pth \
+  --processor-config-path processor_config.json \
+  --gpu-ids 0,1,2,3
 ```
 
-Expected data layout:
-```
-your_data_folder/
-├── videos/
-│   └── scene0191_00.mp4
-└── spatial_features/
-    └── scene0191_00.pt
-```
+## Notes 📝
 
----
+- This repository is still under active development.
+- Interfaces, scripts, and directory structures may change as the project evolves.
+- Several workflows are currently optimized for offline SLURM-based GPU clusters.
+- Depending on your environment, you may need to adjust paths, cache locations, and job settings.
 
-## 🔐 Security Notes
+## License 📄
 
-- All credentials (`HF_TOKEN`, `OPENAI_API_KEY`, `WANDB_API_KEY`) must be passed via environment variables — never hardcode them.
-- ⚠️ The `scripts/archived/` directory contains legacy scripts from the upstream project with hardcoded credentials. **Do not push it to any public repository.**
+This repository is released under the Apache License 2.0. See [LICENSE](LICENSE).
 
----
+Some third-party components may be distributed under different licenses. In particular:
 
-## 📄 License
+- CUT3R is licensed under CC BY-NC-SA 4.0.
+- This may impose restrictions on commercial use.
 
-This project is licensed under the [Apache License 2.0](LICENSE).
+Review all dependency licenses before production or commercial use.
 
-> ⚠️ The CUT3R geometry encoder is licensed under [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/), which **restricts commercial use**. Ensure you comply with all dependency licenses before use.
+## Acknowledgements 🙏
 
----
+This project builds on several excellent open-source projects:
 
-## 🙏 Acknowledgements
-
-This project is based on [VLM-3R](https://github.com/VITA-Group/VLM-3R) by Zhiwen Fan et al. (CVPR 2026).
-
-Built on top of:
-- [CUT3R](https://github.com/CUT3R/CUT3R) — Spatial feature encoder
-- [LLaVA-NeXT](https://github.com/LLaVA-VL/LLaVA-NeXT) — Base VLM framework
-- [thinking-in-space](https://github.com/vision-x-nyu/thinking-in-space) — Evaluation framework
-
-If you use VLM-3R in your work, please cite the original paper:
-
-```bibtex
-@misc{fan2025vlm3rvisionlanguagemodelsaugmented,
-      title={VLM-3R: Vision-Language Models Augmented with Instruction-Aligned 3D Reconstruction}, 
-      author={Zhiwen Fan and Jian Zhang and Renjie Li and Junge Zhang and Runjin Chen and Hezhen Hu and Kevin Wang and Huaizhi Qu and Shijie Zhou and Dilin Wang and Zhicheng Yan and Hongyu Xu and Justin Theiss and Tianlong Chen and Jiachen Li and Zhengzhong Tu and Zhangyang Wang and Rakesh Ranjan},
-      year={2025},
-      eprint={2505.20279},
-      archivePrefix={arXiv},
-      primaryClass={cs.CV},
-      url={https://arxiv.org/abs/2505.20279}, 
-}
-```
+- [VLM-3R](https://github.com/VITA-Group/VLM-3R)
+- [CUT3R](https://github.com/CUT3R/CUT3R)
+- [LLaVA-NeXT](https://github.com/LLaVA-VL/LLaVA-NeXT)
+- [thinking-in-space](https://github.com/vision-x-nyu/thinking-in-space)

@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=Eval_Reproduction
+#SBATCH --job-name=Eval_pi3X_spatial_encoder
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=4
 #SBATCH --ntasks-per-node=1
@@ -12,7 +12,7 @@
 #SBATCH --mem=0
 
 # ================================================== User-defined variables ==================================================
-NOTE="Evaluation for reproducing VLM3R results on VSI-Bench. " 
+NOTE="Evaluation Pi3X spatial encoder, using pre-fetched cache and Snellius-specific setup. This is meant for parity check with Snellius runs, and is not a general-purpose evaluation script. Adjust variables below as needed, but be cautious of typos in critical paths (e.g., PRETRAINED_LOCAL, MODEL_BASE_LOCAL) which can lead to silent failures or incorrect evaluations." 
 # ================================================== User-defined variables ==================================================
 echo "-------- Note --------"
 echo "  note: $NOTE"
@@ -22,7 +22,7 @@ set -euo pipefail
 # Run this on compute nodes WITHOUT internet access.
 # It reuses online-prefetched cache and runs using the Snellius lmms_eval files.
 
-PRETRAINED_LOCAL="/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/train/Reproduction"
+PRETRAINED_LOCAL="/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/train/pi3x_spatial_encoder"
 NUM_PROCESSES="4"
 
 SNELLIUS_REPO_DIR="${SNELLIUS_REPO_DIR:-/leonardo/home/userexternal/shuang00/VLM-3R_snellius}"
