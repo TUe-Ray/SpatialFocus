@@ -92,10 +92,12 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
         modalities: Optional[List[str]] = ["image"],
         dpo_forward: Optional[bool] = False,
         cache_position=None,
+        eomt_images=None,
+        eomt_meta=None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
 
         if inputs_embeds is None:
-            (input_ids, position_ids, attention_mask, past_key_values, inputs_embeds, labels) = self.prepare_inputs_labels_for_multimodal(input_ids, position_ids, attention_mask, past_key_values, labels, images, spatial_features, point_maps, modalities, image_sizes)
+            (input_ids, position_ids, attention_mask, past_key_values, inputs_embeds, labels) = self.prepare_inputs_labels_for_multimodal(input_ids, position_ids, attention_mask, past_key_values, labels, images, spatial_features, point_maps, modalities, image_sizes, eomt_images, eomt_meta)
 
         if dpo_forward:
             outputs = self.model(

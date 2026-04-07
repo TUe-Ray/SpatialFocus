@@ -173,6 +173,30 @@ class LlavaMetaModel:
             incompatible_keys = self.fusion_block.load_state_dict(get_w(mm_projector_weights, "fusion_block"), strict=False)
             rank0_print(f"Loaded fusion block weights from {pretrain_mm_mlp_adapter}. Incompatible keys: {incompatible_keys}")
 
+    def get_eomt_extractor(self):
+        return getattr(self, "eomt_extractor", None)
+
+    def initialize_eomt_extractor(self, model_args, fsdp=None):
+        """Initialize the EoMT extractor as a frozen side branch for mask extraction."""
+        eomt_config_path = getattr(model_args, "eomt_config_path", None)
+        eomt_ckpt_path = getattr(model_args, "eomt_ckpt_path", None)
+        if eomt_config_path is None or eomt_ckpt_path is None:
+            rank0_print("EoMT: No config/ckpt path provided, skipping EoMT extractor initialization.")
+            return
+
+        try:
+            from llava.model.multimodal_eomt import EoMTExtractor
+            eomt_cfg = {
+                "config_path": eomt_config_path,
+                "ckpt_path": eomt_ckpt_path,
+                "device": "cpu",  # will be moved to correct device later
+            }
+            self.eomt_extractor = EoMTExtractor(eomt_cfg)
+            rank0_print(f"EoMT extractor initialized from {eomt_ckpt_path}")
+        except Exception as e:
+            rank0_print(f"EoMT: Failed to initialize extractor: {e}")
+            self.eomt_extractor = None
+
     def initialize_vision_modules(self, model_args, fsdp=None):
         vision_tower = model_args.vision_tower
         mm_vision_select_layer = model_args.mm_vision_select_layer
@@ -638,11 +662,30 @@ class LlavaMetaForCausalLM(ABC):
         image_feature = image_feature.permute(1, 2, 0).contiguous()
         return image_feature
 
-    def prepare_inputs_labels_for_multimodal(self, input_ids, position_ids, attention_mask, past_key_values, labels, images, spatial_features=None, point_maps=None, modalities=["image"], image_sizes=None):
+    def prepare_inputs_labels_for_multimodal(self, input_ids, position_ids, attention_mask, past_key_values, labels, images, spatial_features=None, point_maps=None, modalities=["image"], image_sizes=None, eomt_images=None, eomt_meta=None):
         vision_tower = self.get_vision_tower()
         # rank_print(modalities)
         if vision_tower is None or images is None or input_ids.shape[1] == 1:
             return input_ids, position_ids, attention_mask, past_key_values, None, labels
+
+        # EoMT side branch: extract soft masks without injecting into main features
+        eomt_extractor = self.get_model().get_eomt_extractor()
+        if eomt_extractor is not None and eomt_images is not None:
+            try:
+                # eomt_images: list[B] of list[frames] of PIL images
+                # eomt_meta:   list[B] of list[frames] of per-frame dicts
+                # Flatten both into a single list aligned frame-by-frame
+                all_frames = []
+                all_frame_metas = []
+                for sample_frames, sample_frame_metas in zip(eomt_images, eomt_meta):
+                    all_frames.extend(sample_frames)
+                    all_frame_metas.extend(sample_frame_metas)
+                eomt_outputs = eomt_extractor(all_frames, all_frame_metas)
+                # Phase 1: store as debug-accessible attribute, do NOT inject into features
+                self._last_eomt_outputs = eomt_outputs
+            except Exception as e:
+                rank0_print(f"EoMT side branch error: {e}")
+                self._last_eomt_outputs = None
 
         if isinstance(modalities, str):
             modalities = [modalities]

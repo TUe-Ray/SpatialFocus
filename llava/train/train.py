@@ -196,6 +196,9 @@ class ModelArguments:
         },
     )
     tune_fusion_block: bool = field(default=False)
+    ## EoMT mask extractor (frozen side branch)
+    eomt_config_path: Optional[str] = field(default=None, metadata={"help": "Path to EoMT YAML config file"})
+    eomt_ckpt_path: Optional[str] = field(default=None, metadata={"help": "Path to EoMT pre-trained weights"})
 
     unfreeze_mm_vision_tower: bool = field(default=False)
     unfreeze_language_model: bool = field(default=False)
@@ -1439,6 +1442,11 @@ class LazySupervisedDataset(Dataset):
         processor = self.data_args.image_processor # Get processor from data_args
         image = []
         point_maps = []
+        # EoMT: collect raw PIL frames and metadata for the EoMT side branch
+        eomt_raw_frames = []  # list of PIL.Image
+        eomt_frame_paths = []  # list of str (source file paths)
+        eomt_frame_indices = []  # list of int (sampled frame indices)
+        eomt_modality = None  # "image" or "video"
         # --- Image Processing Branch ---
         if "image" in data_item:
             image_files = data_item["image"]
@@ -1497,6 +1505,13 @@ class LazySupervisedDataset(Dataset):
             valid_pil_images = [(img, path) for img, path in zip(pil_images, relative_image_paths) if img is not None]
             if not valid_pil_images:
                  raise RuntimeError(f"Could not load ANY valid images for item {i}. Files: {image_files}")
+
+            # EoMT: capture raw frames before any drawing/preprocessing
+            eomt_modality = "image"
+            for img, path in valid_pil_images:
+                eomt_raw_frames.append(img.copy())
+                eomt_frame_paths.append(path)
+                eomt_frame_indices.append(0)
 
             # 2. Apply Marker Drawing (if SPAR and applicable)
             # Pass the list of *valid* PIL images to the drawing function
@@ -1608,6 +1623,7 @@ class LazySupervisedDataset(Dataset):
                 print("File {} not exist!".format(video_file))
 
             try:
+                _video_actual_frame_idx = None  # will hold true video frame indices for EoMT
                 if "shareVideoGPTV" in video_file:
                     frame_files = [os.path.join(video_file, f) for f in os.listdir(video_file) if os.path.isfile(os.path.join(video_file, f))]
                     frame_files.sort()  # Ensure the frames are sorted if they are named sequentially
@@ -1619,10 +1635,10 @@ class LazySupervisedDataset(Dataset):
                         num_frames_to_sample = 10
 
                     avg_fps = 2
-                    
+
                     total_frames = len(frame_files)
                     sampled_indices = np.linspace(0, total_frames - 1, num_frames_to_sample, dtype=int)
-
+                    _video_actual_frame_idx = sampled_indices.tolist()
 
                     frame_time = [i/2 for i in sampled_indices]
                     frame_time = ",".join([f"{i:.2f}s" for i in frame_time])
@@ -1640,7 +1656,16 @@ class LazySupervisedDataset(Dataset):
                         except IOError:
                             print(f"Failed to read frame at path: {frame_path}")
                 else:
-                    video, video_time, frame_time, num_frames_to_sample = process_video_with_decord(video_file, self.data_args)
+                    video, video_time, frame_time, num_frames_to_sample, _video_actual_frame_idx = process_video_with_decord(video_file, self.data_args)
+
+                # EoMT: capture raw video frames before preprocessing
+                eomt_modality = "video"
+                for fidx, frame in enumerate(video):
+                    eomt_raw_frames.append(Image.fromarray(frame).copy() if not isinstance(frame, Image.Image) else frame.copy())
+                    eomt_frame_paths.append(video_file)
+                    # Use actual video frame index (position in the source video)
+                    actual_idx = _video_actual_frame_idx[fidx] if _video_actual_frame_idx is not None else fidx
+                    eomt_frame_indices.append(int(actual_idx))
 
                 processor = self.data_args.image_processor
                 image = processor.preprocess(video, return_tensors="pt")["pixel_values"]
@@ -1732,6 +1757,7 @@ class LazySupervisedDataset(Dataset):
 
                 all_points_world = []
                 all_color_images = []
+                eomt_modality = "video"  # depth branch is video-like
                 # Depth scale (needs configuration per dataset source)
                 depth_scale = 1000.0 if data_source in ['scannet', 'scannetpp'] else 1.0 # Assume mm for scannet, meters otherwise (e.g., arkit)
 
@@ -1744,6 +1770,10 @@ class LazySupervisedDataset(Dataset):
 
                         depth_pil = Image.open(depth_file)
                         color_pil = Image.open(color_file)
+                        # EoMT: capture raw color frame
+                        eomt_raw_frames.append(color_pil.convert("RGB").copy())
+                        eomt_frame_paths.append(color_file)
+                        eomt_frame_indices.append(int(frame_idx))
                         # Convert depth based on mode and apply scale
                         if depth_pil.mode == 'I;16': depth_map = np.array(depth_pil, dtype=np.uint16).astype(np.float32) / depth_scale
                         elif depth_pil.mode == 'I': depth_map = np.array(depth_pil, dtype=np.int32).astype(np.float32) / depth_scale
@@ -1936,6 +1966,26 @@ class LazySupervisedDataset(Dataset):
         if "_with_depth" in self.list_data_dict[i] and self.list_data_dict[i]["_with_depth"]:
             data_dict["point_maps"] = point_maps
 
+        # EoMT: attach raw frames and per-frame metadata for the EoMT side branch
+        if eomt_raw_frames:
+            data_dict["eomt_images"] = eomt_raw_frames
+            source_path = data_item.get("image", data_item.get("video", ""))
+            if isinstance(source_path, list):
+                source_path = source_path[0] if source_path else ""
+            sample_id = data_dict.get("id", i)
+            # Per-frame metadata list: one entry per frame, aligned with eomt_raw_frames
+            data_dict["eomt_meta"] = [
+                {
+                    "sample_id": sample_id,
+                    "source_path": source_path,
+                    "frame_index": eomt_frame_indices[j],
+                    "frame_path": eomt_frame_paths[j],
+                    "original_size": (eomt_raw_frames[j].size[0], eomt_raw_frames[j].size[1]),
+                    "modality": eomt_modality,
+                }
+                for j in range(len(eomt_raw_frames))
+            ]
+
         return data_dict
 
 
@@ -2004,15 +2054,12 @@ class DataCollatorForSupervisedDataset(object):
         if "point_maps" in instances[0]:
             point_maps = [instance["point_maps"] for instance in instances]
             batch["point_maps"] = point_maps
-            # # for debug(save as point cloud)
-            # import open3d as o3d
-            # pcd = o3d.geometry.PointCloud()
-            # pcd.points = o3d.utility.Vector3dVector(point_maps[0].permute(0, 2, 3, 1).reshape(-1, 3).cpu().numpy())
-            # pcd.colors = o3d.utility.Vector3dVector(images[0].permute(0, 2, 3, 1).reshape(-1, 3).cpu().numpy())
-            # # downsample the point cloud
-            # pcd = pcd.voxel_down_sample(voxel_size=0.02)
-            # o3d.io.write_point_cloud('test.ply', pcd)
-        
+
+        # EoMT: pass through raw frames and metadata as plain Python lists
+        if "eomt_images" in instances[0]:
+            batch["eomt_images"] = [instance["eomt_images"] for instance in instances]
+            batch["eomt_meta"] = [instance["eomt_meta"] for instance in instances]
+
         return batch
 
 
@@ -2357,6 +2404,13 @@ def train(attn_implementation=None):
         model.config.fusion_block = model_args.fusion_block
         model.config.fusion_block_lr = training_args.fusion_block_lr
 
+
+    # EoMT: initialize frozen mask extractor (side branch, no gradients)
+    if getattr(model_args, "eomt_config_path", None) is not None:
+        model.get_model().initialize_eomt_extractor(model_args=model_args, fsdp=training_args.fsdp)
+        eomt = model.get_model().get_eomt_extractor()
+        if eomt is not None:
+            eomt.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
 
     if model_args.vision_tower is not None:
         model.get_model().initialize_vision_modules(model_args=model_args, fsdp=training_args.fsdp)
