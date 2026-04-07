@@ -28,8 +28,14 @@ if _PI3_ROOT not in sys.path:
 
 try:
     from pi3.models.pi3 import Pi3
-except ImportError:
-    from pi3x.models.pi3 import Pi3
+except ImportError as pi3_err:
+    try:
+        from pi3x.models.pi3 import Pi3
+    except ImportError as pi3x_err:
+        raise ImportError(
+            "Unable to import Pi3 from either `pi3.models.pi3` or `pi3x.models.pi3`. "
+            f"Original pi3 error: {pi3_err}; pi3x fallback error: {pi3x_err}"
+        ) from pi3_err
 
 
 class Pi3xSpatialConfig(PretrainedConfig):
@@ -177,6 +183,11 @@ class Pi3xEncoder(nn.Module):
 
         return (camera_tokens, patch_tokens)
 
+    @property
+    def camera_decoder(self) -> nn.Module:
+        """Direct access to pi3.camera_decoder (TransformerDecoder, out_dim=512)."""
+        return self.pi3.camera_decoder
+
 
 class Pi3xSpatialTransformer(nn.Module):
     def __init__(self, config: Pi3xSpatialConfig, **kwargs):
@@ -308,3 +319,19 @@ class Pi3xSpatialTower(nn.Module):
     @property
     def hidden_size(self):
         return 2048  # Pi3X: 2 * dec_embed_dim = 2 * 1024
+
+    @property
+    def camera_decoder(self) -> Optional[nn.Module]:
+        """
+        Shortcut to the camera_decoder TransformerDecoder head inside Pi3xEncoder.
+        Returns None if the spatial tower is not yet loaded.
+        Used by llava_arch.py to run compute_camera_tokens() at training time.
+        """
+        try:
+            # Pi3xSpatialTower → spatial_tower (Pi3xSpatialModel)
+            #   → spatial_model (Pi3xSpatialTransformer)
+            #     → encoder (Pi3xEncoder)
+            #       → camera_decoder property
+            return self.spatial_tower.spatial_model.encoder.camera_decoder
+        except AttributeError:
+            return None
