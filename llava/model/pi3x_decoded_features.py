@@ -81,6 +81,7 @@ class Pi3XDecodedFeatures:
             self._meta   = data["meta"]
             # Cache for camera_decoder output, populated by compute_camera_tokens()
             self._camera_decoder_cache: Optional[torch.Tensor] = None
+            self._camera_pose_cache: Optional[torch.Tensor] = None
         elif self._LEGACY_CAM_KEY in data:
             self._mode = "legacy"
             self._legacy = data
@@ -203,6 +204,44 @@ class Pi3XDecodedFeatures:
         self._camera_decoder_cache = cam_feats
         return cam_feats
 
+    def compute_camera_pose(
+        self,
+        camera_head,          # pi3.camera_head (CameraHead module)
+        patch_h: int,
+        patch_w: int,
+        device=None,
+    ) -> torch.Tensor:
+        """
+        Run pi3.camera_head on camera_tokens to produce a compact 12-value pose
+        representation (first 3 rows of the 4×4 pose matrix, flattened).
+
+        Must be called AFTER compute_camera_tokens().
+
+        Args:
+            camera_head: pi3.camera_head — CameraHead(dim=512).
+            patch_h:     number of patch rows  (= input_size // patch_size).
+            patch_w:     number of patch cols  (= input_size // patch_size).
+            device:      target device for the camera_head forward pass.
+
+        Returns:
+            Tensor of shape (F, 12).
+        """
+        if self._mode == "legacy":
+            raise AttributeError("compute_camera_pose is not supported in legacy schema.")
+
+        cam_tokens = self.camera_tokens  # (F, num_patches, 512) – requires compute_camera_tokens first
+        if device is not None:
+            cam_tokens = cam_tokens.to(device=device)
+
+        with torch.no_grad():
+            # camera_head internally converts to float for SVD; safe to pass bf16/fp16 input
+            pose_4x4 = camera_head(cam_tokens.float(), patch_h, patch_w)   # (F, 4, 4)
+
+        # Take first 3 rows (drop the fixed [0,0,0,1] row) and flatten → (F, 12)
+        pose_12 = pose_4x4[:, :3, :].reshape(pose_4x4.shape[0], 12)
+        self._camera_pose_cache = pose_12
+        return pose_12
+
     @property
     def camera_tokens(self) -> torch.Tensor:
         """
@@ -236,6 +275,21 @@ class Pi3XDecodedFeatures:
                 "camera_decoder_features requires compute_camera_tokens() to be called first."
             )
         return self._camera_decoder_cache
+
+    @property
+    def camera_pose(self) -> torch.Tensor:
+        """
+        12-value pose representation (first 3 rows of the 4×4 camera pose matrix).
+        Shape: (F, 12).  Requires compute_camera_pose() to be called first.
+        """
+        if self._mode == "legacy":
+            raise AttributeError("camera_pose not available in legacy schema.")
+        if self._camera_pose_cache is None:
+            raise RuntimeError(
+                "camera_pose requires compute_camera_pose(camera_head, patch_h, patch_w) "
+                "to be called first."
+            )
+        return self._camera_pose_cache
 
     # ------------------------------------------------------------------ #
     #  Patch tokens                                                        #
@@ -303,6 +357,8 @@ class Pi3XDecodedFeatures:
             self._meta["decoded_pos_template"] = _cast(self._meta["decoded_pos_template"])
             if self._camera_decoder_cache is not None:
                 self._camera_decoder_cache = _cast(self._camera_decoder_cache)
+            if self._camera_pose_cache is not None:
+                self._camera_pose_cache = _cast(self._camera_pose_cache)
         else:
             self._legacy["camera_tokens"] = _cast(self._legacy["camera_tokens"])
             self._legacy["patch_tokens"]  = _cast(self._legacy["patch_tokens"])

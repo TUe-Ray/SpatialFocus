@@ -68,12 +68,16 @@ class CrossAttentionFusion(nn.Module):
 
 
 class PatchCrossAttentionCameraConcatFusion(nn.Module):
-    def __init__(self, d_clip, d_spatial_encoder, d_attn, num_heads, dropout_rate=0.1):
+    def __init__(self, d_clip, d_spatial_encoder, d_attn, num_heads, dropout_rate=0.1, d_camera_encoder=None):
         super(PatchCrossAttentionCameraConcatFusion, self).__init__()
+
+        # d_camera_encoder defaults to d_spatial_encoder for backward compatibility.
+        # Set to 512 when using the new decoded schema (camera_decoder out_dim).
+        _d_cam = d_camera_encoder or d_spatial_encoder
 
         self.clip_norm = nn.LayerNorm(d_clip)
         self.patch_norm = nn.LayerNorm(d_spatial_encoder)
-        self.camera_norm = nn.LayerNorm(d_spatial_encoder)
+        self.camera_norm = nn.LayerNorm(_d_cam)
 
         self.clip_query_proj = nn.Linear(d_clip, d_attn)
         self.patch_key_proj = nn.Linear(d_spatial_encoder, d_attn)
@@ -82,7 +86,7 @@ class PatchCrossAttentionCameraConcatFusion(nn.Module):
 
         self.out_proj = nn.Linear(d_attn, d_clip)
         self.out_norm = nn.LayerNorm(d_clip)
-        self.camera_to_clip_proj = nn.Linear(d_spatial_encoder, d_clip)
+        self.camera_to_clip_proj = nn.Linear(_d_cam, d_clip)
         self.dropout = nn.Dropout(dropout_rate)
 
     def forward(self, clip_features, patch_tokens, camera_tokens):
@@ -107,13 +111,17 @@ class PatchCrossAttentionCameraConcatFusion(nn.Module):
 
 
 class GeometryBridgeFusion(nn.Module):
-    def __init__(self, d_clip, d_spatial_encoder, d_attn, num_heads, dropout_rate=0.1):
+    def __init__(self, d_clip, d_spatial_encoder, d_attn, num_heads, dropout_rate=0.1, d_camera_encoder=None):
         super(GeometryBridgeFusion, self).__init__()
 
+        # d_camera_encoder defaults to d_spatial_encoder for backward compatibility.
+        # Set to 512 when using the new decoded schema (camera_decoder out_dim).
+        _d_cam = d_camera_encoder or d_spatial_encoder
+
         # Stage 1: camera query attends to spatial patch tokens.
-        self.camera_norm = nn.LayerNorm(d_spatial_encoder)
+        self.camera_norm = nn.LayerNorm(_d_cam)
         self.patch_norm = nn.LayerNorm(d_spatial_encoder)
-        self.camera_query_proj = nn.Linear(d_spatial_encoder, d_attn)
+        self.camera_query_proj = nn.Linear(_d_cam, d_attn)
         self.patch_key_proj = nn.Linear(d_spatial_encoder, d_attn)
         self.patch_value_proj = nn.Linear(d_spatial_encoder, d_attn)
         self.geometry_attention = nn.MultiheadAttention(embed_dim=d_attn, num_heads=num_heads, batch_first=True)
@@ -162,6 +170,99 @@ class GeometryBridgeFusion(nn.Module):
             "clip_to_geometry": clip_geometry_attn,
         }
         return fused_features, attn_weights
+
+class SvfCatFeatFusion(nn.Module):
+    """
+    Comparison 1: concatenate camera_tokens and patch_tokens along the feature
+    dimension, then let 2D features cross-attend the combined KV.
+
+    camera_tokens: (F, P, d_camera)    e.g. (F, P, 512)
+    patch_tokens:  (F, P, d_patch)     e.g. (F, P, 2048)
+    combined:      (F, P, d_camera+d_patch)  e.g. (F, P, 2560)
+    """
+    def __init__(self, d_clip, d_camera_encoder, d_spatial_encoder, d_attn, num_heads, dropout_rate=0.1):
+        super().__init__()
+        d_combined = d_camera_encoder + d_spatial_encoder
+
+        self.clip_norm    = nn.LayerNorm(d_clip)
+        self.spatial_norm = nn.LayerNorm(d_combined)
+
+        self.clip_query_proj    = nn.Linear(d_clip,     d_attn)
+        self.spatial_key_proj   = nn.Linear(d_combined, d_attn)
+        self.spatial_value_proj = nn.Linear(d_combined, d_attn)
+
+        self.cross_attention = nn.MultiheadAttention(embed_dim=d_attn, num_heads=num_heads, batch_first=True)
+
+        self.out_proj = nn.Linear(d_attn, d_clip)
+        self.out_norm = nn.LayerNorm(d_clip)
+        self.dropout  = nn.Dropout(dropout_rate)
+
+    def forward(self, clip_features, camera_tokens, patch_tokens):
+        # cat along feature dim: (F, P, 512+2048) = (F, P, 2560)
+        spatial = torch.cat([camera_tokens, patch_tokens], dim=-1)
+
+        Q = self.clip_query_proj(self.clip_norm(clip_features))
+        spatial_norm = self.spatial_norm(spatial)
+        K = self.spatial_key_proj(spatial_norm)
+        V = self.spatial_value_proj(spatial_norm)
+
+        attn_out, attn_weights = self.cross_attention(Q, K, V)
+        attn_out = self.out_proj(attn_out)
+        attn_out = self.dropout(attn_out)
+        out = self.out_norm(clip_features + attn_out)
+        return out, attn_weights
+
+
+class SvfPosePrependFusion(nn.Module):
+    """
+    Comparison 3: compress camera branch into a single pose token via Pi3's
+    camera_head (4×4 → first 3 rows → 12 values), project to d_clip, and
+    prepend it to the 2D-fused sequence.
+
+    camera_pose:  (F, 12)              first 3 rows of the 4×4 pose matrix
+    patch_tokens: (F, P, d_patch)      3D spatial features
+    clip_features:(F, N_clip, d_clip)  2D vision features
+
+    Output: (F, 1+N_clip, d_clip)   — 1 extra pose token per frame
+    """
+    def __init__(self, d_clip, d_spatial_encoder, d_attn, num_heads, dropout_rate=0.1, d_pose=12):
+        super().__init__()
+        # Pose token projection: 12 → d_clip
+        self.pose_proj = nn.Linear(d_pose, d_clip)
+        self.pose_norm = nn.LayerNorm(d_clip)
+
+        # 2D cross-attend to patch
+        self.clip_norm  = nn.LayerNorm(d_clip)
+        self.patch_norm = nn.LayerNorm(d_spatial_encoder)
+
+        self.clip_query_proj  = nn.Linear(d_clip,            d_attn)
+        self.patch_key_proj   = nn.Linear(d_spatial_encoder, d_attn)
+        self.patch_value_proj = nn.Linear(d_spatial_encoder, d_attn)
+
+        self.cross_attention = nn.MultiheadAttention(embed_dim=d_attn, num_heads=num_heads, batch_first=True)
+
+        self.out_proj = nn.Linear(d_attn, d_clip)
+        self.out_norm = nn.LayerNorm(d_clip)
+        self.dropout  = nn.Dropout(dropout_rate)
+
+    def forward(self, clip_features, camera_pose, patch_tokens):
+        # Step 1: pose token  (F, 1, d_clip)
+        pose_token = self.pose_norm(self.pose_proj(camera_pose)).unsqueeze(1)
+
+        # Step 2: 2D cross-attend patch
+        Q = self.clip_query_proj(self.clip_norm(clip_features))
+        K = self.patch_key_proj(self.patch_norm(patch_tokens))
+        V = self.patch_value_proj(self.patch_norm(patch_tokens))
+
+        attn_out, attn_weights = self.cross_attention(Q, K, V)
+        attn_out = self.out_proj(attn_out)
+        attn_out = self.dropout(attn_out)
+        fused_2d = self.out_norm(clip_features + attn_out)
+
+        # Step 3: prepend pose token
+        out = torch.cat([pose_token, fused_2d], dim=1)   # (F, 1+N_clip, d_clip)
+        return out, attn_weights
+
 
 class TransformerFusion(nn.Module):
     def __init__(self, d_clip, d_spatial_encoder, d_attn, num_heads, dropout_rate=0.1):
@@ -395,6 +496,9 @@ def build_multimodal_fusion_block(config, delay_load=False, **kwargs):
     d_llm = config.hidden_size
     d_attn = d_clip
     d_spatial_encoder = getattr(config, "spatial_feature_dim", 768)
+    # d_camera_encoder is 512 when using the new decoded schema (camera_decoder branch).
+    # Defaults to None (falls back to d_spatial_encoder) for backward compatibility.
+    d_camera_encoder = getattr(config, "spatial_camera_encoder_dim", None)
     if fusion_block_type == "cross_attention_with_mlp":
         return CrossAttentionFusionWithMLP(
             d_clip=d_clip,
@@ -418,6 +522,7 @@ def build_multimodal_fusion_block(config, delay_load=False, **kwargs):
             d_attn=d_attn,
             num_heads=18,
             dropout_rate=0.1,
+            d_camera_encoder=d_camera_encoder,
         )
     elif fusion_block_type == "svf_geometry_bridge":
         return GeometryBridgeFusion(
@@ -426,6 +531,7 @@ def build_multimodal_fusion_block(config, delay_load=False, **kwargs):
             d_attn=d_attn,
             num_heads=18,
             dropout_rate=0.1,
+            d_camera_encoder=d_camera_encoder,
         )
     elif fusion_block_type == "mlp_after_clip_proj":
         return MLPFusion(
@@ -470,5 +576,34 @@ def build_multimodal_fusion_block(config, delay_load=False, **kwargs):
             d_query=d_llm,
             d_kv=d_spatial_encoder,
             num_heads=64
+        )
+    elif fusion_block_type == "svf_patch_only":
+        # Baseline: 2D cross-attends patch_tokens only. Reuses CrossAttentionFusion.
+        return CrossAttentionFusion(
+            d_clip=d_clip,
+            d_spatial_encoder=d_spatial_encoder,
+            d_attn=d_attn,
+            num_heads=18,
+        )
+    elif fusion_block_type == "svf_cat_feat":
+        # Comparison 1: feature-dim concat of [camera, patch] as KV.
+        _d_cam = d_camera_encoder or 512  # camera_decoder out_dim
+        return SvfCatFeatFusion(
+            d_clip=d_clip,
+            d_camera_encoder=_d_cam,
+            d_spatial_encoder=d_spatial_encoder,
+            d_attn=d_attn,
+            num_heads=18,
+            dropout_rate=0.1,
+        )
+    elif fusion_block_type == "svf_pose_prepend":
+        # Comparison 3: Pi3 camera_head → 12-value pose → prepended token.
+        return SvfPosePrependFusion(
+            d_clip=d_clip,
+            d_spatial_encoder=d_spatial_encoder,
+            d_attn=d_attn,
+            num_heads=18,
+            dropout_rate=0.1,
+            d_pose=12,
         )
     raise ValueError(f"Unknown fusion block type: {fusion_block_type}")
