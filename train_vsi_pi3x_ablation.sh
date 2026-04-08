@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=ablation_pi3x
+#SBATCH --job-name=ablation_svf_patch_only
 #SBATCH --nodes=4
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
@@ -17,7 +17,7 @@ SUFFIX="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
 # ============================================================
 # User-defined variables: General
 # ============================================================
-NOTE="Ablation: keep svf_patch_only + comparison 1/2/3, 25% training data."
+NOTE="Pi3X fusion ablation: patch-only KV (baseline), 25% data, 1 epoch"
 CONDA_ENV_NAME="vlm3r"
 
 # ============================================================
