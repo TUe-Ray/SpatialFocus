@@ -35,7 +35,7 @@ class MaskGuidedPooler(nn.Module):
     def __init__(
         self,
         default_top_k: int = 5,
-        default_selection: str = "class_confidence",
+        default_selection: str = "mean_mask_confidence",
         default_mask_area_threshold: float = 0.5,
         eps: float = 1e-6,
     ):
@@ -209,16 +209,22 @@ class MaskGuidedPooler(nn.Module):
 
         b_masks, _, _, _ = soft_masks.shape
         b_vis, token_count, feat_dim = visual_features.shape
-        batch_size = min(b_masks, b_vis)
-        if batch_size <= 0:
+        if b_masks <= 0:
             raise ValueError(
                 f"Empty batch for pooling: soft_masks batch={b_masks}, visual_features batch={b_vis}"
             )
+        if b_masks != b_vis:
+            raise ValueError(
+                f"Batch mismatch for mask pooling: soft_masks batch={b_masks}, visual_features batch={b_vis}. "
+                "Upstream alignment must be explicit."
+            )
+        if class_logits is not None and class_logits.shape[0] != b_masks:
+            raise ValueError(
+                f"Batch mismatch for mask pooling: class_logits batch={class_logits.shape[0]}, "
+                f"expected {b_masks} to match soft_masks and visual_features."
+            )
 
-        soft_masks = soft_masks[:batch_size]
-        visual_features = visual_features[:batch_size]
-        if class_logits is not None:
-            class_logits = class_logits[:batch_size]
+        batch_size = b_masks
 
         prefix_count, grid_h, grid_w = self._infer_grid_shape(
             token_count=token_count,
@@ -274,5 +280,5 @@ class MaskGuidedPooler(nn.Module):
             "weights": weights,
             "grid_size": torch.tensor([grid_h, grid_w], device=pooled_tokens.device),
             "prefix_token_count": torch.tensor([prefix_count], device=pooled_tokens.device),
-            "batch_mismatch": torch.tensor([b_masks - b_vis], device=pooled_tokens.device),
+            "batch_mismatch": torch.tensor([0], device=pooled_tokens.device),
         }
