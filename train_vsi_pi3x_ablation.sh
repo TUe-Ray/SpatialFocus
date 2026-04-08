@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=ablation_svf_pose_prepend
+#SBATCH --job-name=ablation_svf_pose_prepend_25p
 #SBATCH --nodes=4
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
 #SBATCH --cpus-per-task=32
-#SBATCH --time=12:00:00
+#SBATCH --time=00:30:00
 #SBATCH --partition=boost_usr_prod  
-#SBATCH --qos=normal # normal/boost_qos_dbg
+#SBATCH --qos=boost_qos_dbg# normal/boost_qos_dbg
 #SBATCH --output=logs/train/%x_%j.out
 #SBATCH --error=logs/train/%x_%j.err
 #SBATCH --mem=0
@@ -23,8 +23,8 @@ CONDA_ENV_NAME="vlm3r"
 # ============================================================
 # User-defined variables: Paths
 # ============================================================
-LOCAL_MODEL_BASE="/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/LLaVA-NeXT-Video-7B-Qwen2"
-LOCAL_SIGLIP="/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/siglip-so400m-patch14-384"
+LOCAL_MODEL_BASE="/leonardo_work/EUHPC_D32_006/FAST/hf_models/VLM3R/LLaVA-NeXT-Video-7B-Qwen2"
+LOCAL_SIGLIP="/leonardo_work/EUHPC_D32_006/FAST/hf_models/VLM3R/siglip-so400m-patch14-384"
 DATA_ROOT="/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r"
 
 TRAIN_SAVE_ROOT="/leonardo_work/EUHPC_D32_006/Train_Model/VLM3R"
