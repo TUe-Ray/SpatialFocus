@@ -11,10 +11,9 @@ HF_HOME="${HF_HOME:-/leonardo_scratch/fast/EUHPC_D32_006/hf_cache}"
 HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$HF_HOME/datasets}"
 HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-$HF_HOME/hub}"
 
-OUTPUT_JSON="${OUTPUT_JSON:-logs/eomt_pool_validation_report.json}"
+OUTPUT_JSON="${OUTPUT_JSON:-/leonardo/home/userexternal/shuang00/VLM-3R/logs/validate/eomt_pool_validation_report.json}"
 
 cd "$PROJECT_ROOT"
-mkdir -p logs
 
 module purge || true
 module load cuda/12.1 || true
