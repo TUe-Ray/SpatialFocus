@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=ablation_svf_patch_only
+#SBATCH --job-name=ablation_svf_cat_feat
 #SBATCH --nodes=4
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
@@ -17,7 +17,7 @@ SUFFIX="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
 # ============================================================
 # User-defined variables: General
 # ============================================================
-NOTE="Pi3X fusion ablation: patch-only KV (baseline), 25% data, 1 epoch"
+NOTE="Pi3X fusion ablation:svf_cat_feat, 25% data, 1 epoch"
 CONDA_ENV_NAME="vlm3r"
 
 # ============================================================
@@ -68,7 +68,7 @@ MODEL_SPATIAL_FEATURE_DIM="2048"
 #     final=2D + crossattn(Q=2D, KV=geometry-aware tokens).
 # - svf_pose_prepend
 #     Comparison-3: prepend one pose token (12-dim camera pose -> projected to d_clip).
-MODEL_FUSION_BLOCK="svf_patch_only"
+MODEL_FUSION_BLOCK="svf_cat_feat"
 # ============== Training percentage and shuffling (for ablation) ==============
 TRAIN_DATA_PERCENTAGE="25"
 TRAIN_DATA_PERCENTAGE_SEED="$SEED"
