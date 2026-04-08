@@ -233,9 +233,13 @@ class Pi3XDecodedFeatures:
         if device is not None:
             cam_tokens = cam_tokens.to(device=device)
 
+        head_param = next(camera_head.parameters(), None)
+        if head_param is not None and cam_tokens.dtype != head_param.dtype:
+            cam_tokens = cam_tokens.to(dtype=head_param.dtype)
+
         with torch.no_grad():
-            # camera_head internally converts to float for SVD; safe to pass bf16/fp16 input
-            pose_4x4 = camera_head(cam_tokens.float(), patch_h, patch_w)   # (F, 4, 4)
+            # Keep input dtype aligned with camera_head weights to avoid matmul dtype mismatch.
+            pose_4x4 = camera_head(cam_tokens, patch_h, patch_w)   # (F, 4, 4)
 
         # Take first 3 rows (drop the fixed [0,0,0,1] row) and flatten → (F, 12)
         pose_12 = pose_4x4[:, :3, :].reshape(pose_4x4.shape[0], 12)
