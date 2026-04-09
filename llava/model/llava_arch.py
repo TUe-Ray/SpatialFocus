@@ -333,6 +333,238 @@ class LlavaMetaForCausalLM(ABC):
             self._eomt_mask_pooler = pooler
         return pooler
 
+    def _get_eomt_object_selector(self):
+        selector = getattr(self, "_eomt_object_selector", None)
+        if selector is None:
+            from llava.model.multimodal_eomt import EoMTObjectTokenSelector
+
+            selector = EoMTObjectTokenSelector()
+            self._eomt_object_selector = selector
+        return selector
+
+    def _get_eomt_object_block_appender(self):
+        appender = getattr(self, "_eomt_object_block_appender", None)
+        if appender is None:
+            from llava.model.multimodal_eomt import EoMTObjectBlockAppender
+
+            appender = EoMTObjectBlockAppender()
+            self._eomt_object_block_appender = appender
+        return appender
+
+    def _get_eomt_obj_info_builder(self):
+        builder = getattr(self, "_eomt_obj_info_builder", None)
+        if builder is None:
+            from llava.model.multimodal_eomt import EoMTObjInfoBuilder
+
+            builder = EoMTObjInfoBuilder()
+            self._eomt_obj_info_builder = builder
+        return builder
+
+    def _get_or_create_eomt_vector_parameter(self, name, hidden_size, trainable=True):
+        model = self.get_model()
+        existing = getattr(model, name, None)
+        if isinstance(existing, nn.Parameter):
+            existing.requires_grad = bool(trainable)
+            return existing
+
+        ref = model.embed_tokens.weight
+        param = nn.Parameter(
+            torch.zeros(hidden_size, device=ref.device, dtype=ref.dtype),
+            requires_grad=bool(trainable),
+        )
+        nn.init.normal_(param, std=0.02)
+        setattr(model, name, param)
+        return param
+
+    def _build_external_selection_socket(self, pooled_outputs):
+        frame_meta = pooled_outputs.get("frame_meta", []) if isinstance(pooled_outputs, dict) else []
+        sample_frame_pairs = pooled_outputs.get("aligned_sample_frame_pairs", []) if isinstance(pooled_outputs, dict) else []
+        entries = []
+
+        if not isinstance(frame_meta, list):
+            frame_meta = []
+
+        for idx, meta in enumerate(frame_meta):
+            if not isinstance(meta, dict):
+                continue
+            if idx < len(sample_frame_pairs) and isinstance(sample_frame_pairs[idx], (list, tuple)) and len(sample_frame_pairs[idx]) >= 2:
+                sample_idx = int(sample_frame_pairs[idx][0])
+                frame_idx = int(sample_frame_pairs[idx][1])
+            else:
+                sample_idx = idx
+                frame_idx = idx
+
+            socket_dict = meta.get("external_selection", meta)
+            selected_words = socket_dict.get("selected_words", None)
+            selected_mask_ids = socket_dict.get("selected_mask_ids", None)
+            selected_query_ids = socket_dict.get("selected_query_ids", None)
+
+            if any(x is not None for x in [selected_words, selected_mask_ids, selected_query_ids]):
+                entries.append(
+                    {
+                        "sample_idx": sample_idx,
+                        "frame_idx": frame_idx,
+                        "selected_words": selected_words,
+                        "selected_mask_ids": selected_mask_ids,
+                        "selected_query_ids": selected_query_ids,
+                    }
+                )
+
+        if len(entries) == 0:
+            return None
+        return {"entries": entries}
+
+    def _build_eomt_obj_info_tokens(self, visual_tokens):
+        hidden_size = int(visual_tokens.shape[1])
+        obj_info_mode = str(getattr(self.config, "mm_eomt_obj_info_mode", "none"))
+        obj_info_text = str(getattr(self.config, "mm_eomt_obj_info_text", "Object information from the image:"))
+        obj_info_trainable = bool(getattr(self.config, "mm_eomt_obj_info_trainable", True))
+
+        learnable_embedding = None
+        if obj_info_mode == "learnable_embedding":
+            learnable_embedding = self._get_or_create_eomt_vector_parameter(
+                name="eomt_obj_info_learnable_embedding",
+                hidden_size=hidden_size,
+                trainable=obj_info_trainable,
+            )
+
+        builder = self._get_eomt_obj_info_builder()
+        return builder.build(
+            mode=obj_info_mode,
+            hidden_size=hidden_size,
+            device=visual_tokens.device,
+            dtype=visual_tokens.dtype,
+            text_phrase=obj_info_text,
+            learnable_embedding=learnable_embedding,
+        )
+
+    def _compose_eomt_object_block_tokens(self, object_tokens, visual_tokens, object_block_outputs):
+        if not torch.is_tensor(object_tokens) or object_tokens.ndim != 2 or object_tokens.shape[0] == 0:
+            return None, "empty_selected_object_tokens"
+
+        block_tokens = object_tokens.to(device=visual_tokens.device, dtype=visual_tokens.dtype)
+
+        type_embedding_used = False
+        if bool(getattr(self.config, "mm_eomt_use_object_type_embedding", False)):
+            object_type_embedding = self._get_or_create_eomt_vector_parameter(
+                name="eomt_object_type_embedding",
+                hidden_size=int(block_tokens.shape[1]),
+                trainable=True,
+            )
+            block_tokens = block_tokens + object_type_embedding.to(device=block_tokens.device, dtype=block_tokens.dtype).unsqueeze(0)
+            type_embedding_used = True
+
+        obj_info_tokens, obj_info_debug = self._build_eomt_obj_info_tokens(visual_tokens=visual_tokens)
+        if torch.is_tensor(obj_info_tokens) and obj_info_tokens.ndim == 2 and obj_info_tokens.shape[0] > 0:
+            block_tokens = torch.cat((obj_info_tokens.to(device=block_tokens.device, dtype=block_tokens.dtype), block_tokens), dim=0)
+
+        if isinstance(object_block_outputs, dict):
+            object_block_outputs["obj_info_mode"] = obj_info_debug.get("obj_info_mode", "none")
+            object_block_outputs["obj_info_used"] = bool(obj_info_debug.get("obj_info_used", False))
+            object_block_outputs["obj_info_reason"] = obj_info_debug.get("obj_info_reason", None)
+            if "obj_info_text" in obj_info_debug:
+                object_block_outputs["obj_info_text"] = obj_info_debug.get("obj_info_text", "")
+            object_block_outputs["object_type_embedding_used"] = type_embedding_used
+            object_block_outputs["object_block_token_count"] = int(block_tokens.shape[0])
+
+        return block_tokens, None
+
+    def _compute_eomt_object_block_side_output(self):
+        enabled = bool(getattr(self.config, "mm_eomt_enable_object_block", False))
+        selector_mode = str(getattr(self.config, "mm_eomt_selector_mode", "class_aware"))
+        ordering_mode = str(getattr(self.config, "mm_eomt_selector_order", "frame_then_score"))
+        append_position = str(getattr(self.config, "mm_eomt_object_block_position", "after_visual"))
+        if append_position not in {"before_visual", "after_visual"}:
+            append_position = "after_visual"
+
+        debug = {
+            "enabled": enabled,
+            "used_object_block": False,
+            "has_selected_objects": False,
+            "selector_mode": selector_mode,
+            "ordering_mode": ordering_mode,
+            "append_position": append_position,
+            "obj_info_mode": str(getattr(self.config, "mm_eomt_obj_info_mode", "none")),
+            "obj_info_used": False,
+            "obj_info_reason": None,
+            "object_type_embedding_used": False,
+            "selected_count": 0,
+            "selected_frame_ids": [],
+            "selected_sample_frame_pairs": [],
+            "selected_scores": [],
+            "selected_indices": [],
+            "truncated_per_frame_count": 0,
+            "truncated_global_count": 0,
+            "fallback_reason": None,
+            "taxonomy_note": None,
+            "external_socket_present": False,
+            "external_selection_contract": {},
+            "external_socket_note": None,
+            "no_object_class_id": int(getattr(self.config, "mm_eomt_selector_no_object_class_id", -1)),
+            "selected_tokens_by_sample": {},
+        }
+
+        if not enabled:
+            debug["fallback_reason"] = "object_block_disabled"
+            return debug
+
+        pooled_outputs = getattr(self, "_last_eomt_pooled_outputs", None)
+        if not isinstance(pooled_outputs, dict):
+            debug["fallback_reason"] = "missing_pooled_outputs"
+            return debug
+
+        external_selection = self._build_external_selection_socket(pooled_outputs)
+        debug["external_socket_present"] = bool(
+            isinstance(external_selection, dict)
+            and isinstance(external_selection.get("entries", None), list)
+            and len(external_selection.get("entries", [])) > 0
+        )
+
+        try:
+            selector = self._get_eomt_object_selector()
+            selected = selector.select(
+                pooled_outputs=pooled_outputs,
+                config=self.config,
+                external_selection=external_selection,
+            )
+        except Exception as e:
+            rank0_print(f"EoMT object selector error: {e}")
+            debug["fallback_reason"] = "selector_execution_error"
+            return debug
+
+        if not isinstance(selected, dict):
+            debug["fallback_reason"] = "invalid_selector_output"
+            return debug
+
+        debug["selector_mode"] = str(selected.get("selector_mode", selector_mode))
+        debug["ordering_mode"] = str(selected.get("ordering_mode", ordering_mode))
+        debug["append_position"] = str(selected.get("append_position", append_position))
+        debug["selected_count"] = int(selected.get("selected_count", 0))
+        debug["selected_sample_frame_pairs"] = list(selected.get("selected_sample_frame_pairs", []))
+        debug["selected_frame_ids"] = [
+            pair[1]
+            for pair in debug["selected_sample_frame_pairs"]
+            if isinstance(pair, (tuple, list)) and len(pair) >= 2
+        ]
+        debug["selected_scores"] = list(selected.get("selected_scores", []))
+        debug["selected_indices"] = list(selected.get("selected_indices", []))
+        debug["truncated_per_frame_count"] = int(selected.get("truncated_per_frame_count", 0))
+        debug["truncated_global_count"] = int(selected.get("truncated_global_count", 0))
+        debug["taxonomy_note"] = selected.get("taxonomy_note", None)
+        debug["external_socket_note"] = selected.get("external_socket_note", None)
+        debug["external_selection_contract"] = selected.get("external_selection_contract", {})
+        debug["no_object_class_id"] = int(selected.get("no_object_class_id", debug["no_object_class_id"]))
+        debug["selected_tokens_by_sample"] = selected.get("selected_tokens_by_sample", {})
+
+        debug["has_selected_objects"] = debug["selected_count"] > 0
+        fallback_reason = selected.get("fallback_reason", None)
+        if fallback_reason is not None:
+            debug["fallback_reason"] = str(fallback_reason)
+        elif not debug["has_selected_objects"]:
+            debug["fallback_reason"] = "no_selected_objects"
+
+        return debug
+
     def _build_eomt_pool_side_cache(
         self,
         per_sample_visual_features,
@@ -958,6 +1190,7 @@ class LlavaMetaForCausalLM(ABC):
         self._last_eomt_pool_skip_reasons = None
         self._last_eomt_outputs = None
         self._last_eomt_pooled_outputs = None
+        self._last_eomt_object_block_outputs = None
         if vision_tower is None or images is None or input_ids.shape[1] == 1:
             return input_ids, position_ids, attention_mask, past_key_values, None, labels
 
@@ -1229,6 +1462,7 @@ class LlavaMetaForCausalLM(ABC):
         # Side-output path: consume EoMT masks to pool vision grid tokens.
         # This does not modify the main image_features path used by the model.
         self._last_eomt_pooled_outputs = self._compute_eomt_mask_pooled_side_output()
+        self._last_eomt_object_block_outputs = self._compute_eomt_object_block_side_output()
 
         # TODO: image start / end is not implemented here to support pretraining.
         if getattr(self.config, "tune_mm_mlp_adapter", False) and getattr(self.config, "mm_use_im_start_end", False):
@@ -1259,6 +1493,7 @@ class LlavaMetaForCausalLM(ABC):
         new_input_embeds = []
         new_labels = []
         cur_image_idx = 0
+        object_block_outputs = getattr(self, "_last_eomt_object_block_outputs", None)
         # rank_print("Inserting Images embedding")
         for batch_idx, cur_input_ids in enumerate(input_ids):
             num_images = (cur_input_ids == IMAGE_TOKEN_INDEX).sum()
@@ -1322,12 +1557,45 @@ class LlavaMetaForCausalLM(ABC):
                         #     cur_camera_tokens = camera_tokens[cur_image_idx - 1]
                         #     cur_patch_tokens = patch_tokens[cur_image_idx - 1]
 
+                    cur_object_sample_idx = batch_idx
                     cur_image_idx += 1
 
                     # Prepare combined features (visual + spatial)
                     features_to_insert = []
                     if cur_image_features is not None and cur_image_features.shape[0] > 0:
-                        features_to_insert.append(cur_image_features)
+                        merged_visual_features = cur_image_features
+                        if isinstance(object_block_outputs, dict) and bool(object_block_outputs.get("enabled", False)):
+                            selected_tokens_by_sample = object_block_outputs.get("selected_tokens_by_sample", {})
+                            cur_object_tokens = selected_tokens_by_sample.get(cur_object_sample_idx, None)
+                            if (
+                                torch.is_tensor(cur_object_tokens)
+                                and cur_object_tokens.ndim == 2
+                                and cur_object_tokens.shape[0] > 0
+                            ):
+                                object_block_tokens, compose_reason = self._compose_eomt_object_block_tokens(
+                                    object_tokens=cur_object_tokens,
+                                    visual_tokens=cur_image_features,
+                                    object_block_outputs=object_block_outputs,
+                                )
+                                if (
+                                    torch.is_tensor(object_block_tokens)
+                                    and object_block_tokens.ndim == 2
+                                    and object_block_tokens.shape[0] > 0
+                                ):
+                                    appender = self._get_eomt_object_block_appender()
+                                    merged_visual_features, used_object_block, append_reason = appender.append(
+                                        visual_tokens=cur_image_features,
+                                        object_tokens=object_block_tokens,
+                                        position=str(object_block_outputs.get("append_position", "after_visual")),
+                                    )
+                                    if used_object_block:
+                                        object_block_outputs["used_object_block"] = True
+                                        object_block_outputs["fallback_reason"] = None
+                                    elif object_block_outputs.get("fallback_reason", None) is None:
+                                        object_block_outputs["fallback_reason"] = append_reason
+                                elif object_block_outputs.get("fallback_reason", None) is None:
+                                    object_block_outputs["fallback_reason"] = compose_reason
+                        features_to_insert.append(merged_visual_features)
                     # spatial_tower_select_feature = getattr(self.config, "spatial_tower_select_feature", None)
                     # if self.get_model().get_spatial_tower() is not None and spatial_tower_select_feature is not None:
                     #     spatial_feature_flags = spatial_tower_select_feature.split(",")
@@ -1389,6 +1657,14 @@ class LlavaMetaForCausalLM(ABC):
 
         new_input_embeds = torch.stack(new_input_embeds_padded, dim=0)
         # rank0_print("tokenizer padding")
+
+        if isinstance(self._last_eomt_object_block_outputs, dict):
+            if (
+                self._last_eomt_object_block_outputs.get("enabled", False)
+                and not self._last_eomt_object_block_outputs.get("used_object_block", False)
+                and self._last_eomt_object_block_outputs.get("fallback_reason", None) is None
+            ):
+                self._last_eomt_object_block_outputs["fallback_reason"] = "no_object_block_appended"
 
         if _labels is None:
             new_labels = None

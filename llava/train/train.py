@@ -199,6 +199,22 @@ class ModelArguments:
     ## EoMT mask extractor (frozen side branch)
     eomt_config_path: Optional[str] = field(default=None, metadata={"help": "Path to EoMT YAML config file"})
     eomt_ckpt_path: Optional[str] = field(default=None, metadata={"help": "Path to EoMT pre-trained weights"})
+    mm_eomt_enable_object_block: bool = field(default=False)
+    mm_eomt_object_block_position: str = field(default="after_visual")
+    mm_eomt_object_block_max_objects: int = field(default=8)
+    mm_eomt_object_block_max_per_frame: int = field(default=2)
+    mm_eomt_selector_mode: str = field(default="class_aware")
+    mm_eomt_selector_keep_stuff: bool = field(default=True)
+    mm_eomt_selector_keep_things: bool = field(default=True)
+    mm_eomt_selector_drop_no_object: bool = field(default=True)
+    mm_eomt_selector_order: str = field(default="frame_then_score")
+    mm_eomt_selector_no_object_class_id: int = field(default=-1)
+    mm_eomt_obj_info_mode: str = field(default="none")
+    mm_eomt_obj_info_text: str = field(default="Object information from the image:")
+    mm_eomt_obj_info_trainable: bool = field(default=True)
+    mm_eomt_use_object_type_embedding: bool = field(default=False)
+    mm_eomt_external_socket_word_topn: int = field(default=1)
+    mm_eomt_external_socket_deduplicate: bool = field(default=True)
 
     unfreeze_mm_vision_tower: bool = field(default=False)
     unfreeze_language_model: bool = field(default=False)
@@ -2452,6 +2468,22 @@ def train(attn_implementation=None):
         model.config.add_time_instruction = data_args.add_time_instruction
         model.config.force_sample = data_args.force_sample
         model.config.mm_spatial_pool_stride = model_args.mm_spatial_pool_stride 
+        model.config.mm_eomt_enable_object_block = model_args.mm_eomt_enable_object_block
+        model.config.mm_eomt_object_block_position = model_args.mm_eomt_object_block_position
+        model.config.mm_eomt_object_block_max_objects = model_args.mm_eomt_object_block_max_objects
+        model.config.mm_eomt_object_block_max_per_frame = model_args.mm_eomt_object_block_max_per_frame
+        model.config.mm_eomt_selector_mode = model_args.mm_eomt_selector_mode
+        model.config.mm_eomt_selector_keep_stuff = model_args.mm_eomt_selector_keep_stuff
+        model.config.mm_eomt_selector_keep_things = model_args.mm_eomt_selector_keep_things
+        model.config.mm_eomt_selector_drop_no_object = model_args.mm_eomt_selector_drop_no_object
+        model.config.mm_eomt_selector_order = model_args.mm_eomt_selector_order
+        model.config.mm_eomt_selector_no_object_class_id = model_args.mm_eomt_selector_no_object_class_id
+        model.config.mm_eomt_obj_info_mode = model_args.mm_eomt_obj_info_mode
+        model.config.mm_eomt_obj_info_text = model_args.mm_eomt_obj_info_text
+        model.config.mm_eomt_obj_info_trainable = model_args.mm_eomt_obj_info_trainable
+        model.config.mm_eomt_use_object_type_embedding = model_args.mm_eomt_use_object_type_embedding
+        model.config.mm_eomt_external_socket_word_topn = model_args.mm_eomt_external_socket_word_topn
+        model.config.mm_eomt_external_socket_deduplicate = model_args.mm_eomt_external_socket_deduplicate
 
         ### Deciding train which part of the model
         if model_args.mm_tunable_parts is None:  # traditional way of deciding which part to train
