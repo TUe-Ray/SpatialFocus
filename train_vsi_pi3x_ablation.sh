@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=ablation_svf_pose_prepend_25p
-#SBATCH --nodes=4
+#SBATCH --job-name=dbg_ablation_svf_patch_only_25p
+#SBATCH --nodes=1
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
 #SBATCH --cpus-per-task=32
 #SBATCH --time=00:30:00
 #SBATCH --partition=boost_usr_prod  
-#SBATCH --qos=boost_qos_dbg# normal/boost_qos_dbg
+#SBATCH --qos=boost_qos_dbg  # normal/boost_qos_dbg
 #SBATCH --output=logs/train/%x_%j.out
 #SBATCH --error=logs/train/%x_%j.err
 #SBATCH --mem=0
@@ -17,7 +17,7 @@ SUFFIX="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
 # ============================================================
 # User-defined variables: General
 # ============================================================
-NOTE="Pi3X fusion ablation:svf_pose_prepend, 25% data, 1 epoch"
+NOTE="Pi3X fusion ablation:svf_patch_only, 25% data, 1 epoch"
 CONDA_ENV_NAME="vlm3r"
 
 # ============================================================
@@ -68,7 +68,7 @@ MODEL_SPATIAL_FEATURE_DIM="2048"
 #     final=2D + crossattn(Q=2D, KV=geometry-aware tokens).
 # - svf_pose_prepend
 #     Comparison-3: prepend one pose token (12-dim camera pose -> projected to d_clip).
-MODEL_FUSION_BLOCK="svf_pose_prepend"
+MODEL_FUSION_BLOCK="svf_patch_only"
 # ============== Training percentage and shuffling (for ablation) ==============
 TRAIN_DATA_PERCENTAGE="25"
 TRAIN_DATA_PERCENTAGE_SEED="$SEED"
@@ -350,14 +350,13 @@ declare -A DATA_ARGS=(
     [image_folder]="$DATA_ROOT"
     [video_folder]="$DATA_ROOT"
     [zero_spatial_features]="$ZERO_SPATIAL_FEATURES"
-    [spatial_features_subdir]="spatial_features_pi3x"
+    [spatial_features_subdir]="spatial_features_pi3x_decoded"
     [train_data_percentage]="$TRAIN_DATA_PERCENTAGE"
     [train_data_percentage_seed]="$TRAIN_DATA_PERCENTAGE_SEED"
     [train_data_shuffle]="$TRAIN_DATA_SHUFFLE"
     [group_by_modality_length]="$DATA_GROUP_BY_MODALITY_LENGTH"   #控制 dataloader sampler 是否按模態長度分組（
                                         #通常可減少 padding、讓 batch 更穩定）
 )
-
 
 declare -A TRAINING_ARGS=(
     [deepspeed]="scripts/zero2.json"
