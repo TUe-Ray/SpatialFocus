@@ -63,10 +63,16 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
         model = super().from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
         # 加载自定义权重
         if model.get_spatial_tower() is not None:
-            model.get_spatial_tower().is_loaded = False
-            model.get_spatial_tower().load_model()
-            model.get_spatial_tower().is_loaded = True
-            model.get_spatial_tower().to(kwargs.get("torch_dtype", torch.float16))
+            zero_spatial_features = getattr(model.config, "zero_spatial_features", False)
+            if isinstance(zero_spatial_features, str):
+                zero_spatial_features = zero_spatial_features.lower() in {"1", "true", "yes", "y", "on"}
+
+            # Vision-only ablation: keep spatial tower wrapper but skip heavy weight loading.
+            if not zero_spatial_features:
+                model.get_spatial_tower().is_loaded = False
+                model.get_spatial_tower().load_model()
+                model.get_spatial_tower().is_loaded = True
+                model.get_spatial_tower().to(kwargs.get("torch_dtype", torch.float16))
 
         return model
 
