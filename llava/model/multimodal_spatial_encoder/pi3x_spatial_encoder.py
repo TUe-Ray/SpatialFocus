@@ -187,8 +187,9 @@ class Pi3xEncoder(nn.Module):
         cam_param = next(self.pi3.camera_decoder.parameters(), None)
         if cam_param is not None and cam_in.dtype != cam_param.dtype:
             cam_in = cam_in.to(dtype=cam_param.dtype)
-        if cam_pos.dtype != cam_in.dtype:
-            cam_pos = cam_pos.to(dtype=cam_in.dtype)
+
+        if cam_pos.dtype not in (torch.int32, torch.int64):
+            cam_pos = cam_pos.to(dtype=torch.int64)
 
         with torch.no_grad():
             camera_decoder_features = self.pi3.camera_decoder(cam_in, xpos=cam_pos)
