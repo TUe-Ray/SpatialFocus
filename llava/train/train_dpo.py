@@ -79,6 +79,25 @@ class ModelArguments:
     tune_mm_vision_resampler: bool = field(default=False)
     vision_tower: Optional[str] = field(default=None)
     vision_tower_pretrained: Optional[str] = field(default=None)  # default to the last layer
+    ## EoMT mask extractor (frozen side branch)
+    eomt_config_path: Optional[str] = field(default=None, metadata={"help": "Path to EoMT YAML config file"})
+    eomt_ckpt_path: Optional[str] = field(default=None, metadata={"help": "Path to EoMT pre-trained weights"})
+    mm_eomt_enable_object_block: bool = field(default=False)
+    mm_eomt_object_block_position: str = field(default="after_visual")
+    mm_eomt_object_block_max_objects: int = field(default=8)
+    mm_eomt_object_block_max_per_frame: int = field(default=2)
+    mm_eomt_selector_mode: str = field(default="class_aware")
+    mm_eomt_selector_keep_stuff: bool = field(default=True)
+    mm_eomt_selector_keep_things: bool = field(default=True)
+    mm_eomt_selector_drop_no_object: bool = field(default=True)
+    mm_eomt_selector_order: str = field(default="frame_then_score")
+    mm_eomt_selector_no_object_class_id: int = field(default=-1)
+    mm_eomt_obj_info_mode: str = field(default="none")
+    mm_eomt_obj_info_text: str = field(default="Object information from the image:")
+    mm_eomt_obj_info_trainable: bool = field(default=True)
+    mm_eomt_use_object_type_embedding: bool = field(default=False)
+    mm_eomt_external_socket_word_topn: int = field(default=1)
+    mm_eomt_external_socket_deduplicate: bool = field(default=True)
 
     unfreeze_mm_vision_tower: bool = field(default=False)
     unfreeze_language_model: bool = field(default=False)
@@ -1664,6 +1683,19 @@ def train(attn_implementation=None):
         else:
             conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1"]
 
+    # EoMT: initialize frozen mask extractor (side branch, no gradients)
+    if getattr(model_args, "eomt_config_path", None) is not None:
+        model.get_model().initialize_eomt_extractor(model_args=model_args, fsdp=training_args.fsdp)
+        eomt = model.get_model().get_eomt_extractor()
+        if eomt is not None:
+            eomt.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
+
+        if ref_model is not None:
+            ref_model.get_model().initialize_eomt_extractor(model_args=model_args, fsdp=training_args.fsdp)
+            ref_eomt = ref_model.get_model().get_eomt_extractor()
+            if ref_eomt is not None:
+                ref_eomt.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
+
     if model_args.vision_tower is not None:
         model.get_model().initialize_vision_modules(model_args=model_args, fsdp=training_args.fsdp)
 
@@ -1696,6 +1728,22 @@ def train(attn_implementation=None):
         model.config.image_split_resolution = data_args.image_split_resolution
         model.config.tokenizer_padding_side = tokenizer.padding_side
         model.config.tokenizer_model_max_length = tokenizer.model_max_length
+        model.config.mm_eomt_enable_object_block = model_args.mm_eomt_enable_object_block
+        model.config.mm_eomt_object_block_position = model_args.mm_eomt_object_block_position
+        model.config.mm_eomt_object_block_max_objects = model_args.mm_eomt_object_block_max_objects
+        model.config.mm_eomt_object_block_max_per_frame = model_args.mm_eomt_object_block_max_per_frame
+        model.config.mm_eomt_selector_mode = model_args.mm_eomt_selector_mode
+        model.config.mm_eomt_selector_keep_stuff = model_args.mm_eomt_selector_keep_stuff
+        model.config.mm_eomt_selector_keep_things = model_args.mm_eomt_selector_keep_things
+        model.config.mm_eomt_selector_drop_no_object = model_args.mm_eomt_selector_drop_no_object
+        model.config.mm_eomt_selector_order = model_args.mm_eomt_selector_order
+        model.config.mm_eomt_selector_no_object_class_id = model_args.mm_eomt_selector_no_object_class_id
+        model.config.mm_eomt_obj_info_mode = model_args.mm_eomt_obj_info_mode
+        model.config.mm_eomt_obj_info_text = model_args.mm_eomt_obj_info_text
+        model.config.mm_eomt_obj_info_trainable = model_args.mm_eomt_obj_info_trainable
+        model.config.mm_eomt_use_object_type_embedding = model_args.mm_eomt_use_object_type_embedding
+        model.config.mm_eomt_external_socket_word_topn = model_args.mm_eomt_external_socket_word_topn
+        model.config.mm_eomt_external_socket_deduplicate = model_args.mm_eomt_external_socket_deduplicate
 
         ### Deciding train which part of the model
         if model_args.mm_tunable_parts is None:  # traditional way of deciding which part to train
@@ -1775,6 +1823,22 @@ def train(attn_implementation=None):
             ref_model.config.image_split_resolution = data_args.image_split_resolution
             ref_model.config.tokenizer_padding_side = tokenizer.padding_side
             ref_model.config.tokenizer_model_max_length = tokenizer.model_max_length
+            ref_model.config.mm_eomt_enable_object_block = model_args.mm_eomt_enable_object_block
+            ref_model.config.mm_eomt_object_block_position = model_args.mm_eomt_object_block_position
+            ref_model.config.mm_eomt_object_block_max_objects = model_args.mm_eomt_object_block_max_objects
+            ref_model.config.mm_eomt_object_block_max_per_frame = model_args.mm_eomt_object_block_max_per_frame
+            ref_model.config.mm_eomt_selector_mode = model_args.mm_eomt_selector_mode
+            ref_model.config.mm_eomt_selector_keep_stuff = model_args.mm_eomt_selector_keep_stuff
+            ref_model.config.mm_eomt_selector_keep_things = model_args.mm_eomt_selector_keep_things
+            ref_model.config.mm_eomt_selector_drop_no_object = model_args.mm_eomt_selector_drop_no_object
+            ref_model.config.mm_eomt_selector_order = model_args.mm_eomt_selector_order
+            ref_model.config.mm_eomt_selector_no_object_class_id = model_args.mm_eomt_selector_no_object_class_id
+            ref_model.config.mm_eomt_obj_info_mode = model_args.mm_eomt_obj_info_mode
+            ref_model.config.mm_eomt_obj_info_text = model_args.mm_eomt_obj_info_text
+            ref_model.config.mm_eomt_obj_info_trainable = model_args.mm_eomt_obj_info_trainable
+            ref_model.config.mm_eomt_use_object_type_embedding = model_args.mm_eomt_use_object_type_embedding
+            ref_model.config.mm_eomt_external_socket_word_topn = model_args.mm_eomt_external_socket_word_topn
+            ref_model.config.mm_eomt_external_socket_deduplicate = model_args.mm_eomt_external_socket_deduplicate
             ref_model.config.mm_use_im_start_end = data_args.mm_use_im_start_end
             ref_model.config.mm_use_im_patch_token = model_args.mm_use_im_patch_token
             ref_model.initialize_vision_tokenizer(model_args, tokenizer=tokenizer)

@@ -43,7 +43,7 @@ def process_video_with_decord(video_file, data_args):
     num_frames_to_sample = num_frames = len(frame_idx)
     # https://github.com/dmlc/decord/issues/208
     vr.seek(0)
-    return video, video_time, frame_time, num_frames_to_sample
+    return video, video_time, frame_time, num_frames_to_sample, frame_idx
 
 def process_video_with_pyav(video_file, data_args):
     container = av.open(video_file)
