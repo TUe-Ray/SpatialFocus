@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=ablation_svf_geometry_bridge_25percent
+#SBATCH --job-name=ablation_cut3r_25p
 #SBATCH --nodes=4
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
@@ -17,20 +17,29 @@ SUFFIX="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
 # ============================================================
 # User-defined variables: General
 # ============================================================
-NOTE="Ablation: SVF geometry bridge fusion method, 25% training data, spatial features zeroed out (to test if model can learn to ignore them)."
+NOTE="ablation study: cut3r 25% training data"
+DATA_ROOT="/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r"
+SPATIAL_FEATURES_ROOT="/leonardo_work/EUHPC_D32_006/FAST/train_data/vlm3r"
+SPATIAL_FEATURES_SUBDIR="spatial_features"
 CONDA_ENV_NAME="vlm3r"
+
+MODEL_LORA_ENABLE="True"
+MODEL_LORA_R="128"
+MODEL_LORA_ALPHA="256"
+MODEL_SPATIAL_TOWER="cut3r"
+MODEL_SPATIAL_TOWER_SELECT_FEATURE="all_tokens"
+MODEL_SPATIAL_FEATURE_DIM="768"
 
 # ============================================================
 # User-defined variables: Paths
 # ============================================================
-LOCAL_MODEL_BASE="/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/LLaVA-NeXT-Video-7B-Qwen2"
-LOCAL_SIGLIP="/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/siglip-so400m-patch14-384"
-DATA_ROOT="/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r"
-SPATIAL_FEATURES_ROOT="/leonardo_work/EUHPC_D32_006/FAST/train_data/vlm3r"
-SPATIAL_FEATURES_SUBDIR="spatial_features"
+LOCAL_MODEL_BASE="/leonardo_work/EUHPC_D32_006/FAST/hf_models/VLM3R/LLaVA-NeXT-Video-7B-Qwen2"
+LOCAL_SIGLIP="/leonardo_work/EUHPC_D32_006/FAST/hf_models/VLM3R/siglip-so400m-patch14-384"
 
 TRAIN_SAVE_ROOT="/leonardo_work/EUHPC_D32_006/Train_Model/VLM3R"
 LOG_DIR="/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/train_log"
+MODEL_FUSION_BLOCK="cross_attention"
+
 
 WANDB_DIR="$WORK/wandb"
 WANDB_CACHE_DIR="$WORK/wandb_cache"
@@ -53,12 +62,6 @@ SEED=42
 # ============================================================
 
 
-MODEL_LORA_ENABLE="True"
-MODEL_LORA_R="128"
-MODEL_LORA_ALPHA="256"
-MODEL_SPATIAL_TOWER="cut3r"
-MODEL_SPATIAL_TOWER_SELECT_FEATURE="all_tokens"
-MODEL_SPATIAL_FEATURE_DIM="768"
 # Fusion options for ablation:
 # 1) svf_baseline
 #    Q=2D visual tokens, K/V=[camera tokens, patch tokens]
@@ -71,7 +74,6 @@ MODEL_SPATIAL_FEATURE_DIM="768"
 #    stage-2: Q=2D visual tokens, K/V=geometry-aware 3D tokens, then mm_projector
 # Legacy option kept for compatibility:
 # - cross_attention (uses spatial_tower_select_feature to choose camera/patch/all)
-MODEL_FUSION_BLOCK="svf_geometry_bridge"
 # ============== Training percentage and shuffling (for ablation) ==============
 TRAIN_DATA_PERCENTAGE="25"
 TRAIN_DATA_PERCENTAGE_SEED="$SEED"
