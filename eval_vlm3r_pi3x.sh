@@ -4,7 +4,7 @@
 #SBATCH --gpus-per-node=4
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=32
-#SBATCH --time=04:00:00
+#SBATCH --time=05:00:00
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=normal
 #SBATCH --output=logs/eval/%x_%j.out
@@ -17,7 +17,7 @@ NOTE="Eval ablation for svf_pose_prepend fusion method on the VLM-3R model"
 echo "-------- Note --------"
 echo "  note: $NOTE"
 
-PRETRAINED_LOCAL="/leonardo_work/EUHPC_D32_006/Train_Model/VLM3R/ablation_svf_pose_prepend_25p_39430944"
+PRETRAINED_LOCAL="/leonardo_work/EUHPC_D32_006/Train_Model/VLM3R/ablation_svf_pose_geometry_bridge_25p_39432245"
 
 
 RUN_NAME="${RUN_NAME:-${SLURM_JOB_NAME:-Eval_ablation_pi3x}}"
@@ -142,7 +142,7 @@ if [[ -n "${CUDA_HOME:-}" && -d "$CUDA_HOME/lib64" ]]; then
   export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
 fi
 
-OUTPUT_PATH="${OUTPUT_PATH:-$REPO_DIR/logs/eval/$(date +%Y%m%d_%H%M%S)_${RUN_NAME}}"
+OUTPUT_PATH="${OUTPUT_PATH:-/leonardo_scratch/fast/EUHPC_D32_006/eval/logs/VLM3R}"
 mkdir -p "$OUTPUT_PATH"
 
 echo "==== Runtime Info ===="

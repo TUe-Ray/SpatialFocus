@@ -149,7 +149,7 @@ if [[ -n "${CUDA_HOME:-}" && -d "$CUDA_HOME/lib64" ]]; then
   export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
 fi
 
-OUTPUT_PATH="${OUTPUT_PATH:-$REPO_DIR/logs/eval/$(date +%Y%m%d_%H%M%S)_${RUN_NAME}}"
+OUTPUT_PATH="${OUTPUT_PATH:-/leonardo_scratch/fast/EUHPC_D32_006/eval/logs/VLM3R}"
 mkdir -p "$OUTPUT_PATH"
 
 echo "==== Runtime Info ===="
