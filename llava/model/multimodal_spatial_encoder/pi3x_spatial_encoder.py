@@ -115,8 +115,8 @@ class Pi3xEncoder(nn.Module):
             pixel_values: (F, C, H, W) frames in [-1, 1] range.
         Returns:
             Tuple of (camera_tokens, patch_tokens):
-                camera_tokens: (F, 1, 2048) - first register token per frame
-                patch_tokens: (F, num_patches, 2048) - spatial patch features
+                camera_tokens: (F, num_patches, 512) - camera_decoder patch tokens
+                patch_tokens: (F, num_patches, 2048) - main decoder spatial patch features
         """
         # Prepare input: resize, normalize to [0,1], add batch dim
         # DEBUG: check input stats
@@ -168,10 +168,34 @@ class Pi3xEncoder(nn.Module):
         #              f"mean={features.mean().item():.4f}, std={features.std().item():.4f}, "
         #              f"has_nan={features.isnan().any().item()}, has_inf={features.isinf().any().item()}")
 
-        # Split into register tokens (camera) and patch tokens
-        ps_idx = self.pi3.patch_start_idx  # 5 (number of register tokens)
-        camera_tokens = features[:, 0:1, :]       # (N, 1, 2048) - first register token
-        patch_tokens = features[:, ps_idx:, :]     # (N, num_patches, 2048)
+        # IMPORTANT: keep runtime behavior aligned with extracted-feature schema.
+        # Camera tokens are produced by pi3.camera_decoder(decoded_features, xpos=decoded_pos)
+        # and then sliced at patch_start_idx so token count matches patch_tokens.
+        ps_idx = int(self.pi3.patch_start_idx)  # number of register tokens
+
+        # Normalize decoded_pos shape to (F, T, 2) for camera_decoder.
+        if pos.dim() == 2:
+            pos = pos.unsqueeze(0).expand(features.shape[0], -1, -1)
+        elif pos.dim() == 3 and pos.shape[0] != features.shape[0]:
+            pos = pos[:1].expand(features.shape[0], -1, -1)
+        elif pos.dim() != 3:
+            raise RuntimeError(f"Unexpected decoded_pos shape: {tuple(pos.shape)}")
+
+        cam_in = features
+        cam_pos = pos.to(device=cam_in.device)
+
+        cam_param = next(self.pi3.camera_decoder.parameters(), None)
+        if cam_param is not None and cam_in.dtype != cam_param.dtype:
+            cam_in = cam_in.to(dtype=cam_param.dtype)
+
+        if cam_pos.dtype not in (torch.int32, torch.int64):
+            cam_pos = cam_pos.to(dtype=torch.int64)
+
+        with torch.no_grad():
+            camera_decoder_features = self.pi3.camera_decoder(cam_in, xpos=cam_pos)
+
+        camera_tokens = camera_decoder_features[:, ps_idx:, :].to(features.dtype)
+        patch_tokens = features[:, ps_idx:, :]
 
         # DEBUG: check final output tokens
         # rank0_print(f"[Pi3X DEBUG] camera_tokens: shape={camera_tokens.shape}, "
@@ -187,6 +211,11 @@ class Pi3xEncoder(nn.Module):
     def camera_decoder(self) -> nn.Module:
         """Direct access to pi3.camera_decoder (TransformerDecoder, out_dim=512)."""
         return self.pi3.camera_decoder
+
+    @property
+    def camera_head(self) -> nn.Module:
+        """Direct access to pi3.camera_head (CameraHead, produces 4×4 pose matrix)."""
+        return self.pi3.camera_head
 
 
 class Pi3xSpatialTransformer(nn.Module):
@@ -333,5 +362,16 @@ class Pi3xSpatialTower(nn.Module):
             #     → encoder (Pi3xEncoder)
             #       → camera_decoder property
             return self.spatial_tower.spatial_model.encoder.camera_decoder
+        except AttributeError:
+            return None
+
+    @property
+    def camera_head(self) -> Optional[nn.Module]:
+        """
+        Shortcut to the camera_head module inside Pi3xEncoder.
+        Returns None if the spatial tower is not yet loaded.
+        """
+        try:
+            return self.spatial_tower.spatial_model.encoder.camera_head
         except AttributeError:
             return None

@@ -25,6 +25,7 @@ from .multimodal_spatial_encoder.builder import build_spatial_tower
 from .multimodal_fusion_block.builder import build_multimodal_fusion_block
 from .multimodal_resampler.builder import build_vision_resampler
 from .multimodal_projector.builder import build_vision_projector
+from .pi3x_decoded_features import Pi3XDecodedFeatures
 from llava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 
 from llava.mm_utils import get_anyres_image_grid_shape
@@ -124,10 +125,18 @@ class LlavaMetaModel:
         def _expected_class_name(fusion_block_type):
             if fusion_block_type in ["cross_attention", "svf_baseline"]:
                 return "CrossAttentionFusion"
+            if fusion_block_type == "svf_patch_only":
+                return "CrossAttentionFusion"
             if fusion_block_type == "svf_patch_cam_concat":
                 return "PatchCrossAttentionCameraConcatFusion"
             if fusion_block_type == "svf_geometry_bridge":
                 return "GeometryBridgeFusion"
+            if fusion_block_type == "svf_pose_geometry_bridge":
+                return "GeometryBridgeFusion"
+            if fusion_block_type == "svf_cat_feat":
+                return "SvfCatFeatFusion"
+            if fusion_block_type == "svf_pose_prepend":
+                return "SvfPosePrependFusion"
             if fusion_block_type == "cross_attention_with_mlp":
                 return "CrossAttentionFusionWithMLP"
             if fusion_block_type == "mlp_after_clip_proj":
@@ -409,37 +418,98 @@ class LlavaMetaForCausalLM(ABC):
             spatial_encoder_type = self.get_model().config.spatial_tower
             fusion_block_type = self.get_model().config.fusion_block
 
+            zero_spatial_features = getattr(self.get_model().config, "zero_spatial_features", False)
+            if isinstance(zero_spatial_features, str):
+                zero_spatial_features = zero_spatial_features.lower() in {"1", "true", "yes", "y", "on"}
+
+            # Keep zero-spatial ablation simple and deterministic: pure SigLIP path.
+            # This bypasses spatial tower and fusion block entirely.
+            if zero_spatial_features:
+                return self.get_model().mm_projector(image_features)
+
             if spatial_encoder_type.endswith("points"):
                 points = self.get_model().get_spatial_tower()(images)
                 image_features = self.get_model().get_fusion_block()(image_features, points)
                 image_features = self.get_model().mm_projector(image_features)
             
             else:
-                zero_spatial_features = getattr(self.get_model().config, "zero_spatial_features", False)
-                if isinstance(zero_spatial_features, str):
-                    zero_spatial_features = zero_spatial_features.lower() in {"1", "true", "yes", "y", "on"}
-
                 supports_preextracted = spatial_encoder_type is not None and (
                     'cut3r' in spatial_encoder_type or 'pi3x' in spatial_encoder_type
                 )
 
-                if zero_spatial_features and supports_preextracted:
-                    # Ablation mode: skip spatial tower forward and use zero tokens with CUT3R-compatible shapes.
-                    batch_frames = image_features.shape[0]
-                    patch_token_num = image_features.shape[1]
-                    spatial_dim = int(getattr(self.get_model().config, "spatial_feature_dim", 768))
-                    camera_tokens = image_features.new_zeros((batch_frames, 1, spatial_dim))
-                    patch_tokens = image_features.new_zeros((batch_frames, patch_token_num, spatial_dim))
-                elif spatial_features is not None and supports_preextracted:
-                    camera_tokens, patch_tokens = spatial_features[0]["camera_tokens"], spatial_features[0]["patch_tokens"]
+                _sf = None
+                camera_pose = None
+
+                if spatial_features is not None and supports_preextracted:
+                    _sf = Pi3XDecodedFeatures.from_loaded(spatial_features[0])
+                    if _sf.is_new_schema():
+                        # Camera tokens must be computed from the stored decoded_features
+                        # by running pi3.camera_decoder (lightweight head, no re-encoding).
+                        _spatial_tower = self.get_model().get_spatial_tower()
+                        _cam_dec = getattr(_spatial_tower, "camera_decoder", None)
+                        if _cam_dec is None:
+                            raise RuntimeError(
+                                "Pi3X spatial tower must be loaded to compute camera_tokens "
+                                "from decoded_features. Ensure spatial_tower is not None."
+                            )
+                        _sf.compute_camera_tokens(
+                            _cam_dec,
+                            device=images.device,
+                            dtype=self.dtype,
+                        )
+                        # svf_pose_prepend needs camera_head to get the 12-value pose.
+                        if fusion_block_type == 'svf_pose_prepend':
+                            _cam_head = getattr(_spatial_tower, "camera_head", None)
+                            if _cam_head is None:
+                                raise RuntimeError(
+                                    "svf_pose_prepend requires pi3.camera_head. "
+                                    "Ensure Pi3X spatial tower is loaded."
+                                )
+                            _patch_h = _patch_w = _sf.input_size // _sf.patch_size
+                            _sf.compute_camera_pose(_cam_head, _patch_h, _patch_w, device=images.device)
+                            camera_pose = _sf.camera_pose
+                    camera_tokens, patch_tokens = _sf.camera_tokens, _sf.patch_tokens
                 else:
                     camera_tokens, patch_tokens = self.get_model().get_spatial_tower()(images)
+                    # Runtime path parity for svf_pose_prepend:
+                    # compute camera_pose from camera_head using runtime camera_tokens.
+                    if fusion_block_type == 'svf_pose_prepend':
+                        _spatial_tower = self.get_model().get_spatial_tower()
+                        _cam_head = getattr(_spatial_tower, "camera_head", None)
+                        if _cam_head is None:
+                            raise RuntimeError(
+                                "svf_pose_prepend requires pi3.camera_head in runtime path. "
+                                "Ensure Pi3X spatial tower is loaded."
+                            )
+
+                        patch_token_num = int(patch_tokens.shape[1])
+                        patch_side = int(math.isqrt(patch_token_num))
+                        if patch_side * patch_side != patch_token_num:
+                            raise RuntimeError(
+                                f"svf_pose_prepend runtime path expects square patch grid, got {patch_token_num} tokens"
+                            )
+
+                        cam_tokens_for_pose = camera_tokens
+                        cam_head_param = next(_cam_head.parameters(), None)
+                        if cam_head_param is not None and cam_tokens_for_pose.dtype != cam_head_param.dtype:
+                            cam_tokens_for_pose = cam_tokens_for_pose.to(dtype=cam_head_param.dtype)
+
+                        with torch.no_grad():
+                            pose_4x4 = _cam_head(cam_tokens_for_pose, patch_side, patch_side)
+                        camera_pose = pose_4x4[:, :3, :].reshape(pose_4x4.shape[0], 12)
                 
                 if fusion_block_type in ['cross_attention', 'svf_baseline']:
                     # Build spatial KV tokens.
                     if fusion_block_type == 'svf_baseline':
                         # Ablation-1: Q=2D, KV=[camera, patch], output=2D+cross_attn.
-                        final_image_features = torch.cat((camera_tokens, patch_tokens), dim=1).to(self.dtype)
+                        if camera_tokens.shape[-1] != patch_tokens.shape[-1]:
+                            # Camera branch features (512-dim from camera_decoder) cannot be directly
+                            # concatenated with patch features (2048-dim from main decoder).
+                            # svf_baseline requires a camera projection layer to reconcile dims.
+                            # Fall back to patch-only KV until a camera projection is added to the model.
+                            final_image_features = patch_tokens.to(self.dtype)
+                        else:
+                            final_image_features = torch.cat((camera_tokens, patch_tokens), dim=1).to(self.dtype)
                     else:
                         # Legacy cross_attention keeps runtime-selectable spatial token composition.
                         spatial_tower_select_feature = getattr(self.config, "spatial_tower_select_feature", "patch_tokens")
@@ -477,6 +547,48 @@ class LlavaMetaForCausalLM(ABC):
                     )
                     image_features = self.get_model().mm_projector(image_features)
                 
+                elif fusion_block_type == 'svf_patch_only':
+                    # Baseline: 2D cross-attends patch_tokens only.
+                    image_features, attn_weights = self.get_model().get_fusion_block()(
+                        image_features,
+                        patch_tokens.to(self.dtype),
+                    )
+                    image_features = self.get_model().mm_projector(image_features)
+
+                elif fusion_block_type == 'svf_cat_feat':
+                    # Comparison 1: feature-dim concat [camera‖patch] as single KV stream.
+                    image_features, attn_weights = self.get_model().get_fusion_block()(
+                        image_features,
+                        camera_tokens.to(self.dtype),
+                        patch_tokens.to(self.dtype),
+                    )
+                    image_features = self.get_model().mm_projector(image_features)
+
+                elif fusion_block_type == 'svf_pose_geometry_bridge':
+                    # Comparison 2: camera tokens (from camera_decoder branch) query
+                    # patch tokens to build geometry-aware tokens, then 2D queries them.
+                    image_features, attn_weights = self.get_model().get_fusion_block()(
+                        image_features,
+                        camera_tokens.to(self.dtype),
+                        patch_tokens.to(self.dtype),
+                    )
+                    image_features = self.get_model().mm_projector(image_features)
+
+                elif fusion_block_type == 'svf_pose_prepend':
+                    # Comparison 3: 1 pose token (12-value camera matrix → Linear(12,d_clip))
+                    # prepended to 2D-fused sequence. camera_pose = (F, 12).
+                    if camera_pose is None:
+                        raise RuntimeError(
+                            "svf_pose_prepend: camera_pose not computed. "
+                            "Check that the preextracted branch ran compute_camera_pose()."
+                        )
+                    image_features, attn_weights = self.get_model().get_fusion_block()(
+                        image_features,
+                        camera_pose.to(self.dtype),
+                        patch_tokens.to(self.dtype),
+                    )
+                    image_features = self.get_model().mm_projector(image_features)
+
                 elif fusion_block_type == 'cross_attention_with_mlp':
                     image_features, attn_weights = self.get_model().get_fusion_block()(image_features, patch_tokens)
                     image_features = self.get_model().mm_projector(image_features)

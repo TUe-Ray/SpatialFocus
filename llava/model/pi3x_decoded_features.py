@@ -46,8 +46,9 @@ This must be called before accessing sf.camera_tokens.
 
 Legacy schema compatibility
 ---------------------------
-The class also accepts the old flat schema:
-  { "camera_tokens": Tensor[F,1,C], "patch_tokens": Tensor[F,P,C] }
+Legacy flat schema is intentionally unsupported in this code path.
+Any payload that stores pre-sliced "camera_tokens" directly is rejected,
+so camera tokens can only come from camera_decoder(decoded_features, xpos).
 """
 
 from __future__ import annotations
@@ -81,13 +82,17 @@ class Pi3XDecodedFeatures:
             self._meta   = data["meta"]
             # Cache for camera_decoder output, populated by compute_camera_tokens()
             self._camera_decoder_cache: Optional[torch.Tensor] = None
+            self._camera_pose_cache: Optional[torch.Tensor] = None
         elif self._LEGACY_CAM_KEY in data:
-            self._mode = "legacy"
-            self._legacy = data
+            raise ValueError(
+                "Legacy Pi3X feature schema with pre-sliced camera_tokens is no longer supported. "
+                "Please regenerate .pt features with scripts/extract_spatial_features_pi3x_decoded_schema.py "
+                "so camera tokens are computed via camera_decoder at runtime."
+            )
         else:
             raise ValueError(
                 "Unrecognised Pi3X feature dict. Expected 'frames' key (new schema) "
-                f"or 'camera_tokens' key (legacy). Got: {list(data.keys())}"
+                f"with decoded features metadata. Got: {list(data.keys())}"
             )
 
     @classmethod
@@ -113,26 +118,20 @@ class Pi3XDecodedFeatures:
     @property
     def decoded_features(self) -> torch.Tensor:
         """Full main decoder output.  Shape: (F, T, C=2048).  New schema only."""
-        if self._mode == "legacy":
-            raise AttributeError("decoded_features is not available in legacy schema.")
         return self._frames["decoded_features"]
 
     @property
     def frame_idx(self) -> Optional[torch.Tensor]:
-        """Original video frame indices.  Shape: (F,).  None in legacy schema."""
-        if self._mode == "new":
-            return self._frames["frame_idx"]
-        return None
+        """Original video frame indices.  Shape: (F,)."""
+        return self._frames["frame_idx"]
 
     @property
     def decoded_pos_template(self) -> Optional[torch.Tensor]:
         """
         Token positional-encoding template shared across all frames.
-        Shape: (T, 2).  None in legacy schema.
+        Shape: (T, 2).
         """
-        if self._mode == "new":
-            return self._meta["decoded_pos_template"]
-        return None
+        return self._meta["decoded_pos_template"]
 
     # ------------------------------------------------------------------ #
     #  Meta                                                                #
@@ -141,23 +140,19 @@ class Pi3XDecodedFeatures:
     @property
     def patch_start_idx(self) -> int:
         """Number of register tokens = index where patch tokens start (= 5)."""
-        if self._mode == "new":
-            return int(self._meta["patch_start_idx"])
-        return 1  # legacy: only 1 camera token stored
+        return int(self._meta["patch_start_idx"])
 
     @property
     def num_frames(self) -> int:
-        if self._mode == "new":
-            return int(self._meta["num_frames"])
-        return int(self._legacy["camera_tokens"].shape[0])
+        return int(self._meta["num_frames"])
 
     @property
     def input_size(self) -> Optional[int]:
-        return int(self._meta["input_size"]) if self._mode == "new" else None
+        return int(self._meta["input_size"])
 
     @property
     def patch_size(self) -> Optional[int]:
-        return int(self._meta["patch_size"]) if self._mode == "new" else None
+        return int(self._meta["patch_size"])
 
     # ------------------------------------------------------------------ #
     #  Camera tokens — requires compute_camera_tokens() in new schema     #
@@ -183,9 +178,6 @@ class Pi3XDecodedFeatures:
         Returns:
             camera_decoder_features  Tensor[F, T, 512]
         """
-        if self._mode == "legacy":
-            raise AttributeError("compute_camera_tokens is not needed in legacy schema.")
-
         feats = self.decoded_features          # (F, T, 2048)
         pos   = self.decoded_pos_template      # (T, 2)
         F     = feats.shape[0]
@@ -203,18 +195,53 @@ class Pi3XDecodedFeatures:
         self._camera_decoder_cache = cam_feats
         return cam_feats
 
+    def compute_camera_pose(
+        self,
+        camera_head,          # pi3.camera_head (CameraHead module)
+        patch_h: int,
+        patch_w: int,
+        device=None,
+    ) -> torch.Tensor:
+        """
+        Run pi3.camera_head on camera_tokens to produce a compact 12-value pose
+        representation (first 3 rows of the 4×4 pose matrix, flattened).
+
+        Must be called AFTER compute_camera_tokens().
+
+        Args:
+            camera_head: pi3.camera_head — CameraHead(dim=512).
+            patch_h:     number of patch rows  (= input_size // patch_size).
+            patch_w:     number of patch cols  (= input_size // patch_size).
+            device:      target device for the camera_head forward pass.
+
+        Returns:
+            Tensor of shape (F, 12).
+        """
+        cam_tokens = self.camera_tokens  # (F, num_patches, 512) – requires compute_camera_tokens first
+        if device is not None:
+            cam_tokens = cam_tokens.to(device=device)
+
+        head_param = next(camera_head.parameters(), None)
+        if head_param is not None and cam_tokens.dtype != head_param.dtype:
+            cam_tokens = cam_tokens.to(dtype=head_param.dtype)
+
+        with torch.no_grad():
+            # Keep input dtype aligned with camera_head weights to avoid matmul dtype mismatch.
+            pose_4x4 = camera_head(cam_tokens, patch_h, patch_w)   # (F, 4, 4)
+
+        # Take first 3 rows (drop the fixed [0,0,0,1] row) and flatten → (F, 12)
+        pose_12 = pose_4x4[:, :3, :].reshape(pose_4x4.shape[0], 12)
+        self._camera_pose_cache = pose_12
+        return pose_12
+
     @property
     def camera_tokens(self) -> torch.Tensor:
         """
         Register-token slice of the camera_decoder branch output.
-        Shape: (F, num_patches, D=512)  — new schema (patch slice of camera_decoder output,
-                                         matching what Pi3's camera_head receives).
-        Shape: (F, 1, C)               — legacy schema.
+        Shape: (F, num_patches, D=512), computed from camera_decoder output.
 
-        In new schema, call compute_camera_tokens(pi3.camera_decoder) first.
+        Call compute_camera_tokens(pi3.camera_decoder) first.
         """
-        if self._mode == "legacy":
-            return self._legacy["camera_tokens"]
         if self._camera_decoder_cache is None:
             raise RuntimeError(
                 "camera_tokens requires compute_camera_tokens(pi3.camera_decoder) "
@@ -229,13 +256,24 @@ class Pi3XDecodedFeatures:
         Full camera_decoder branch output.  Shape: (F, T, D=512).
         Available only after compute_camera_tokens() has been called.
         """
-        if self._mode == "legacy":
-            raise AttributeError("camera_decoder_features not available in legacy schema.")
         if self._camera_decoder_cache is None:
             raise RuntimeError(
                 "camera_decoder_features requires compute_camera_tokens() to be called first."
             )
         return self._camera_decoder_cache
+
+    @property
+    def camera_pose(self) -> torch.Tensor:
+        """
+        12-value pose representation (first 3 rows of the 4×4 camera pose matrix).
+        Shape: (F, 12).  Requires compute_camera_pose() to be called first.
+        """
+        if self._camera_pose_cache is None:
+            raise RuntimeError(
+                "camera_pose requires compute_camera_pose(camera_head, patch_h, patch_w) "
+                "to be called first."
+            )
+        return self._camera_pose_cache
 
     # ------------------------------------------------------------------ #
     #  Patch tokens                                                        #
@@ -247,8 +285,6 @@ class Pi3XDecodedFeatures:
         All register/special tokens from the main decoder (indices 0..patch_start_idx-1).
         Shape: (F, patch_start_idx, C=2048).  New schema only.
         """
-        if self._mode == "legacy":
-            raise AttributeError("register_tokens not available in legacy schema.")
         return self.decoded_features[:, : self.patch_start_idx, :]
 
     @property
@@ -257,16 +293,12 @@ class Pi3XDecodedFeatures:
         Spatial patch tokens from the main decoder.
         Shape: (F, num_patches, C=2048).
         """
-        if self._mode == "legacy":
-            return self._legacy["patch_tokens"]
         return self.decoded_features[:, self.patch_start_idx :, :]
 
     @property
     def patch_pos(self) -> Optional[torch.Tensor]:
         """Positional encoding for patch tokens only.  Shape: (num_patches, 2)."""
-        if self._mode == "new":
-            return self.decoded_pos_template[self.patch_start_idx :]
-        return None
+        return self.decoded_pos_template[self.patch_start_idx :]
 
     @property
     def all_tokens(self) -> torch.Tensor:
@@ -275,9 +307,7 @@ class Pi3XDecodedFeatures:
         Note: camera_decoder_features (dim D=512) are separate and accessed via
         camera_tokens / camera_decoder_features after compute_camera_tokens().
         """
-        if self._mode == "new":
-            return self.decoded_features
-        return torch.cat([self.camera_tokens, self.patch_tokens], dim=1)
+        return self.decoded_features
 
     # ------------------------------------------------------------------ #
     #  Utilities                                                           #
@@ -296,32 +326,24 @@ class Pi3XDecodedFeatures:
                 return t.to(dtype=dtype)
             return t
 
-        if self._mode == "new":
-            self._frames["decoded_features"] = _cast(self._frames["decoded_features"])
-            if self._frames.get("frame_idx") is not None:
-                self._frames["frame_idx"] = _cast(self._frames["frame_idx"])
-            self._meta["decoded_pos_template"] = _cast(self._meta["decoded_pos_template"])
-            if self._camera_decoder_cache is not None:
-                self._camera_decoder_cache = _cast(self._camera_decoder_cache)
-        else:
-            self._legacy["camera_tokens"] = _cast(self._legacy["camera_tokens"])
-            self._legacy["patch_tokens"]  = _cast(self._legacy["patch_tokens"])
+        self._frames["decoded_features"] = _cast(self._frames["decoded_features"])
+        if self._frames.get("frame_idx") is not None:
+            self._frames["frame_idx"] = _cast(self._frames["frame_idx"])
+        self._meta["decoded_pos_template"] = _cast(self._meta["decoded_pos_template"])
+        if self._camera_decoder_cache is not None:
+            self._camera_decoder_cache = _cast(self._camera_decoder_cache)
+        if self._camera_pose_cache is not None:
+            self._camera_pose_cache = _cast(self._camera_pose_cache)
         return self
 
     def is_new_schema(self) -> bool:
-        return self._mode == "new"
+        return True
 
     def __repr__(self) -> str:
-        if self._mode == "new":
-            f, t, c = self.decoded_features.shape
-            cam_ready = self._camera_decoder_cache is not None
-            return (
-                f"Pi3XDecodedFeatures(schema=new, frames={f}, tokens={t}, "
-                f"patch_start_idx={self.patch_start_idx}, C={c}, "
-                f"camera_ready={cam_ready})"
-            )
+        f, t, c = self.decoded_features.shape
+        cam_ready = self._camera_decoder_cache is not None
         return (
-            f"Pi3XDecodedFeatures(schema=legacy, "
-            f"camera_tokens={self._legacy['camera_tokens'].shape}, "
-            f"patch_tokens={self._legacy['patch_tokens'].shape})"
+            f"Pi3XDecodedFeatures(schema=new, frames={f}, tokens={t}, "
+            f"patch_start_idx={self.patch_start_idx}, C={c}, "
+            f"camera_ready={cam_ready})"
         )
