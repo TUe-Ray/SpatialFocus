@@ -18,7 +18,7 @@ SUFFIX="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
 # User-defined variables: General
 # ============================================================
 NOTE="Pi3X fusion ablation:svf_patch_only, 25% data, 1 epoch"
-CONDA_ENV_NAME="vlm3r"
+CONDA_ENV_NAME="vlm3rEOMT"
 # ============================================================
 # User-defined variables: EoMT round-1 comparison
 # ============================================================
@@ -42,7 +42,8 @@ DATA_ROOT="/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r"
 SPATIAL_FEATURES_ROOT="$DATA_ROOT"
 SPATIAL_FEATURES_SUBDIR="spatial_features_pi3x_decoded"
 EOMT_CONFIG_PATH="${EOMT_CONFIG_PATH:-$PROJECT_ROOT/third_party/EoMT/configs/dinov2/coco/panoptic/eomt_large_640.yaml}"
-EOMT_CKPT_PATH="${EOMT_CKPT_PATH:-}"
+EOMT_CKPT_PATH="${EOMT_CKPT_PATH:-/leonardo_work/EUHPC_D32_006/FAST/hf_models/EoMT/coco_panoptic_eomt_large_640/pytorch_model.bin}"
+EOMT_LOCAL_BACKBONE_PATH="${EOMT_LOCAL_BACKBONE_PATH:-/leonardo_work/EUHPC_D32_006/FAST/hf_models/EoMT/timm_vit_large_patch14_reg4_dinov2_lvd142m}"
 EOMT_EXPERIMENT_CONFIG_PATH="${EOMT_EXPERIMENT_CONFIG_PATH:-$PROJECT_ROOT/configs/eomt/eomt_objinfo_round1.json}"
 
 
@@ -58,9 +59,10 @@ WANDB_DIR="$WORK/wandb"
 WANDB_CACHE_DIR="$WORK/wandb_cache"
 WANDB_CONFIG_DIR="$WORK/wandb_config"
 
-HF_HOME="/leonardo_scratch/fast/EUHPC_D32_006/hf_cache"
-HF_DATASETS_CACHE="$HF_HOME/datasets"
-HUGGINGFACE_HUB_CACHE="$HF_HOME/hub"
+HF_HOME="/leonardo_work/EUHPC_D32_006/FAST/hf_models/EoMT/hf_cache"
+HF_HUB_CACHE="$HF_HOME"
+HF_DATASETS_CACHE="/leonardo_scratch/fast/EUHPC_D32_006/hf_cache/datasets"
+HUGGINGFACE_HUB_CACHE="$HF_HUB_CACHE"
 
 # ============================================================
 # User-defined variables: Resume / Ablation
@@ -216,11 +218,13 @@ mkdir -p "$WANDB_DIR" "$WANDB_CACHE_DIR" "$WANDB_CONFIG_DIR"
 
 # Force local/offline Hugging Face resolution on compute nodes.
 export HF_HOME="$HF_HOME"
+export HF_HUB_CACHE="$HF_HUB_CACHE"
 export HF_DATASETS_CACHE="$HF_DATASETS_CACHE"
 export HUGGINGFACE_HUB_CACHE="$HUGGINGFACE_HUB_CACHE"
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
+export EOMT_LOCAL_BACKBONE_PATH="$EOMT_LOCAL_BACKBONE_PATH"
 mkdir -p "$HF_HOME" "$HF_DATASETS_CACHE" "$HUGGINGFACE_HUB_CACHE"
 
 
@@ -293,11 +297,16 @@ if [[ ! -f "$EOMT_CKPT_PATH" ]]; then
     echo "[ERROR] EoMT checkpoint not found: $EOMT_CKPT_PATH"
     exit 1
 fi
+if [[ ! -d "$EOMT_LOCAL_BACKBONE_PATH" ]]; then
+    echo "[ERROR] EoMT local backbone folder not found: $EOMT_LOCAL_BACKBONE_PATH"
+    exit 1
+fi
 
 echo "[LOCAL MODEL] model_name_or_path=$LOCAL_MODEL_BASE"
 echo "[LOCAL MODEL] vision_tower=$LOCAL_SIGLIP"
 echo "[EOMT] config_path=$EOMT_CONFIG_PATH"
 echo "[EOMT] ckpt_path=$EOMT_CKPT_PATH"
+echo "[EOMT] local_backbone_path=$EOMT_LOCAL_BACKBONE_PATH"
 echo "[EOMT] experiment_config=$EOMT_EXPERIMENT_CONFIG_PATH"
 echo "[EOMT] experiment_mode=$EOMT_EXPERIMENT_MODE"
 
