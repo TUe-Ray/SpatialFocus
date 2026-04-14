@@ -1,0 +1,35 @@
+{
+  "experiment_family": "eomt_objinfo_round1",
+  "description": "Round-1 ablation: baseline vs object-block with different OBJ_INFO modes.",
+  "shared": {
+    "mm_eomt_object_block_position": "after_visual",
+    "mm_eomt_object_block_max_objects": 8,
+    "mm_eomt_object_block_max_per_frame": 2,
+    "mm_eomt_selector_mode": "class_aware",
+    "mm_eomt_selector_keep_stuff": true,
+    "mm_eomt_selector_keep_things": true,
+    "mm_eomt_selector_drop_no_object": true,
+    "mm_eomt_selector_no_object_class_id": -1,
+    "mm_eomt_selector_order": "frame_then_score",
+    "mm_eomt_use_object_type_embedding": false,
+    "mm_eomt_obj_info_text": "Object information from the image:",
+    "mm_eomt_obj_info_trainable": true
+  },
+  "modes": {
+    "baseline": {
+      "mm_eomt_enable_object_block": false
+    },
+    "eomt_obj_only": {
+      "mm_eomt_enable_object_block": true,
+      "mm_eomt_obj_info_mode": "none"
+    },
+    "eomt_obj_text_phrase": {
+      "mm_eomt_enable_object_block": true,
+      "mm_eomt_obj_info_mode": "text_phrase"
+    },
+    "eomt_obj_learnable": {
+      "mm_eomt_enable_object_block": true,
+      "mm_eomt_obj_info_mode": "learnable_embedding"
+    }
+  }
+}

@@ -31,6 +31,7 @@ import random
 import yaml
 import math
 import re
+import sys
 import torch
 
 import transformers
@@ -47,6 +48,7 @@ from llava.train.llava_trainer import LLaVATrainer, ProgressLoggerCallback
 from llava import conversation as conversation_lib
 from llava.model import *
 from llava.mm_utils import process_highres_image, process_anyres_image, process_highres_image_crop_split, tokenizer_image_token
+from llava.train.eomt_experiment_resolver import resolve_eomt_experiment_config, write_eomt_experiment_snapshot
 from llava.utils import rank0_print, process_video_with_pyav, process_video_with_decord
 from llava.gt_points_load_utils import calculate_frame_timestamps
 
@@ -197,6 +199,8 @@ class ModelArguments:
     )
     tune_fusion_block: bool = field(default=False)
     ## EoMT mask extractor (frozen side branch)
+    eomt_experiment_config_path: Optional[str] = field(default=None, metadata={"help": "Path to EoMT experiment-family JSON file"})
+    eomt_experiment_mode: Optional[str] = field(default=None, metadata={"help": "Named EoMT experiment mode to resolve from the experiment-family JSON"})
     eomt_config_path: Optional[str] = field(default=None, metadata={"help": "Path to EoMT YAML config file"})
     eomt_ckpt_path: Optional[str] = field(default=None, metadata={"help": "Path to EoMT pre-trained weights"})
     mm_eomt_enable_object_block: bool = field(default=False)
@@ -2304,8 +2308,44 @@ def train(attn_implementation=None):
 
     parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    eomt_experiment_summary = resolve_eomt_experiment_config(model_args=model_args, raw_argv=sys.argv[1:])
+    eomt_experiment_snapshot_path = write_eomt_experiment_snapshot(
+        summary=eomt_experiment_summary,
+        output_dir=training_args.output_dir,
+    )
     rank0_print(f"[ATTN] attn_implementation={training_args.attn_implementation}")
     rank0_print(f"[ABLATION] zero_spatial_features={data_args.zero_spatial_features}")
+    if eomt_experiment_summary is not None:
+        tracked = eomt_experiment_summary.get("tracked_summary", {})
+        rank0_print(
+            "[EOMT-EXPERIMENT] "
+            f"family={eomt_experiment_summary.get('experiment_family')} "
+            f"mode={eomt_experiment_summary.get('mode_name')} "
+            f"config={eomt_experiment_summary.get('config_path')}"
+        )
+        rank0_print(
+            "[EOMT-EXPERIMENT] "
+            + json.dumps(
+                {
+                    "object_block_enabled": tracked.get("mm_eomt_enable_object_block"),
+                    "obj_info_mode": tracked.get("mm_eomt_obj_info_mode"),
+                    "object_block_position": tracked.get("mm_eomt_object_block_position"),
+                    "selector_mode": tracked.get("mm_eomt_selector_mode"),
+                    "selector_order": tracked.get("mm_eomt_selector_order"),
+                    "max_objects": tracked.get("mm_eomt_object_block_max_objects"),
+                    "max_per_frame": tracked.get("mm_eomt_object_block_max_per_frame"),
+                    "object_type_embedding": tracked.get("mm_eomt_use_object_type_embedding"),
+                    "obj_info_text": tracked.get("mm_eomt_obj_info_text"),
+                    "no_object_class_id": tracked.get("mm_eomt_selector_no_object_class_id"),
+                    "keep_stuff": tracked.get("mm_eomt_selector_keep_stuff"),
+                    "keep_things": tracked.get("mm_eomt_selector_keep_things"),
+                    "drop_no_object": tracked.get("mm_eomt_selector_drop_no_object"),
+                },
+                sort_keys=True,
+            )
+        )
+        if eomt_experiment_snapshot_path is not None:
+            rank0_print(f"[EOMT-EXPERIMENT] snapshot={eomt_experiment_snapshot_path}")
 
     # 设置随机种子以保证可复现性
     seed = training_args.seed
