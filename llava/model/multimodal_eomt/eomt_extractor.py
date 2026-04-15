@@ -5,6 +5,7 @@ from PIL images. This module is frozen (no gradients) and serves
 as a side-branch for mask extraction only.
 """
 
+from contextlib import nullcontext
 import os
 import sys
 import warnings
@@ -17,6 +18,36 @@ import torch.nn.functional as F
 from PIL import Image
 
 EOMT_AVAILABLE = False
+
+
+def _env_flag(name: str) -> bool:
+    value = os.environ.get(name, "")
+    return str(value).strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+
+
+def _resolve_cache_dir(explicit_cache_dir: Optional[str]) -> Optional[str]:
+    candidates = [
+        explicit_cache_dir,
+        os.environ.get("EOMT_HF_CACHE_DIR"),
+        os.environ.get("HF_HUB_CACHE"),
+        os.environ.get("HUGGINGFACE_HUB_CACHE"),
+        os.environ.get("HF_HOME"),
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip() != "":
+            return os.path.expanduser(candidate)
+    return None
+
+
+def _resolve_local_backbone_path(explicit_local_backbone_path: Optional[str]) -> Optional[str]:
+    candidates = [
+        explicit_local_backbone_path,
+        os.environ.get("EOMT_LOCAL_BACKBONE_PATH"),
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip() != "":
+            return os.path.expanduser(candidate)
+    return None
 
 
 def _ensure_eomt_importable():
@@ -50,6 +81,12 @@ class EoMTExtractor(nn.Module):
         self.config_path = eomt_config.get("config_path")
         self.device_str = eomt_config.get("device", "cuda")
         self.dtype = eomt_config.get("dtype", torch.float16)
+        self.cache_dir = _resolve_cache_dir(eomt_config.get("cache_dir"))
+        self.local_backbone_path = _resolve_local_backbone_path(eomt_config.get("local_backbone_path"))
+        local_files_only = eomt_config.get("local_files_only")
+        if local_files_only is None:
+            local_files_only = _env_flag("HF_HUB_OFFLINE") or _env_flag("TRANSFORMERS_OFFLINE")
+        self.local_files_only = bool(local_files_only)
 
         _ensure_eomt_importable()
         self.is_available = EOMT_AVAILABLE
@@ -76,7 +113,13 @@ class EoMTExtractor(nn.Module):
         network_cfg = config["model"]["init_args"]["network"]
         network_init = network_cfg.get("init_args", {})
         encoder_cfg = network_init.get("encoder", {})
-        encoder_init = encoder_cfg.get("init_args", {})
+        encoder_init = dict(encoder_cfg.get("init_args", {}))
+
+        if self.cache_dir is not None:
+            encoder_init.setdefault("cache_dir", self.cache_dir)
+        if self.local_backbone_path is not None:
+            encoder_init.setdefault("local_backbone_path", self.local_backbone_path)
+        encoder_init.setdefault("local_files_only", self.local_files_only)
 
         self.num_q = network_init.get("num_q", 200)
         num_blocks = network_init.get("num_blocks", 4)
@@ -115,7 +158,11 @@ class EoMTExtractor(nn.Module):
         )
 
         # Load checkpoint weights
-        if self.ckpt_path is not None and os.path.isfile(self.ckpt_path):
+        if self.ckpt_path is None:
+            warnings.warn("EoMT checkpoint path is not provided. Extractor will use randomly initialized weights.")
+        elif not os.path.isfile(self.ckpt_path):
+            raise FileNotFoundError(f"EoMT checkpoint not found: {self.ckpt_path}")
+        else:
             state_dict = torch.load(
                 self.ckpt_path, map_location="cpu", weights_only=True
             )
@@ -207,7 +254,11 @@ class EoMTExtractor(nn.Module):
         device = next(self.network.parameters()).device
         imgs = imgs.to(device)
 
-        with torch.amp.autocast(device_type=device.type, dtype=self.dtype):
+        autocast_context = nullcontext()
+        if device.type != "cpu" or self.dtype == torch.bfloat16:
+            autocast_context = torch.amp.autocast(device_type=device.type, dtype=self.dtype)
+
+        with autocast_context:
             # EoMT.forward expects input in [0, 1]; it normalizes internally
             x = imgs / 255.0
             mask_logits_per_layer, class_logits_per_layer = self.network(x)
