@@ -1,0 +1,28 @@
+{
+  "experiment_family": "eomt_smoke_test",
+  "description": "Smoke-test: single mode to verify full EoMT training pipeline end-to-end (not for comparison).",
+  "shared": {
+    "eomt_pool_top_k": 3,
+    "eomt_pool_selection": "class_confidence",
+    "eomt_pool_mask_area_threshold": 0.5,
+    "eomt_pool_score_threshold": 0.4,
+    "mm_eomt_object_block_position": "after_visual",
+    "mm_eomt_object_block_max_objects": 4,
+    "mm_eomt_object_block_max_per_frame": 2,
+    "mm_eomt_selector_mode": "class_aware",
+    "mm_eomt_selector_keep_stuff": true,
+    "mm_eomt_selector_keep_things": true,
+    "mm_eomt_selector_drop_no_object": true,
+    "mm_eomt_selector_no_object_class_id": -1,
+    "mm_eomt_selector_order": "frame_then_score",
+    "mm_eomt_use_object_type_embedding": false,
+    "mm_eomt_obj_info_text": "Object information from the image:",
+    "mm_eomt_obj_info_trainable": true
+  },
+  "modes": {
+    "smoke_test": {
+      "mm_eomt_enable_object_block": true,
+      "mm_eomt_obj_info_mode": "text_phrase"
+    }
+  }
+}

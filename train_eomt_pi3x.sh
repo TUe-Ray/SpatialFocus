@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=dbg_ablation_svf_patch_only_25p
+#SBATCH --job-name=DBG_smoke_eomt_pi3x
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
@@ -17,7 +17,7 @@ SUFFIX="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
 # ============================================================
 # User-defined variables: General
 # ============================================================
-NOTE="Pi3X fusion ablation:svf_patch_only, 25% data, 1 epoch"
+NOTE="Smoke test: EoMT integration end-to-end check (1% data, debug mode)"
 CONDA_ENV_NAME="vlm3rEOMT"
 # ============================================================
 # User-defined variables: EoMT round-1 comparison
@@ -27,18 +27,21 @@ CONDA_ENV_NAME="vlm3rEOMT"
 # - eomt_obj_only
 # - eomt_obj_text_phrase
 # - eomt_obj_learnable
-EOMT_EXPERIMENT_MODE="eomt_obj_only"
-EOMT_DEBUG_MODE="${EOMT_DEBUG_MODE:-False}"
+EOMT_EXPERIMENT_MODE="smoke_test"
+EOMT_DEBUG_MODE="${EOMT_DEBUG_MODE:-True}"
 EOMT_DEBUG_MAX_SAMPLES="${EOMT_DEBUG_MAX_SAMPLES:-4}"
 EOMT_DEBUG_TOP_K_MASKS="${EOMT_DEBUG_TOP_K_MASKS:-5}"
 
 MODEL_FUSION_BLOCK="svf_patch_only"
+PROJECT_ROOT="${PROJECT_ROOT:-$PWD}"
+EOMT_EXPERIMENT_CONFIG_PATH="$PROJECT_ROOT/configs/eomt/eomt_smoke_test.json"
 
+TRAIN_DATA_PERCENTAGE="1"
 
 # ============================================================
 # User-defined variables: Paths
 # ============================================================
-PROJECT_ROOT="${PROJECT_ROOT:-$PWD}"
+
 LOCAL_MODEL_BASE="/leonardo_work/EUHPC_D32_006/FAST/hf_models/VLM3R/LLaVA-NeXT-Video-7B-Qwen2"
 LOCAL_SIGLIP="/leonardo_work/EUHPC_D32_006/FAST/hf_models/VLM3R/siglip-so400m-patch14-384"
 DATA_ROOT="/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r"
@@ -47,7 +50,6 @@ SPATIAL_FEATURES_SUBDIR="spatial_features_pi3x_decoded"
 EOMT_CONFIG_PATH="${EOMT_CONFIG_PATH:-$PROJECT_ROOT/third_party/EoMT/configs/dinov2/coco/panoptic/eomt_large_640.yaml}"
 EOMT_CKPT_PATH="${EOMT_CKPT_PATH:-/leonardo_work/EUHPC_D32_006/FAST/hf_models/EoMT/coco_panoptic_eomt_large_640/pytorch_model.bin}"
 EOMT_LOCAL_BACKBONE_PATH="${EOMT_LOCAL_BACKBONE_PATH:-/leonardo_work/EUHPC_D32_006/FAST/hf_models/EoMT/timm_vit_large_patch14_reg4_dinov2_lvd142m}"
-EOMT_EXPERIMENT_CONFIG_PATH="${EOMT_EXPERIMENT_CONFIG_PATH:-$PROJECT_ROOT/configs/eomt/eomt_objinfo_round1.json}"
 
 
 
@@ -98,7 +100,6 @@ MODEL_SPATIAL_FEATURE_DIM="2048"
 #     Comparison-3: prepend one pose token (12-dim camera pose -> projected to d_clip).
 
 # ============== Training percentage and shuffling (for ablation) ==============
-TRAIN_DATA_PERCENTAGE="25"
 TRAIN_DATA_PERCENTAGE_SEED="$SEED"
 TRAIN_DATA_SHUFFLE="True"
 
@@ -374,6 +375,7 @@ VALID_EOMT_MODES=(
     "eomt_obj_only"
     "eomt_obj_text_phrase"
     "eomt_obj_learnable"
+    "smoke_test"
 )
 IS_VALID_EOMT_MODE="False"
 for mode_name in "${VALID_EOMT_MODES[@]}"; do
