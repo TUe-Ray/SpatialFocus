@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=Eval_ablPi3x_svf_pose_prepend
+#SBATCH --job-name=Eval_100%_pi3x_patch_only
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=4
 #SBATCH --ntasks-per-node=1
@@ -13,11 +13,11 @@
 
 set -euo pipefail
 
-NOTE="Eval ablation for svf_pose_prepend fusion method on the VLM-3R model"
+NOTE="Eval ablation for PI3X_multinode_svf_cat_feat_100p_39787145 fusion method on the VLM-3R model"
 echo "-------- Note --------"
 echo "  note: $NOTE"
 
-PRETRAINED_LOCAL="/leonardo_work/EUHPC_D32_006/Train_Model/VLM3R/ablation_svf_pose_geometry_bridge_25p_39432245"
+PRETRAINED_LOCAL="/leonardo_work/EUHPC_D32_006/Train_Model/VLM3R/PI3X_multinode_svf_cat_feat_100p_39787145"
 
 
 RUN_NAME="${RUN_NAME:-${SLURM_JOB_NAME:-Eval_ablation_pi3x}}"
