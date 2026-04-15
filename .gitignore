@@ -93,3 +93,5 @@ setup_vsibench_vlm3r.sh
 eval_offline.sh
 prepare_offline_cache.sh
 .offline_runtime/
+.codex-work/
+.codex
