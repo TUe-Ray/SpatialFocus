@@ -339,6 +339,90 @@ class LlavaMetaForCausalLM(ABC):
     def get_fusion_block(self):
         return self.get_model().get_fusion_block()
 
+    def ensure_eomt_registered_parameters(self):
+        model = self.get_model()
+        if model is None or not hasattr(model, "embed_tokens"):
+            return []
+
+        hidden_size = int(model.embed_tokens.weight.shape[1])
+        registered = []
+
+        obj_info_mode = str(getattr(self.config, "mm_eomt_obj_info_mode", "none"))
+        obj_info_trainable = bool(getattr(self.config, "mm_eomt_obj_info_trainable", True))
+        if obj_info_mode == "learnable_embedding":
+            self._get_or_create_eomt_vector_parameter(
+                name="eomt_obj_info_learnable_embedding",
+                hidden_size=hidden_size,
+                trainable=obj_info_trainable,
+            )
+            registered.append("eomt_obj_info_learnable_embedding")
+
+        if bool(getattr(self.config, "mm_eomt_use_object_type_embedding", False)):
+            self._get_or_create_eomt_vector_parameter(
+                name="eomt_object_type_embedding",
+                hidden_size=hidden_size,
+                trainable=True,
+            )
+            registered.append("eomt_object_type_embedding")
+
+        return registered
+
+    def _summarize_eomt_pool_skip_reason(self, default_reason):
+        if default_reason != "no_frame_aligned_visual_features":
+            return default_reason
+
+        pool_skip_reasons = getattr(self, "_last_eomt_pool_skip_reasons", None)
+        if not isinstance(pool_skip_reasons, list) or len(pool_skip_reasons) == 0:
+            return default_reason
+
+        unique_reasons = []
+        for reason in pool_skip_reasons:
+            if reason is None:
+                continue
+            normalized = str(reason)
+            if normalized not in unique_reasons:
+                unique_reasons.append(normalized)
+
+        if len(unique_reasons) == 0:
+            return default_reason
+        if len(unique_reasons) == 1:
+            return unique_reasons[0]
+        return "mixed_pool_skip_reasons:" + ",".join(unique_reasons)
+
+    def _maybe_log_eomt_pool_alignment_warning(self, pool_debug):
+        if not bool(getattr(self.config, "mm_eomt_enable_object_block", False)):
+            return
+        if not isinstance(pool_debug, dict):
+            return
+
+        warned_reasons = getattr(self, "_eomt_alignment_warning_reasons_emitted", None)
+        if not isinstance(warned_reasons, set):
+            warned_reasons = set()
+
+        candidate_reasons = []
+        for entry in pool_debug.get("per_sample", []):
+            if not isinstance(entry, dict):
+                continue
+            reason = entry.get("skip_reason", None)
+            if reason in {
+                "anyres_not_supported_for_eomt_pooling",
+                "multi_patch_not_supported_for_eomt_pooling",
+            }:
+                candidate_reasons.append(str(reason))
+
+        new_reasons = sorted({reason for reason in candidate_reasons if reason not in warned_reasons})
+        if len(new_reasons) == 0:
+            self._eomt_alignment_warning_reasons_emitted = warned_reasons
+            return
+
+        rank0_print(
+            "EoMT pooling alignment warning: object-block append will be skipped for samples with "
+            + ", ".join(new_reasons)
+            + ". Current alignment only supports single-image/single-patch samples or frame-aligned videos."
+        )
+        warned_reasons.update(new_reasons)
+        self._eomt_alignment_warning_reasons_emitted = warned_reasons
+
     def _get_eomt_mask_pooler(self):
         pooler = getattr(self, "_eomt_mask_pooler", None)
         if pooler is None:
@@ -746,6 +830,7 @@ class LlavaMetaForCausalLM(ABC):
         self._last_eomt_pool_debug = pool_debug
         self._last_eomt_pool_enabled_mask = enabled_mask
         self._last_eomt_pool_skip_reasons = skip_reasons
+        self._maybe_log_eomt_pool_alignment_warning(pool_debug)
 
         return pooled_visual_features, aligned_frame_meta_list, pool_debug
 
@@ -771,6 +856,7 @@ class LlavaMetaForCausalLM(ABC):
         pool_score_threshold = float(getattr(self.config, "eomt_pool_score_threshold", 0.0))
 
         def _skipped_result(reason):
+            summarized_reason = self._summarize_eomt_pool_skip_reason(reason)
             return {
                 "pooled_tokens": None,
                 "selected_indices": None,
@@ -783,7 +869,8 @@ class LlavaMetaForCausalLM(ABC):
                 "pool_debug": pool_debug,
                 "score_threshold": pool_score_threshold,
                 "pool_skipped": True,
-                "skip_reason": reason,
+                "skip_reason": summarized_reason,
+                "pool_skip_reasons": list(getattr(self, "_last_eomt_pool_skip_reasons", []) or []),
             }
 
         if soft_masks is None:

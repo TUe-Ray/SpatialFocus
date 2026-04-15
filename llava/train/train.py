@@ -2658,6 +2658,13 @@ def train(attn_implementation=None):
                 for p in model.get_fusion_block().parameters():
                     p.requires_grad = True
 
+        eomt_registered = model.ensure_eomt_registered_parameters()
+        if len(eomt_registered) > 0:
+            rank0_print(
+                "EoMT: registered object-block parameters before optimizer creation: "
+                + ", ".join(eomt_registered)
+            )
+
         total_params = sum(p.ds_numel if hasattr(p, "ds_numel") else p.numel() for p in model.parameters())
         trainable_params = sum(p.ds_numel if hasattr(p, "ds_numel") else p.numel() for p in model.parameters() if p.requires_grad)
         print("Trainable parameters:")

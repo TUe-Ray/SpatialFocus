@@ -56,6 +56,7 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         # Initialize weights and apply final processing
         self.post_init()
+        self.ensure_eomt_registered_parameters()
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
@@ -145,6 +146,8 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
         point_maps: Optional[torch.Tensor] = None,
         image_sizes: Optional[torch.Tensor] = None,
         modalities: Optional[List[str]] = ["image"],
+        eomt_images=None,
+        eomt_meta=None,
         **kwargs,
     ) -> Union[GenerateOutput, torch.LongTensor]:
         position_ids = kwargs.pop("position_ids", None)
@@ -153,20 +156,51 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
             raise NotImplementedError("`inputs_embeds` is not supported")
 
         if images is not None:
-            (inputs, position_ids, attention_mask, _, inputs_embeds, _) = self.prepare_inputs_labels_for_multimodal(inputs, position_ids, attention_mask, None, None, images, spatial_features, point_maps, modalities, image_sizes=image_sizes)
+            (inputs, position_ids, attention_mask, _, inputs_embeds, _) = self.prepare_inputs_labels_for_multimodal(
+                inputs,
+                position_ids,
+                attention_mask,
+                None,
+                None,
+                images,
+                spatial_features,
+                point_maps,
+                modalities,
+                image_sizes=image_sizes,
+                eomt_images=eomt_images,
+                eomt_meta=eomt_meta,
+            )
         else:
             inputs_embeds = self.get_model().embed_tokens(inputs)
 
-        return super().generate(position_ids=position_ids, attention_mask=attention_mask, inputs_embeds=inputs_embeds, **kwargs)
+        return super().generate(
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+            inputs_embeds=inputs_embeds,
+            images=images,
+            spatial_features=spatial_features,
+            point_maps=point_maps,
+            image_sizes=image_sizes,
+            modalities=modalities,
+            eomt_images=eomt_images,
+            eomt_meta=eomt_meta,
+            **kwargs,
+        )
 
     def prepare_inputs_for_generation(self, input_ids, past_key_values=None, inputs_embeds=None, **kwargs):
-        images = kwargs.pop("images", None)
-        image_sizes = kwargs.pop("image_sizes", None)
+        multimodal_inputs = {
+            "images": kwargs.pop("images", None),
+            "spatial_features": kwargs.pop("spatial_features", None),
+            "point_maps": kwargs.pop("point_maps", None),
+            "image_sizes": kwargs.pop("image_sizes", None),
+            "modalities": kwargs.pop("modalities", None),
+            "eomt_images": kwargs.pop("eomt_images", None),
+            "eomt_meta": kwargs.pop("eomt_meta", None),
+        }
         inputs = super().prepare_inputs_for_generation(input_ids, past_key_values=past_key_values, inputs_embeds=inputs_embeds, **kwargs)
-        if images is not None:
-            inputs["images"] = images
-        if image_sizes is not None:
-            inputs["image_sizes"] = image_sizes
+        for key, value in multimodal_inputs.items():
+            if value is not None:
+                inputs[key] = value
         return inputs
 
 

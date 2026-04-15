@@ -293,7 +293,7 @@ class MaskGuidedPooler(nn.Module):
         weights = weights / weights.sum(dim=(-1, -2), keepdim=True).clamp_min(self.eps)
 
         grid_tokens_flat = grid_tokens.view(batch_size, grid_h * grid_w, feat_dim)
-        weights_flat = weights.view(batch_size, k, grid_h * grid_w)
+        weights_flat = weights.view(batch_size, k, grid_h * grid_w).to(grid_tokens_flat.dtype)
         pooled_tokens = torch.einsum("bkh,bhd->bkd", weights_flat, grid_tokens_flat)
 
         return {
