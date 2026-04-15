@@ -226,6 +226,13 @@ class ModelArguments:
     mm_eomt_use_object_type_embedding: bool = field(default=False)
     mm_eomt_external_socket_word_topn: int = field(default=1)
     mm_eomt_external_socket_deduplicate: bool = field(default=True)
+    mm_eomt_selective_3d_enable: bool = field(default=False)
+    mm_eomt_selector_score_threshold: float = field(default=0.35)
+    mm_eomt_selector_topk: int = field(default=4)
+    mm_eomt_selective_3d_merge_mode: str = field(default="soft_max_union")
+    mm_eomt_selective_3d_gate_type: str = field(default="soft_with_floor")
+    mm_eomt_selective_3d_floor: float = field(default=0.1)
+    mm_eomt_selective_3d_empty_fallback: str = field(default="all_3d")
 
     unfreeze_mm_vision_tower: bool = field(default=False)
     unfreeze_language_model: bool = field(default=False)
@@ -2585,6 +2592,13 @@ def train(attn_implementation=None):
         model.config.mm_eomt_use_object_type_embedding = model_args.mm_eomt_use_object_type_embedding
         model.config.mm_eomt_external_socket_word_topn = model_args.mm_eomt_external_socket_word_topn
         model.config.mm_eomt_external_socket_deduplicate = model_args.mm_eomt_external_socket_deduplicate
+        model.config.mm_eomt_selective_3d_enable = model_args.mm_eomt_selective_3d_enable
+        model.config.mm_eomt_selector_score_threshold = model_args.mm_eomt_selector_score_threshold
+        model.config.mm_eomt_selector_topk = model_args.mm_eomt_selector_topk
+        model.config.mm_eomt_selective_3d_merge_mode = model_args.mm_eomt_selective_3d_merge_mode
+        model.config.mm_eomt_selective_3d_gate_type = model_args.mm_eomt_selective_3d_gate_type
+        model.config.mm_eomt_selective_3d_floor = model_args.mm_eomt_selective_3d_floor
+        model.config.mm_eomt_selective_3d_empty_fallback = model_args.mm_eomt_selective_3d_empty_fallback
 
         ### Deciding train which part of the model
         if model_args.mm_tunable_parts is None:  # traditional way of deciding which part to train

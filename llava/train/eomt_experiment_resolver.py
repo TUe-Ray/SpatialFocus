@@ -41,6 +41,13 @@ ALLOWED_EOMT_OVERRIDE_KEYS = {
     "mm_eomt_use_object_type_embedding",
     "mm_eomt_external_socket_word_topn",
     "mm_eomt_external_socket_deduplicate",
+    "mm_eomt_selective_3d_enable",
+    "mm_eomt_selector_score_threshold",
+    "mm_eomt_selector_topk",
+    "mm_eomt_selective_3d_merge_mode",
+    "mm_eomt_selective_3d_gate_type",
+    "mm_eomt_selective_3d_floor",
+    "mm_eomt_selective_3d_empty_fallback",
 }
 
 TRACKED_SUMMARY_KEYS = [
@@ -66,6 +73,13 @@ TRACKED_SUMMARY_KEYS = [
     "mm_eomt_selector_drop_no_object",
     "eomt_config_path",
     "eomt_ckpt_path",
+    "mm_eomt_selective_3d_enable",
+    "mm_eomt_selector_score_threshold",
+    "mm_eomt_selector_topk",
+    "mm_eomt_selective_3d_merge_mode",
+    "mm_eomt_selective_3d_gate_type",
+    "mm_eomt_selective_3d_floor",
+    "mm_eomt_selective_3d_empty_fallback",
 ]
 
 
