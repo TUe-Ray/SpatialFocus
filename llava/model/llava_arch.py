@@ -184,7 +184,7 @@ class LlavaMetaModel:
     def get_eomt_extractor(self):
         return getattr(self, "eomt_extractor", None)
 
-    def initialize_eomt_extractor(self, model_args, fsdp=None):
+    def initialize_eomt_extractor(self, model_args, fsdp=None, device=None, dtype=None):
         """Initialize the EoMT extractor as a frozen side branch for mask extraction."""
         eomt_config_path = getattr(model_args, "eomt_config_path", None)
         eomt_ckpt_path = getattr(model_args, "eomt_ckpt_path", None)
@@ -197,10 +197,16 @@ class LlavaMetaModel:
             eomt_cfg = {
                 "config_path": eomt_config_path,
                 "ckpt_path": eomt_ckpt_path,
-                "device": "cpu",  # will be moved to correct device later
+                "device": device,
+                "dtype": dtype,
             }
             self.eomt_extractor = EoMTExtractor(eomt_cfg)
-            rank0_print(f"EoMT extractor initialized from {eomt_ckpt_path}")
+            if self.eomt_extractor is not None and (device is not None or dtype is not None):
+                self.eomt_extractor.to(device=device, dtype=dtype)
+            rank0_print(
+                f"EoMT extractor initialized from {eomt_ckpt_path} "
+                f"on device={device if device is not None else 'cpu'} dtype={dtype}"
+            )
         except Exception as e:
             rank0_print(f"EoMT: Failed to initialize extractor: {e}")
             self.eomt_extractor = None

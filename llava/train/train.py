@@ -2497,10 +2497,16 @@ def train(attn_implementation=None):
 
     # EoMT: initialize frozen mask extractor (side branch, no gradients)
     if getattr(model_args, "eomt_config_path", None) is not None:
-        model.get_model().initialize_eomt_extractor(model_args=model_args, fsdp=training_args.fsdp)
+        eomt_dtype = torch.bfloat16 if training_args.bf16 else torch.float16
+        model.get_model().initialize_eomt_extractor(
+            model_args=model_args,
+            fsdp=training_args.fsdp,
+            device=training_args.device,
+            dtype=eomt_dtype,
+        )
         eomt = model.get_model().get_eomt_extractor()
         if eomt is not None:
-            eomt.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
+            eomt.to(dtype=eomt_dtype, device=training_args.device)
 
     if model_args.vision_tower is not None:
         model.get_model().initialize_vision_modules(model_args=model_args, fsdp=training_args.fsdp)
