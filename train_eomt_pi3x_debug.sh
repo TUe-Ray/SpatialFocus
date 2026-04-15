@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=DBG_baseline_eomt_pi3x
+#SBATCH --job-name=DBG_smoke_eomt_pi3x
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
@@ -17,7 +17,7 @@ SUFFIX="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
 # ============================================================
 # User-defined variables: General
 # ============================================================
-NOTE="Baseline test: EoMT integration end-to-end check (25% data, normal mode)"
+NOTE="Smoke test: EoMT integration end-to-end check (1% data, debug mode)"
 CONDA_ENV_NAME="vlm3rEOMT"
 # ============================================================
 # User-defined variables: EoMT round-1 comparison
@@ -27,14 +27,16 @@ CONDA_ENV_NAME="vlm3rEOMT"
 # - eomt_obj_only
 # - eomt_obj_text_phrase
 # - eomt_obj_learnable
-EOMT_EXPERIMENT_MODE="baseline"
-EOMT_DEBUG_MODE="${EOMT_DEBUG_MODE:-False}"
+EOMT_EXPERIMENT_MODE="smoke_test"
+EOMT_DEBUG_MODE="${EOMT_DEBUG_MODE:-True}"
+EOMT_DEBUG_MAX_SAMPLES="${EOMT_DEBUG_MAX_SAMPLES:-4}"
+EOMT_DEBUG_TOP_K_MASKS="${EOMT_DEBUG_TOP_K_MASKS:-5}"
 
 MODEL_FUSION_BLOCK="svf_patch_only"
 PROJECT_ROOT="${PROJECT_ROOT:-$PWD}"
-EOMT_EXPERIMENT_CONFIG_PATH="$PROJECT_ROOT/configs/eomt/eomt_objinfo_round1.json"
+EOMT_EXPERIMENT_CONFIG_PATH="$PROJECT_ROOT/configs/eomt/eomt_smoke_test.json"
 
-TRAIN_DATA_PERCENTAGE="25"
+TRAIN_DATA_PERCENTAGE="1"
 
 # ============================================================
 # User-defined variables: Paths
@@ -430,6 +432,8 @@ declare -A MODEL_ARGS=(
     [eomt_experiment_config_path]="$EOMT_EXPERIMENT_CONFIG_PATH"
     [eomt_experiment_mode]="$EOMT_EXPERIMENT_MODE"
     [eomt_debug_mode]="$EOMT_DEBUG_MODE"
+    [eomt_debug_max_samples]="$EOMT_DEBUG_MAX_SAMPLES"
+    [eomt_debug_top_k_masks]="$EOMT_DEBUG_TOP_K_MASKS"
 )
 
 declare -A DATA_ARGS=(
