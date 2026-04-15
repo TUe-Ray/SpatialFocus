@@ -829,10 +829,10 @@ class LlavaMetaForCausalLM(ABC):
             pooler = self._get_eomt_mask_pooler()
             with torch.no_grad():
                 pooled = pooler(
-                    soft_masks=aligned_soft_masks.to(device=pool_visual_features.device),
+                    soft_masks=aligned_soft_masks.to(device=pool_visual_features.device, dtype=pool_visual_features.dtype),
                     visual_features=pool_visual_features,
                     class_logits=(
-                        aligned_class_logits.to(device=pool_visual_features.device)
+                        aligned_class_logits.to(device=pool_visual_features.device, dtype=pool_visual_features.dtype)
                         if aligned_class_logits is not None
                         else None
                     ),
