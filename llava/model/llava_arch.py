@@ -133,6 +133,8 @@ class LlavaMetaModel:
                 return "GeometryBridgeFusion"
             if fusion_block_type == "svf_pose_geometry_bridge":
                 return "GeometryBridgeFusion"
+            if fusion_block_type == "svf_pose_geometry_bridge_reverse":
+                return "ReverseGeometryBridgeFusion"
             if fusion_block_type == "svf_cat_feat":
                 return "SvfCatFeatFusion"
             if fusion_block_type == "svf_pose_prepend":
@@ -1108,6 +1110,16 @@ class LlavaMetaForCausalLM(ABC):
                 elif fusion_block_type == 'svf_pose_geometry_bridge':
                     # Comparison 2: camera tokens (from camera_decoder branch) query
                     # patch tokens to build geometry-aware tokens, then 2D queries them.
+                    image_features, attn_weights = self.get_model().get_fusion_block()(
+                        image_features,
+                        camera_tokens.to(self.dtype),
+                        patch_tokens.to(self.dtype),
+                    )
+                    image_features = self.get_model().mm_projector(image_features)
+
+                elif fusion_block_type == 'svf_pose_geometry_bridge_reverse':
+                    # Comparison 2b: patch tokens query camera tokens to build
+                    # geometry-aware tokens, then 2D queries them.
                     image_features, attn_weights = self.get_model().get_fusion_block()(
                         image_features,
                         camera_tokens.to(self.dtype),

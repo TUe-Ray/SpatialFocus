@@ -171,6 +171,66 @@ class GeometryBridgeFusion(nn.Module):
         }
         return fused_features, attn_weights
 
+
+class ReverseGeometryBridgeFusion(nn.Module):
+    def __init__(self, d_clip, d_spatial_encoder, d_attn, num_heads, dropout_rate=0.1, d_camera_encoder=None):
+        super(ReverseGeometryBridgeFusion, self).__init__()
+
+        _d_cam = d_camera_encoder or d_spatial_encoder
+
+        # Stage 1: spatial patch tokens query camera tokens.
+        self.patch_norm = nn.LayerNorm(d_spatial_encoder)
+        self.camera_norm = nn.LayerNorm(_d_cam)
+        self.patch_query_proj = nn.Linear(d_spatial_encoder, d_attn)
+        self.camera_key_proj = nn.Linear(_d_cam, d_attn)
+        self.camera_value_proj = nn.Linear(_d_cam, d_attn)
+        self.geometry_attention = nn.MultiheadAttention(embed_dim=d_attn, num_heads=num_heads, batch_first=True)
+
+        # Stage 2: 2D tokens attend to geometry-aware tokens from stage 1.
+        self.clip_norm = nn.LayerNorm(d_clip)
+        self.clip_query_proj = nn.Linear(d_clip, d_attn)
+        self.geometry_key_proj = nn.Linear(d_attn, d_attn)
+        self.geometry_value_proj = nn.Linear(d_attn, d_attn)
+        self.bridge_attention = nn.MultiheadAttention(embed_dim=d_attn, num_heads=num_heads, batch_first=True)
+
+        self.out_proj = nn.Linear(d_attn, d_clip)
+        self.out_norm = nn.LayerNorm(d_clip)
+        self.dropout = nn.Dropout(dropout_rate)
+
+    def forward(self, clip_features, camera_tokens, patch_tokens):
+        patch_tokens_norm = self.patch_norm(patch_tokens)
+        camera_tokens_norm = self.camera_norm(camera_tokens)
+
+        patch_query = self.patch_query_proj(patch_tokens_norm)
+        camera_key = self.camera_key_proj(camera_tokens_norm)
+        camera_value = self.camera_value_proj(camera_tokens_norm)
+
+        geometry_tokens, patch_camera_attn = self.geometry_attention(
+            query=patch_query,
+            key=camera_key,
+            value=camera_value,
+        )
+
+        clip_query = self.clip_query_proj(self.clip_norm(clip_features))
+        geometry_key = self.geometry_key_proj(geometry_tokens)
+        geometry_value = self.geometry_value_proj(geometry_tokens)
+
+        fused_features, clip_geometry_attn = self.bridge_attention(
+            query=clip_query,
+            key=geometry_key,
+            value=geometry_value,
+        )
+
+        fused_features = self.out_proj(fused_features)
+        fused_features = self.dropout(fused_features)
+        fused_features = self.out_norm(clip_features + fused_features)
+
+        attn_weights = {
+            "patch_to_camera": patch_camera_attn,
+            "clip_to_geometry": clip_geometry_attn,
+        }
+        return fused_features, attn_weights
+
 class SvfCatFeatFusion(nn.Module):
     """
     Comparison 1: concatenate camera_tokens and patch_tokens along the feature
@@ -601,6 +661,18 @@ def build_multimodal_fusion_block(config, delay_load=False, **kwargs):
         # to form geometry-aware tokens, then 2D queries those geometry-aware tokens.
         _d_cam = d_camera_encoder or 512  # camera_decoder out_dim
         return GeometryBridgeFusion(
+            d_clip=d_clip,
+            d_spatial_encoder=d_spatial_encoder,
+            d_attn=d_attn,
+            num_heads=18,
+            dropout_rate=0.1,
+            d_camera_encoder=_d_cam,
+        )
+    elif fusion_block_type == "svf_pose_geometry_bridge_reverse":
+        # Comparison 2b: patch tokens query camera tokens first, then 2D
+        # features query the resulting geometry-aware tokens.
+        _d_cam = d_camera_encoder or 512  # camera_decoder out_dim
+        return ReverseGeometryBridgeFusion(
             d_clip=d_clip,
             d_spatial_encoder=d_spatial_encoder,
             d_attn=d_attn,

@@ -91,6 +91,10 @@ MODEL_SPATIAL_FEATURE_DIM="2048"
 #     Comparison-2: camera_tokens -> projected to d_features;
 #     cross(Q=camera_tokens, KV=3D features)=geometry-aware tokens;
 #     final=2D + crossattn(Q=2D, KV=geometry-aware tokens).
+# - svf_pose_geometry_bridge_reverse
+#     Comparison-2b: 3D features query camera_tokens first;
+#     cross(Q=3D features, KV=camera_tokens)=geometry-aware tokens;
+#     final=2D + crossattn(Q=2D, KV=geometry-aware tokens).
 # - svf_pose_prepend
 #     Comparison-3: prepend one pose token (12-dim camera pose -> projected to d_clip).
 
@@ -331,6 +335,7 @@ VALID_FUSION_BLOCKS=(
     "svf_patch_only"
     "svf_cat_feat"
     "svf_pose_geometry_bridge"
+    "svf_pose_geometry_bridge_reverse"
     "svf_pose_prepend"
 )
 IS_VALID_FUSION="False"
@@ -357,6 +362,9 @@ case "$MODEL_FUSION_BLOCK" in
         ;;
     svf_pose_geometry_bridge)
         echo "[FUSION] svf_pose_geometry_bridge: Comparison-2 camera->geometry bridge (Q=camera_tokens, KV=3D features; then Q=2D, KV=geometry-aware)"
+        ;;
+    svf_pose_geometry_bridge_reverse)
+        echo "[FUSION] svf_pose_geometry_bridge_reverse: Comparison-2b reverse bridge (Q=3D features, KV=camera_tokens; then Q=2D, KV=geometry-aware)"
         ;;
     svf_pose_prepend)
         echo "[FUSION] svf_pose_prepend: Comparison-3 prepend 1 pose token (12-dim pose -> d_clip)"
@@ -392,7 +400,7 @@ declare -A MODEL_ARGS=(
     [lora_r]="$MODEL_LORA_R"
     [lora_alpha]="$MODEL_LORA_ALPHA"
     [spatial_tower]="$MODEL_SPATIAL_TOWER"
-    [spatial_tower_select_feature]="$MODEL_SPATIAL_TOWER_SELECT_FEATURE"
+    #[spatial_tower_select_feature]="$MODEL_SPATIAL_TOWER_SELECT_FEATURE"
     [spatial_feature_dim]="$MODEL_SPATIAL_FEATURE_DIM"
     [fusion_block]="$MODEL_FUSION_BLOCK"
     [tune_spatial_tower]="$MODEL_TUNE_SPATIAL_TOWER"

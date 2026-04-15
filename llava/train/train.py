@@ -194,7 +194,7 @@ class ModelArguments:
     fusion_block: Optional[str] = field(
         default=None,
         metadata={
-            "help": "Fusion strategy. New ablations: svf_baseline, svf_patch_cam_concat, svf_geometry_bridge"
+            "help": "Fusion strategy. New ablations: svf_baseline, svf_patch_cam_concat, svf_geometry_bridge, svf_pose_geometry_bridge, svf_pose_geometry_bridge_reverse"
         },
     )
     tune_fusion_block: bool = field(default=False)

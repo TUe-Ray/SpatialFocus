@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=dbg_ablation_svf_patch_only_25p
-#SBATCH --nodes=1
+#SBATCH --job-name=ablation_svf_pose_geometry_bridge_reverse_25p
+#SBATCH --nodes=4
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
 #SBATCH --cpus-per-task=32
-#SBATCH --time=00:30:00
+#SBATCH --time=06:30:00
 #SBATCH --partition=boost_usr_prod  
-#SBATCH --qos=boost_qos_dbg  # normal/boost_qos_dbg
+#SBATCH --qos=normal  # normal/boost_qos_dbg
 #SBATCH --output=logs/train/%x_%j.out
 #SBATCH --error=logs/train/%x_%j.err
 #SBATCH --mem=0
@@ -17,7 +17,7 @@ SUFFIX="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
 # ============================================================
 # User-defined variables: General
 # ============================================================
-NOTE="Pi3X fusion ablation:svf_patch_only, 25% data, 1 epoch"
+NOTE="Pi3X fusion ablation:svf_pose_geometry_bridge_reverse, 25% data, 1 epoch"
 CONDA_ENV_NAME="vlm3r"
 
 # ============================================================
@@ -67,9 +67,13 @@ MODEL_SPATIAL_FEATURE_DIM="2048"
 #     Comparison-2: camera_tokens -> projected to d_features;
 #     cross(Q=camera_tokens, KV=3D features)=geometry-aware tokens;
 #     final=2D + crossattn(Q=2D, KV=geometry-aware tokens).
+# - svf_pose_geometry_bridge_reverse
+#     Comparison-2b: 3D features query camera_tokens first;
+#     cross(Q=3D features, KV=camera_tokens)=geometry-aware tokens;
+#     final=2D + crossattn(Q=2D, KV=geometry-aware tokens).
 # - svf_pose_prepend
 #     Comparison-3: prepend one pose token (12-dim camera pose -> projected to d_clip).
-MODEL_FUSION_BLOCK="svf_patch_only"
+MODEL_FUSION_BLOCK="svf_pose_geometry_bridge_reverse"
 # ============== Training percentage and shuffling (for ablation) ==============
 TRAIN_DATA_PERCENTAGE="25"
 TRAIN_DATA_PERCENTAGE_SEED="$SEED"
@@ -279,6 +283,7 @@ VALID_FUSION_BLOCKS=(
     "svf_patch_only"
     "svf_cat_feat"
     "svf_pose_geometry_bridge"
+    "svf_pose_geometry_bridge_reverse"
     "svf_pose_prepend"
 )
 IS_VALID_FUSION="False"
@@ -306,6 +311,9 @@ case "$MODEL_FUSION_BLOCK" in
     svf_pose_geometry_bridge)
         echo "[FUSION] svf_pose_geometry_bridge: Comparison-2 camera->geometry bridge (Q=camera_tokens, KV=3D features; then Q=2D, KV=geometry-aware)"
         ;;
+    svf_pose_geometry_bridge_reverse)
+        echo "[FUSION] svf_pose_geometry_bridge_reverse: Comparison-2b reverse bridge (Q=3D features, KV=camera_tokens; then Q=2D, KV=geometry-aware)"
+        ;;
     svf_pose_prepend)
         echo "[FUSION] svf_pose_prepend: Comparison-3 prepend 1 pose token (12-dim pose -> d_clip)"
         ;;
@@ -317,7 +325,7 @@ declare -A MODEL_ARGS=(
     [lora_r]="$MODEL_LORA_R"
     [lora_alpha]="$MODEL_LORA_ALPHA"
     [spatial_tower]="$MODEL_SPATIAL_TOWER"
-    [spatial_tower_select_feature]="$MODEL_SPATIAL_TOWER_SELECT_FEATURE"
+    #[spatial_tower_select_feature]="$MODEL_SPATIAL_TOWER_SELECT_FEATURE"
     [spatial_feature_dim]="$MODEL_SPATIAL_FEATURE_DIM"
     [fusion_block]="$MODEL_FUSION_BLOCK"
     [tune_spatial_tower]="$MODEL_TUNE_SPATIAL_TOWER"
