@@ -18,6 +18,13 @@ ALLOWED_TOP_LEVEL_KEYS = {
 ALLOWED_EOMT_OVERRIDE_KEYS = {
     "eomt_config_path",
     "eomt_ckpt_path",
+    "eomt_debug_mode",
+    "eomt_debug_max_samples",
+    "eomt_debug_top_k_masks",
+    "eomt_pool_top_k",
+    "eomt_pool_selection",
+    "eomt_pool_mask_area_threshold",
+    "eomt_pool_score_threshold",
     "mm_eomt_enable_object_block",
     "mm_eomt_object_block_position",
     "mm_eomt_object_block_max_objects",
@@ -37,6 +44,13 @@ ALLOWED_EOMT_OVERRIDE_KEYS = {
 }
 
 TRACKED_SUMMARY_KEYS = [
+    "eomt_debug_mode",
+    "eomt_debug_max_samples",
+    "eomt_debug_top_k_masks",
+    "eomt_pool_top_k",
+    "eomt_pool_selection",
+    "eomt_pool_mask_area_threshold",
+    "eomt_pool_score_threshold",
     "mm_eomt_enable_object_block",
     "mm_eomt_obj_info_mode",
     "mm_eomt_object_block_position",

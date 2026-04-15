@@ -37,6 +37,7 @@ class MaskGuidedPooler(nn.Module):
         default_top_k: int = 5,
         default_selection: str = "mean_mask_confidence",
         default_mask_area_threshold: float = 0.5,
+        default_score_threshold: float = 0.0,
         eps: float = 1e-6,
     ):
         super().__init__()
@@ -48,6 +49,7 @@ class MaskGuidedPooler(nn.Module):
         self.default_top_k = int(default_top_k)
         self.default_selection = default_selection
         self.default_mask_area_threshold = float(default_mask_area_threshold)
+        self.default_score_threshold = float(default_score_threshold)
         self.eps = float(eps)
 
     def _infer_grid_shape(
@@ -137,6 +139,7 @@ class MaskGuidedPooler(nn.Module):
         top_k: int,
         selection: str,
         mask_area_threshold: float,
+        score_threshold: float,
     ) -> Dict[str, torch.Tensor]:
         """Select top-k query indices per frame according to a heuristic score."""
         if soft_masks.ndim != 4:
@@ -146,10 +149,15 @@ class MaskGuidedPooler(nn.Module):
         if num_queries == 0:
             empty_idx = soft_masks.new_zeros((bsz, 0), dtype=torch.long)
             empty_scores = soft_masks.new_zeros((bsz, 0), dtype=torch.float32)
+            empty_valid = soft_masks.new_zeros((bsz, 0), dtype=torch.bool)
             return {
                 "topk_indices": empty_idx,
                 "topk_scores": empty_scores,
                 "topk_class_ids": empty_idx,
+                "topk_valid_mask": empty_valid,
+                "raw_topk_indices": empty_idx,
+                "raw_topk_scores": empty_scores,
+                "raw_topk_class_ids": empty_idx,
                 "all_scores": soft_masks.new_zeros((bsz, 0), dtype=torch.float32),
             }
 
@@ -160,20 +168,29 @@ class MaskGuidedPooler(nn.Module):
             selection=selection,
             mask_area_threshold=mask_area_threshold,
         )
-        topk_scores, topk_indices = scores.topk(effective_k, dim=1, largest=True)
+        raw_topk_scores, raw_topk_indices = scores.topk(effective_k, dim=1, largest=True)
 
         if class_logits is not None and class_logits.shape[-1] > 1:
             class_probs = torch.softmax(class_logits.float(), dim=-1)
             fg_probs = class_probs[:, :, :-1]
             _, max_class_ids = fg_probs.max(dim=-1)
-            topk_class_ids = torch.gather(max_class_ids, dim=1, index=topk_indices)
+            raw_topk_class_ids = torch.gather(max_class_ids, dim=1, index=raw_topk_indices)
         else:
-            topk_class_ids = torch.full_like(topk_indices, fill_value=-1)
+            raw_topk_class_ids = torch.full_like(raw_topk_indices, fill_value=-1)
+
+        topk_valid_mask = raw_topk_scores >= float(score_threshold)
+        topk_indices = raw_topk_indices.masked_fill(~topk_valid_mask, -1)
+        topk_scores = raw_topk_scores.masked_fill(~topk_valid_mask, 0.0)
+        topk_class_ids = raw_topk_class_ids.masked_fill(~topk_valid_mask, -1)
 
         return {
             "topk_indices": topk_indices,
             "topk_scores": topk_scores,
             "topk_class_ids": topk_class_ids,
+            "topk_valid_mask": topk_valid_mask,
+            "raw_topk_indices": raw_topk_indices,
+            "raw_topk_scores": raw_topk_scores,
+            "raw_topk_class_ids": raw_topk_class_ids,
             "all_scores": scores,
         }
 
@@ -187,6 +204,7 @@ class MaskGuidedPooler(nn.Module):
         grid_size: Optional[Tuple[int, int]] = None,
         prefix_tokens: Optional[int] = None,
         mask_area_threshold: Optional[float] = None,
+        score_threshold: Optional[float] = None,
     ) -> Dict[str, torch.Tensor]:
         if soft_masks.ndim != 4:
             raise ValueError(f"soft_masks must be 4D (B,Q,H,W), got shape {tuple(soft_masks.shape)}")
@@ -205,6 +223,11 @@ class MaskGuidedPooler(nn.Module):
             self.default_mask_area_threshold
             if mask_area_threshold is None
             else float(mask_area_threshold)
+        )
+        score_threshold = (
+            self.default_score_threshold
+            if score_threshold is None
+            else float(score_threshold)
         )
 
         b_masks, _, _, _ = soft_masks.shape
@@ -251,15 +274,19 @@ class MaskGuidedPooler(nn.Module):
             top_k=top_k,
             selection=selection,
             mask_area_threshold=mask_area_threshold,
+            score_threshold=score_threshold,
         )
 
         topk_indices = selected["topk_indices"]
         topk_scores = selected["topk_scores"]
         topk_class_ids = selected["topk_class_ids"]
+        topk_valid_mask = selected["topk_valid_mask"]
+        raw_topk_indices = selected["raw_topk_indices"]
         k = topk_indices.shape[1]
 
-        idx_expanded = topk_indices.unsqueeze(-1).unsqueeze(-1).expand(batch_size, k, grid_h, grid_w)
+        idx_expanded = raw_topk_indices.unsqueeze(-1).unsqueeze(-1).expand(batch_size, k, grid_h, grid_w)
         selected_masks = torch.gather(resized_masks, dim=1, index=idx_expanded)
+        selected_masks = selected_masks * topk_valid_mask.unsqueeze(-1).unsqueeze(-1).to(selected_masks.dtype)
 
         # Convert selected masks into normalized spatial weights.
         weights = selected_masks.clamp(min=0.0)
@@ -274,7 +301,14 @@ class MaskGuidedPooler(nn.Module):
             "selected_indices": topk_indices,
             "selected_scores": topk_scores,
             "selected_class_ids": topk_class_ids,
+            "selected_valid_mask": topk_valid_mask,
+            "raw_selected_indices": raw_topk_indices,
+            "raw_selected_scores": selected["raw_topk_scores"],
+            "raw_selected_class_ids": selected["raw_topk_class_ids"],
             "selection_method": selection,
+            "score_threshold": float(score_threshold),
+            "threshold_filtered_count": int((~topk_valid_mask).sum().item()),
+            "selected_count_per_frame": topk_valid_mask.sum(dim=1),
             "all_scores": selected["all_scores"],
             "selected_masks": selected_masks,
             "weights": weights,

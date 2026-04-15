@@ -2,6 +2,10 @@
   "experiment_family": "eomt_objinfo_round1",
   "description": "Round-1 ablation: baseline vs object-block with different OBJ_INFO modes.",
   "shared": {
+    "eomt_pool_top_k": 5,
+    "eomt_pool_selection": "class_confidence",
+    "eomt_pool_mask_area_threshold": 0.5,
+    "eomt_pool_score_threshold": 0.2,
     "mm_eomt_object_block_position": "after_visual",
     "mm_eomt_object_block_max_objects": 8,
     "mm_eomt_object_block_max_per_frame": 2,

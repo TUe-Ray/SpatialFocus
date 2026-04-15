@@ -36,6 +36,13 @@ def make_args(config_path, mode_name, **overrides):
         "eomt_experiment_mode": mode_name,
         "eomt_config_path": None,
         "eomt_ckpt_path": None,
+        "eomt_debug_mode": False,
+        "eomt_debug_max_samples": 4,
+        "eomt_debug_top_k_masks": 5,
+        "eomt_pool_top_k": 5,
+        "eomt_pool_selection": "mean_mask_confidence",
+        "eomt_pool_mask_area_threshold": 0.5,
+        "eomt_pool_score_threshold": 0.0,
         "mm_eomt_enable_object_block": False,
         "mm_eomt_object_block_position": "after_visual",
         "mm_eomt_object_block_max_objects": 8,
@@ -100,6 +107,8 @@ def main():
     summary = resolve_eomt_experiment_config(make_args(config_path, "eomt_obj_only"), raw_argv=[])
     assert_true(summary["tracked_summary"]["mm_eomt_enable_object_block"] is True, "Object-only mode must enable object block")
     assert_true(summary["tracked_summary"]["mm_eomt_obj_info_mode"] == "none", "Object-only mode must keep obj_info_mode=none")
+    assert_true(summary["tracked_summary"]["eomt_pool_selection"] == "class_confidence", "Pool selection must resolve from shared defaults")
+    assert_true(abs(float(summary["tracked_summary"]["eomt_pool_score_threshold"]) - 0.2) < 1e-6, "Pool score threshold must resolve from shared defaults")
     results.append({"test": "obj_only_mode", "status": "pass"})
 
     summary = resolve_eomt_experiment_config(make_args(config_path, "eomt_obj_text_phrase"), raw_argv=[])

@@ -273,6 +273,7 @@ class EoMTObjectTokenSelector:
         selected_scores = pooled_outputs.get("selected_scores", None)
         selected_indices = pooled_outputs.get("selected_indices", None)
         selected_class_ids = pooled_outputs.get("selected_class_ids", None)
+        selected_valid_mask = pooled_outputs.get("selected_valid_mask", None)
         sample_frame_pairs = pooled_outputs.get("aligned_sample_frame_pairs", [])
 
         try:
@@ -304,6 +305,9 @@ class EoMTObjectTokenSelector:
 
             if not torch.is_tensor(selected_class_ids) or selected_class_ids.shape[:2] != (frame_count, obj_per_frame):
                 selected_class_ids = torch.full_like(selected_indices, -1)
+
+            if not torch.is_tensor(selected_valid_mask) or selected_valid_mask.shape[:2] != (frame_count, obj_per_frame):
+                selected_valid_mask = torch.ones_like(selected_indices, dtype=torch.bool)
 
             drop_no_object = bool(getattr(config, "mm_eomt_selector_drop_no_object", True))
             no_object_class_id = int(getattr(config, "mm_eomt_selector_no_object_class_id", -1))
@@ -341,6 +345,9 @@ class EoMTObjectTokenSelector:
             for frame_idx in range(frame_count):
                 sample_idx, sample_frame_idx = parsed_pairs[frame_idx]
                 for obj_idx in range(obj_per_frame):
+                    if not bool(selected_valid_mask[frame_idx, obj_idx].item()):
+                        continue
+
                     class_id = int(selected_class_ids[frame_idx, obj_idx].item())
                     if drop_no_object and self._is_no_object(class_id, no_object_class_id):
                         continue
@@ -355,6 +362,8 @@ class EoMTObjectTokenSelector:
 
                     score = float(selected_scores[frame_idx, obj_idx].item())
                     query_idx = int(selected_indices[frame_idx, obj_idx].item())
+                    if query_idx < 0:
+                        continue
                     candidates.append(
                         {
                             "sample_idx": int(sample_idx),

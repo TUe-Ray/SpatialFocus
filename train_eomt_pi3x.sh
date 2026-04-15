@@ -28,6 +28,9 @@ CONDA_ENV_NAME="vlm3rEOMT"
 # - eomt_obj_text_phrase
 # - eomt_obj_learnable
 EOMT_EXPERIMENT_MODE="eomt_obj_only"
+EOMT_DEBUG_MODE="${EOMT_DEBUG_MODE:-False}"
+EOMT_DEBUG_MAX_SAMPLES="${EOMT_DEBUG_MAX_SAMPLES:-4}"
+EOMT_DEBUG_TOP_K_MASKS="${EOMT_DEBUG_TOP_K_MASKS:-5}"
 
 MODEL_FUSION_BLOCK="svf_patch_only"
 
@@ -309,6 +312,9 @@ echo "[EOMT] ckpt_path=$EOMT_CKPT_PATH"
 echo "[EOMT] local_backbone_path=$EOMT_LOCAL_BACKBONE_PATH"
 echo "[EOMT] experiment_config=$EOMT_EXPERIMENT_CONFIG_PATH"
 echo "[EOMT] experiment_mode=$EOMT_EXPERIMENT_MODE"
+echo "[EOMT-DEBUG] mode=$EOMT_DEBUG_MODE"
+echo "[EOMT-DEBUG] max_samples=$EOMT_DEBUG_MAX_SAMPLES"
+echo "[EOMT-DEBUG] top_k_masks=$EOMT_DEBUG_TOP_K_MASKS"
 
 denom=$((WORLD_SIZE * PER_DEVICE_TRAIN_BATCH_SIZE))
 if (( TARGET_GLOBAL_BATCH_SIZE % denom != 0 )); then
@@ -423,6 +429,9 @@ declare -A MODEL_ARGS=(
     [eomt_ckpt_path]="$EOMT_CKPT_PATH"
     [eomt_experiment_config_path]="$EOMT_EXPERIMENT_CONFIG_PATH"
     [eomt_experiment_mode]="$EOMT_EXPERIMENT_MODE"
+    [eomt_debug_mode]="$EOMT_DEBUG_MODE"
+    [eomt_debug_max_samples]="$EOMT_DEBUG_MAX_SAMPLES"
+    [eomt_debug_top_k_masks]="$EOMT_DEBUG_TOP_K_MASKS"
 )
 
 declare -A DATA_ARGS=(

@@ -203,6 +203,13 @@ class ModelArguments:
     eomt_experiment_mode: Optional[str] = field(default=None, metadata={"help": "Named EoMT experiment mode to resolve from the experiment-family JSON"})
     eomt_config_path: Optional[str] = field(default=None, metadata={"help": "Path to EoMT YAML config file"})
     eomt_ckpt_path: Optional[str] = field(default=None, metadata={"help": "Path to EoMT pre-trained weights"})
+    eomt_pool_top_k: int = field(default=5)
+    eomt_pool_selection: str = field(default="mean_mask_confidence")
+    eomt_pool_mask_area_threshold: float = field(default=0.5)
+    eomt_pool_score_threshold: float = field(default=0.0, metadata={"help": "Drop top-k EoMT masks whose score is below this threshold"})
+    eomt_debug_mode: bool = field(default=False, metadata={"help": "Save EoMT debug masks and metadata under output_dir/eomt_debug"})
+    eomt_debug_max_samples: int = field(default=4)
+    eomt_debug_top_k_masks: int = field(default=5)
     mm_eomt_enable_object_block: bool = field(default=False)
     mm_eomt_object_block_position: str = field(default="after_visual")
     mm_eomt_object_block_max_objects: int = field(default=8)
@@ -2313,6 +2320,8 @@ def train(attn_implementation=None):
         summary=eomt_experiment_summary,
         output_dir=training_args.output_dir,
     )
+    if model_args.eomt_debug_mode and model_args.eomt_debug_max_samples <= 0:
+        raise ValueError("--eomt_debug_max_samples must be > 0 when --eomt_debug_mode is enabled.")
     rank0_print(f"[ATTN] attn_implementation={training_args.attn_implementation}")
     rank0_print(f"[ABLATION] zero_spatial_features={data_args.zero_spatial_features}")
     if eomt_experiment_summary is not None:
@@ -2332,6 +2341,10 @@ def train(attn_implementation=None):
                     "object_block_position": tracked.get("mm_eomt_object_block_position"),
                     "selector_mode": tracked.get("mm_eomt_selector_mode"),
                     "selector_order": tracked.get("mm_eomt_selector_order"),
+                    "pool_top_k": tracked.get("eomt_pool_top_k"),
+                    "pool_selection": tracked.get("eomt_pool_selection"),
+                    "pool_mask_area_threshold": tracked.get("eomt_pool_mask_area_threshold"),
+                    "pool_score_threshold": tracked.get("eomt_pool_score_threshold"),
                     "max_objects": tracked.get("mm_eomt_object_block_max_objects"),
                     "max_per_frame": tracked.get("mm_eomt_object_block_max_per_frame"),
                     "object_type_embedding": tracked.get("mm_eomt_use_object_type_embedding"),
@@ -2548,6 +2561,14 @@ def train(attn_implementation=None):
         model.config.add_time_instruction = data_args.add_time_instruction
         model.config.force_sample = data_args.force_sample
         model.config.mm_spatial_pool_stride = model_args.mm_spatial_pool_stride 
+        model.config.eomt_pool_top_k = model_args.eomt_pool_top_k
+        model.config.eomt_pool_selection = model_args.eomt_pool_selection
+        model.config.eomt_pool_mask_area_threshold = model_args.eomt_pool_mask_area_threshold
+        model.config.eomt_pool_score_threshold = model_args.eomt_pool_score_threshold
+        model.config.eomt_debug_mode = model_args.eomt_debug_mode
+        model.config.eomt_debug_max_samples = model_args.eomt_debug_max_samples
+        model.config.eomt_debug_top_k_masks = model_args.eomt_debug_top_k_masks
+        model.config.eomt_debug_output_dir = os.path.join(training_args.output_dir, "eomt_debug")
         model.config.mm_eomt_enable_object_block = model_args.mm_eomt_enable_object_block
         model.config.mm_eomt_object_block_position = model_args.mm_eomt_object_block_position
         model.config.mm_eomt_object_block_max_objects = model_args.mm_eomt_object_block_max_objects

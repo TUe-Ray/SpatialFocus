@@ -15,6 +15,7 @@
 
 from abc import ABC, abstractmethod
 
+import json
 import math
 import re
 import time
@@ -767,6 +768,7 @@ class LlavaMetaForCausalLM(ABC):
         pool_top_k = int(getattr(self.config, "eomt_pool_top_k", 5))
         pool_selection = str(getattr(self.config, "eomt_pool_selection", "mean_mask_confidence"))
         pool_area_threshold = float(getattr(self.config, "eomt_pool_mask_area_threshold", 0.5))
+        pool_score_threshold = float(getattr(self.config, "eomt_pool_score_threshold", 0.0))
 
         def _skipped_result(reason):
             return {
@@ -779,6 +781,7 @@ class LlavaMetaForCausalLM(ABC):
                 "mask_resolution": eomt_outputs.get("mask_resolution", None),
                 "query_count": eomt_outputs.get("query_count", None),
                 "pool_debug": pool_debug,
+                "score_threshold": pool_score_threshold,
                 "pool_skipped": True,
                 "skip_reason": reason,
             }
@@ -835,12 +838,14 @@ class LlavaMetaForCausalLM(ABC):
                     top_k=pool_top_k,
                     selection=pool_selection,
                     mask_area_threshold=pool_area_threshold,
+                    score_threshold=pool_score_threshold,
                 )
 
             pooled["frame_meta"] = pool_frame_meta
             pooled["mask_resolution"] = eomt_outputs.get("mask_resolution", None)
             pooled["query_count"] = eomt_outputs.get("query_count", None)
             pooled["pool_debug"] = pool_debug
+            pooled["score_threshold"] = pool_score_threshold
             pooled["aligned_global_frame_indices"] = aligned_global_frame_indices
             pooled["aligned_sample_frame_pairs"] = aligned_sample_frame_pairs
             pooled["pool_skipped"] = False
@@ -850,6 +855,273 @@ class LlavaMetaForCausalLM(ABC):
             skipped = _skipped_result("pooler_execution_error")
             skipped["pool_error"] = str(e)
             return skipped
+
+    def _is_rank0_process(self):
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            return torch.distributed.get_rank() == 0
+        return True
+
+    def _eomt_debug_to_jsonable(self, value):
+        if torch.is_tensor(value):
+            if value.ndim == 0:
+                return value.item()
+            return value.detach().cpu().tolist()
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, (np.integer, np.floating)):
+            return value.item()
+        if isinstance(value, dict):
+            return {str(k): self._eomt_debug_to_jsonable(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [self._eomt_debug_to_jsonable(v) for v in value]
+        return value
+
+    def _build_eomt_debug_sample_key(self, sample_idx, sample_frames, sample_frame_meta):
+        parts = [f"sample_idx={sample_idx}"]
+        for frame_idx in range(len(sample_frames)):
+            frame_meta = {}
+            if frame_idx < len(sample_frame_meta) and isinstance(sample_frame_meta[frame_idx], dict):
+                frame_meta = sample_frame_meta[frame_idx]
+            frame_path = frame_meta.get("frame_path") or frame_meta.get("source_path") or f"frame_{frame_idx}"
+            frame_id = frame_meta.get("frame_index", frame_idx)
+            parts.append(f"{frame_path}@{frame_id}")
+        return "|".join(str(part) for part in parts)
+
+    def _render_eomt_mask_artifacts(self, pil_image, mask_tensor):
+        image_rgb = np.asarray(pil_image.convert("RGB"))
+        image_h, image_w = image_rgb.shape[:2]
+        mask_np = mask_tensor.detach().float().cpu().numpy()
+        mask_resized = cv2.resize(mask_np, (image_w, image_h), interpolation=cv2.INTER_LINEAR)
+        mask_resized = np.clip(mask_resized, 0.0, 1.0)
+        mask_uint8 = (mask_resized * 255.0).astype(np.uint8)
+        heatmap = (cm.get_cmap("jet")(mask_resized)[..., :3] * 255.0).astype(np.uint8)
+        overlay = np.clip(0.55 * image_rgb.astype(np.float32) + 0.45 * heatmap.astype(np.float32), 0.0, 255.0).astype(np.uint8)
+        return mask_uint8, overlay
+
+    def _maybe_dump_eomt_debug_artifacts(self, eomt_images, eomt_meta):
+        if not bool(getattr(self.config, "eomt_debug_mode", False)):
+            return
+        if not self._is_rank0_process():
+            return
+
+        max_samples = int(getattr(self.config, "eomt_debug_max_samples", 0))
+        if max_samples <= 0 or eomt_images is None:
+            return
+
+        output_root = getattr(self.config, "eomt_debug_output_dir", None)
+        if not output_root:
+            return
+
+        eomt_outputs = getattr(self, "_last_eomt_outputs", None)
+        if not isinstance(eomt_outputs, dict):
+            return
+
+        soft_masks = eomt_outputs.get("soft_masks", None)
+        if not torch.is_tensor(soft_masks) or soft_masks.ndim != 4:
+            return
+
+        pooled_outputs = getattr(self, "_last_eomt_pooled_outputs", None)
+        object_block_outputs = getattr(self, "_last_eomt_object_block_outputs", None)
+
+        if not hasattr(self, "_eomt_debug_saved_keys"):
+            self._eomt_debug_saved_keys = set()
+            self._eomt_debug_saved_count = 0
+            self._eomt_debug_batch_counter = 0
+        self._eomt_debug_batch_counter += 1
+
+        os.makedirs(output_root, exist_ok=True)
+
+        sample_frames_list = list(eomt_images)
+        if eomt_meta is None:
+            sample_meta_list = [None for _ in sample_frames_list]
+        else:
+            sample_meta_list = list(eomt_meta)
+            if len(sample_meta_list) < len(sample_frames_list):
+                sample_meta_list.extend([None for _ in range(len(sample_frames_list) - len(sample_meta_list))])
+
+        aligned_pair_to_pool_idx = {}
+        if isinstance(pooled_outputs, dict):
+            for pool_frame_idx, pair in enumerate(pooled_outputs.get("aligned_sample_frame_pairs", [])):
+                if isinstance(pair, (list, tuple)) and len(pair) >= 2:
+                    aligned_pair_to_pool_idx[(int(pair[0]), int(pair[1]))] = int(pool_frame_idx)
+
+        sample_frame_offsets = []
+        total_frames = 0
+        for sample_frames in sample_frames_list:
+            frame_count = len(sample_frames) if sample_frames is not None else 0
+            sample_frame_offsets.append(total_frames)
+            total_frames += frame_count
+
+        raw_selected_indices = pooled_outputs.get("raw_selected_indices", None) if isinstance(pooled_outputs, dict) else None
+        raw_selected_scores = pooled_outputs.get("raw_selected_scores", None) if isinstance(pooled_outputs, dict) else None
+        raw_selected_class_ids = pooled_outputs.get("raw_selected_class_ids", None) if isinstance(pooled_outputs, dict) else None
+        selected_indices = pooled_outputs.get("selected_indices", None) if isinstance(pooled_outputs, dict) else None
+        selected_valid_mask = pooled_outputs.get("selected_valid_mask", None) if isinstance(pooled_outputs, dict) else None
+        debug_top_k_masks = int(getattr(self.config, "eomt_debug_top_k_masks", 5))
+        manifest_path = os.path.join(output_root, "manifest.jsonl")
+
+        for sample_idx, sample_frames in enumerate(sample_frames_list):
+            if self._eomt_debug_saved_count >= max_samples:
+                break
+            if sample_frames is None or len(sample_frames) == 0:
+                continue
+
+            sample_frame_meta = []
+            if sample_idx < len(sample_meta_list) and sample_meta_list[sample_idx] is not None:
+                sample_frame_meta = list(sample_meta_list[sample_idx])
+
+            sample_key = self._build_eomt_debug_sample_key(sample_idx, sample_frames, sample_frame_meta)
+            if sample_key in self._eomt_debug_saved_keys:
+                continue
+
+            saved_sample_index = self._eomt_debug_saved_count
+            sample_dir = os.path.join(
+                output_root,
+                f"sample_{saved_sample_index:04d}_batch{self._eomt_debug_batch_counter:05d}_sample{sample_idx:02d}",
+            )
+            os.makedirs(sample_dir, exist_ok=True)
+
+            selected_objects_for_sample = []
+            if isinstance(object_block_outputs, dict):
+                selected_pairs = object_block_outputs.get("selected_sample_frame_pairs", [])
+                selected_scores = object_block_outputs.get("selected_scores", [])
+                selected_query_indices = object_block_outputs.get("selected_indices", [])
+                for item_idx, pair in enumerate(selected_pairs):
+                    if isinstance(pair, (list, tuple)) and len(pair) >= 2 and int(pair[0]) == sample_idx:
+                        selected_objects_for_sample.append(
+                            {
+                                "frame_idx": int(pair[1]),
+                                "score": float(selected_scores[item_idx]) if item_idx < len(selected_scores) else None,
+                                "query_idx": int(selected_query_indices[item_idx]) if item_idx < len(selected_query_indices) else None,
+                            }
+                        )
+
+            frame_records = []
+            for frame_idx, pil_image in enumerate(sample_frames):
+                global_frame_idx = sample_frame_offsets[sample_idx] + frame_idx
+                frame_meta = {}
+                if frame_idx < len(sample_frame_meta) and isinstance(sample_frame_meta[frame_idx], dict):
+                    frame_meta = dict(sample_frame_meta[frame_idx])
+
+                original_path = os.path.join(sample_dir, f"frame_{frame_idx:02d}_original.png")
+                pil_image.save(original_path)
+
+                frame_record = {
+                    "frame_list_index": frame_idx,
+                    "global_eomt_frame_index": global_frame_idx,
+                    "frame_meta": self._eomt_debug_to_jsonable(frame_meta),
+                    "original_frame_path": original_path,
+                    "pool_frame_index": None,
+                    "topk_slots": [],
+                }
+
+                pool_frame_idx = aligned_pair_to_pool_idx.get((sample_idx, frame_idx), None)
+                if pool_frame_idx is not None:
+                    frame_record["pool_frame_index"] = int(pool_frame_idx)
+
+                if (
+                    pool_frame_idx is not None
+                    and global_frame_idx < soft_masks.shape[0]
+                    and torch.is_tensor(raw_selected_indices)
+                    and raw_selected_indices.ndim == 2
+                ):
+                    slot_count = min(debug_top_k_masks, raw_selected_indices.shape[1])
+                    for slot_idx in range(slot_count):
+                        raw_query_idx = int(raw_selected_indices[pool_frame_idx, slot_idx].item())
+                        if raw_query_idx < 0 or raw_query_idx >= soft_masks.shape[1]:
+                            continue
+
+                        mask_uint8, overlay = self._render_eomt_mask_artifacts(
+                            pil_image=pil_image,
+                            mask_tensor=soft_masks[global_frame_idx, raw_query_idx],
+                        )
+                        mask_path = os.path.join(
+                            sample_dir,
+                            f"frame_{frame_idx:02d}_slot{slot_idx:02d}_query{raw_query_idx:03d}_mask.png",
+                        )
+                        overlay_path = os.path.join(
+                            sample_dir,
+                            f"frame_{frame_idx:02d}_slot{slot_idx:02d}_query{raw_query_idx:03d}_overlay.png",
+                        )
+                        cv2.imwrite(mask_path, mask_uint8)
+                        cv2.imwrite(overlay_path, cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
+
+                        slot_score = None
+                        if torch.is_tensor(raw_selected_scores):
+                            slot_score = float(raw_selected_scores[pool_frame_idx, slot_idx].item())
+                        slot_class_id = -1
+                        if torch.is_tensor(raw_selected_class_ids):
+                            slot_class_id = int(raw_selected_class_ids[pool_frame_idx, slot_idx].item())
+                        kept_query_idx = raw_query_idx
+                        if torch.is_tensor(selected_indices):
+                            kept_query_idx = int(selected_indices[pool_frame_idx, slot_idx].item())
+                        is_valid = True
+                        if torch.is_tensor(selected_valid_mask):
+                            is_valid = bool(selected_valid_mask[pool_frame_idx, slot_idx].item())
+
+                        frame_record["topk_slots"].append(
+                            {
+                                "slot_index": slot_idx,
+                                "raw_query_index": raw_query_idx,
+                                "kept_query_index": kept_query_idx,
+                                "class_id": slot_class_id,
+                                "score": slot_score,
+                                "kept_after_threshold": is_valid,
+                                "mask_path": mask_path,
+                                "overlay_path": overlay_path,
+                            }
+                        )
+
+                frame_records.append(frame_record)
+
+            sample_record = {
+                "saved_sample_index": saved_sample_index,
+                "debug_batch_index": int(self._eomt_debug_batch_counter),
+                "sample_idx_in_batch": sample_idx,
+                "sample_key": sample_key,
+                "pool_summary": self._eomt_debug_to_jsonable(
+                    {
+                        "selection_method": pooled_outputs.get("selection_method", None) if isinstance(pooled_outputs, dict) else None,
+                        "score_threshold": pooled_outputs.get("score_threshold", None) if isinstance(pooled_outputs, dict) else None,
+                        "threshold_filtered_count": pooled_outputs.get("threshold_filtered_count", None) if isinstance(pooled_outputs, dict) else None,
+                        "selected_count_per_frame": pooled_outputs.get("selected_count_per_frame", None) if isinstance(pooled_outputs, dict) else None,
+                        "pool_skipped": pooled_outputs.get("pool_skipped", None) if isinstance(pooled_outputs, dict) else None,
+                        "skip_reason": pooled_outputs.get("skip_reason", None) if isinstance(pooled_outputs, dict) else None,
+                    }
+                ),
+                "object_block_summary": self._eomt_debug_to_jsonable(
+                    {
+                        "enabled": object_block_outputs.get("enabled", None) if isinstance(object_block_outputs, dict) else None,
+                        "used_object_block": object_block_outputs.get("used_object_block", None) if isinstance(object_block_outputs, dict) else None,
+                        "fallback_reason": object_block_outputs.get("fallback_reason", None) if isinstance(object_block_outputs, dict) else None,
+                        "obj_info_mode": object_block_outputs.get("obj_info_mode", None) if isinstance(object_block_outputs, dict) else None,
+                        "obj_info_used": object_block_outputs.get("obj_info_used", None) if isinstance(object_block_outputs, dict) else None,
+                        "selected_objects": selected_objects_for_sample,
+                    }
+                ),
+                "frames": frame_records,
+            }
+
+            record_path = os.path.join(sample_dir, "record.json")
+            with open(record_path, "w", encoding="utf-8") as handle:
+                json.dump(sample_record, handle, indent=2, sort_keys=True)
+                handle.write("\n")
+            with open(manifest_path, "a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "record_path": record_path,
+                            "sample_dir": sample_dir,
+                            "sample_key": sample_key,
+                        },
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+
+            self._eomt_debug_saved_keys.add(sample_key)
+            self._eomt_debug_saved_count += 1
+            rank0_print(f"[EOMT-DEBUG] saved debug artifacts to {record_path}")
 
     def _split_prefix_tokens_for_square_grid(self, image_feature):
         num_tokens = image_feature.shape[1]
@@ -1510,6 +1782,7 @@ class LlavaMetaForCausalLM(ABC):
         # This does not modify the main image_features path used by the model.
         self._last_eomt_pooled_outputs = self._compute_eomt_mask_pooled_side_output()
         self._last_eomt_object_block_outputs = self._compute_eomt_object_block_side_output()
+        self._maybe_dump_eomt_debug_artifacts(eomt_images=eomt_images, eomt_meta=eomt_meta)
 
         # TODO: image start / end is not implemented here to support pretraining.
         if getattr(self.config, "tune_mm_mlp_adapter", False) and getattr(self.config, "mm_use_im_start_end", False):
