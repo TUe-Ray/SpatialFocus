@@ -27,6 +27,7 @@ from .multimodal_fusion_block.builder import build_multimodal_fusion_block
 from .multimodal_resampler.builder import build_vision_resampler
 from .multimodal_projector.builder import build_vision_projector
 from .pi3x_decoded_features import Pi3XDecodedFeatures
+from .multimodal_eomt.selective_3d_gate import Selective3DConfig, apply_selective_3d_fusion
 from llava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 
 from llava.mm_utils import get_anyres_image_grid_shape
@@ -1316,7 +1317,24 @@ class LlavaMetaForCausalLM(ABC):
                         with torch.no_grad():
                             pose_4x4 = _cam_head(cam_tokens_for_pose, patch_side, patch_side)
                         camera_pose = pose_4x4[:, :3, :].reshape(pose_4x4.shape[0], 12)
-                
+
+                # --- Selective 3D gating (round-1 patch-only experiment) ---
+                _sel3d_enable = bool(getattr(self.get_model().config, "mm_eomt_selective_3d_enable", False))
+                if _sel3d_enable:
+                    if fusion_block_type != 'svf_patch_only':
+                        raise ValueError(
+                            "Round-1 selective 3D fusion currently only supports fusion_block='svf_patch_only'. "
+                            f"Got '{fusion_block_type}'."
+                        )
+                    _sel3d_cfg = Selective3DConfig.from_model_config(self.get_model().config)
+                    _eomt_out = getattr(self, "_last_eomt_outputs", None)
+                    patch_tokens, _sel3d_debug = apply_selective_3d_fusion(
+                        patch_tokens, _eomt_out, _sel3d_cfg,
+                    )
+                    self._last_selective_3d_debug = _sel3d_debug
+                else:
+                    self._last_selective_3d_debug = None
+
                 if fusion_block_type in ['cross_attention', 'svf_baseline']:
                     # Build spatial KV tokens.
                     if fusion_block_type == 'svf_baseline':
