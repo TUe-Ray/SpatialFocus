@@ -261,12 +261,16 @@ class MaskGuidedPooler(nn.Module):
                 f"Grid token count mismatch: expected {grid_h * grid_w}, got {grid_tokens.shape[1]}"
             )
 
+        # Interpolate in the incoming dtype first, then cast to float32 on the
+        # small output.  This avoids materialising a large float32 copy of
+        # soft_masks before downsampling (e.g. would be 9.77 GiB for
+        # (32, 200, 640, 640) float32).
         resized_masks = F.interpolate(
-            soft_masks.float(),
+            soft_masks,
             size=(grid_h, grid_w),
             mode="bilinear",
             align_corners=False,
-        )
+        ).float()
 
         selected = self.select_topk_queries(
             soft_masks=resized_masks,

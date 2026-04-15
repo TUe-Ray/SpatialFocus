@@ -267,18 +267,19 @@ class EoMTExtractor(nn.Module):
         mask_logits = mask_logits_per_layer[-1]  # (B, num_q, H_grid, W_grid)
         class_logits = class_logits_per_layer[-1]  # (B, num_q, num_classes+1)
 
-        # Compute soft masks: interpolate logits to img_size, then sigmoid
-        H_img, W_img = self.img_size
-        mask_logits_upsampled = F.interpolate(
-            mask_logits.float(), size=(H_img, W_img), mode="bilinear", align_corners=False
-        )
-        soft_masks = torch.sigmoid(mask_logits_upsampled)
+        # Compute soft masks at backbone grid resolution.
+        # We intentionally do NOT upsample to img_size (e.g. 640×640) here:
+        # storing (B, 200, 640, 640) float32 tensors costs ~9.77 GiB which
+        # causes OOM during training.  All downstream consumers (MaskGuidedPooler,
+        # Selective3DGate) resize to their own target resolution anyway.
+        H_grid, W_grid = mask_logits.shape[-2], mask_logits.shape[-1]
+        soft_masks = torch.sigmoid(mask_logits.float())  # (B, Q, H_grid, W_grid)
 
         return {
             "mask_logits": mask_logits,
             "soft_masks": soft_masks,
             "class_logits": class_logits,
-            "mask_resolution": (H_img, W_img),
+            "mask_resolution": (H_grid, W_grid),
             "query_count": self.num_q,
             "frame_meta": frame_meta,
         }
