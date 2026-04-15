@@ -3,7 +3,8 @@ import math
 import os
 from pathlib import Path
 from datetime import timedelta
-from typing import List, Optional, Tuple, Union
+from types import SimpleNamespace
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -11,13 +12,14 @@ from accelerate import Accelerator, DistributedType, InitProcessGroupKwargs
 from accelerate.state import AcceleratorState
 from decord import VideoReader, cpu
 from loguru import logger as eval_logger
+from PIL import Image
 from tqdm import tqdm
 from transformers import AutoConfig
 
 from lmms_eval.api.instance import Instance
 from lmms_eval.api.model import lmms
 from lmms_eval.api.registry import register_model
-from lmms_eval.models.model_utils.load_video import read_video_pyav
+from lmms_eval.models.model_utils.load_video import read_video_pyav, read_video_pyav_with_indices
 
 import sys
 _default_repo_root = str(Path(__file__).resolve().parents[3])
@@ -88,6 +90,19 @@ class Vlm3r(lmms):
         model_name: str = None,
         model_base: str = None,
         zero_spatial_features: Union[bool, str] = False,
+        fusion_block: Optional[str] = None,
+        mm_eomt_selective_3d_enable: Optional[Union[bool, str]] = None,
+        mm_eomt_selector_mode: Optional[str] = None,
+        mm_eomt_selector_score_threshold: Optional[Union[float, str]] = None,
+        mm_eomt_selector_topk: Optional[Union[int, str]] = None,
+        mm_eomt_selective_3d_merge_mode: Optional[str] = None,
+        mm_eomt_selective_3d_gate_type: Optional[str] = None,
+        mm_eomt_selective_3d_floor: Optional[Union[float, str]] = None,
+        mm_eomt_selective_3d_empty_fallback: Optional[str] = None,
+        eomt_config_path: Optional[str] = None,
+        eomt_ckpt_path: Optional[str] = None,
+        eomt_experiment_config_path: Optional[str] = None,
+        eomt_experiment_mode: Optional[str] = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -126,6 +141,22 @@ class Vlm3r(lmms):
             self.zero_spatial_features = zero_spatial_features.lower() in {"1", "true", "yes", "y", "on"}
         else:
             self.zero_spatial_features = bool(zero_spatial_features)
+        self.eomt_experiment_summary = None
+        self._eval_model_args = self._resolve_eval_model_args(
+            fusion_block=fusion_block,
+            mm_eomt_selective_3d_enable=mm_eomt_selective_3d_enable,
+            mm_eomt_selector_mode=mm_eomt_selector_mode,
+            mm_eomt_selector_score_threshold=mm_eomt_selector_score_threshold,
+            mm_eomt_selector_topk=mm_eomt_selector_topk,
+            mm_eomt_selective_3d_merge_mode=mm_eomt_selective_3d_merge_mode,
+            mm_eomt_selective_3d_gate_type=mm_eomt_selective_3d_gate_type,
+            mm_eomt_selective_3d_floor=mm_eomt_selective_3d_floor,
+            mm_eomt_selective_3d_empty_fallback=mm_eomt_selective_3d_empty_fallback,
+            eomt_config_path=eomt_config_path,
+            eomt_ckpt_path=eomt_ckpt_path,
+            eomt_experiment_config_path=eomt_experiment_config_path,
+            eomt_experiment_mode=eomt_experiment_mode,
+        )
 
         if self.overwrite == True:
             overwrite_config = {}
@@ -138,6 +169,20 @@ class Vlm3r(lmms):
             overwrite_config["add_faster_video"] = False
             overwrite_config["delay_load"] = self.delay_load
             overwrite_config["zero_spatial_features"] = self.zero_spatial_features
+            for field_name in (
+                "fusion_block",
+                "mm_eomt_selective_3d_enable",
+                "mm_eomt_selector_mode",
+                "mm_eomt_selector_score_threshold",
+                "mm_eomt_selector_topk",
+                "mm_eomt_selective_3d_merge_mode",
+                "mm_eomt_selective_3d_gate_type",
+                "mm_eomt_selective_3d_floor",
+                "mm_eomt_selective_3d_empty_fallback",
+            ):
+                field_value = getattr(self._eval_model_args, field_name, None)
+                if field_value is not None:
+                    overwrite_config[field_name] = field_value
             # overwrite_config["attn_implementation"] = attn_implementation
 
             cfg_pretrained = AutoConfig.from_pretrained(self.pretrained)
@@ -216,6 +261,7 @@ class Vlm3r(lmms):
             )
 
         self._config = self._model.config
+        self._apply_eval_model_config()
         setattr(self._config, "zero_spatial_features", self.zero_spatial_features)
         resolved_attn_implementation = getattr(self._config, "_attn_implementation", None)
         if resolved_attn_implementation is None:
@@ -265,6 +311,172 @@ class Vlm3r(lmms):
             self.model.to(self._device)
             self._rank = 0
             self._world_size = 1
+
+    @staticmethod
+    def _coerce_optional_bool(value):
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+    @staticmethod
+    def _coerce_optional_int(value):
+        if value is None or value == "":
+            return None
+        return int(value)
+
+    @staticmethod
+    def _coerce_optional_float(value):
+        if value is None or value == "":
+            return None
+        return float(value)
+
+    @staticmethod
+    def _resolve_optional_path(path_value):
+        if path_value is None or path_value == "":
+            return None
+        expanded = os.path.expanduser(str(path_value))
+        if os.path.isabs(expanded):
+            return expanded
+        return os.path.abspath(os.path.join(_repo_root, expanded))
+
+    def _resolve_eval_model_args(
+        self,
+        fusion_block,
+        mm_eomt_selective_3d_enable,
+        mm_eomt_selector_mode,
+        mm_eomt_selector_score_threshold,
+        mm_eomt_selector_topk,
+        mm_eomt_selective_3d_merge_mode,
+        mm_eomt_selective_3d_gate_type,
+        mm_eomt_selective_3d_floor,
+        mm_eomt_selective_3d_empty_fallback,
+        eomt_config_path,
+        eomt_ckpt_path,
+        eomt_experiment_config_path,
+        eomt_experiment_mode,
+    ):
+        model_args = SimpleNamespace(
+            fusion_block=fusion_block or None,
+            mm_eomt_selective_3d_enable=self._coerce_optional_bool(mm_eomt_selective_3d_enable),
+            mm_eomt_selector_mode=mm_eomt_selector_mode or None,
+            mm_eomt_selector_score_threshold=self._coerce_optional_float(mm_eomt_selector_score_threshold),
+            mm_eomt_selector_topk=self._coerce_optional_int(mm_eomt_selector_topk),
+            mm_eomt_selective_3d_merge_mode=mm_eomt_selective_3d_merge_mode or None,
+            mm_eomt_selective_3d_gate_type=mm_eomt_selective_3d_gate_type or None,
+            mm_eomt_selective_3d_floor=self._coerce_optional_float(mm_eomt_selective_3d_floor),
+            mm_eomt_selective_3d_empty_fallback=mm_eomt_selective_3d_empty_fallback or None,
+            eomt_config_path=self._resolve_optional_path(eomt_config_path),
+            eomt_ckpt_path=self._resolve_optional_path(eomt_ckpt_path),
+            eomt_experiment_config_path=self._resolve_optional_path(eomt_experiment_config_path),
+            eomt_experiment_mode=eomt_experiment_mode or None,
+        )
+
+        if model_args.eomt_experiment_config_path or model_args.eomt_experiment_mode:
+            from llava.train.eomt_experiment_resolver import resolve_eomt_experiment_config
+
+            self.eomt_experiment_summary = resolve_eomt_experiment_config(model_args=model_args, raw_argv=[])
+
+        selective_3d_enabled = bool(getattr(model_args, "mm_eomt_selective_3d_enable", False))
+        round1_selective_family = bool(
+            self.eomt_experiment_summary
+            and self.eomt_experiment_summary.get("experiment_family") == "eomt_selective_3d_round1"
+        )
+        if selective_3d_enabled and (
+            getattr(model_args, "eomt_config_path", None) is None
+            or getattr(model_args, "eomt_ckpt_path", None) is None
+        ):
+            raise ValueError(
+                "Selective 3D lmms-eval requires both eomt_config_path and eomt_ckpt_path so the EoMT side branch can populate _last_eomt_outputs."
+            )
+
+        if round1_selective_family or selective_3d_enabled:
+            if getattr(model_args, "fusion_block", None) is None:
+                model_args.fusion_block = "svf_patch_only"
+            elif model_args.fusion_block != "svf_patch_only":
+                raise ValueError(
+                    "Round-1 selective 3D lmms-eval only supports fusion_block='svf_patch_only'. "
+                    f"Got '{model_args.fusion_block}'."
+                )
+
+        return model_args
+
+    def _apply_eval_model_config(self):
+        tracked_fields = (
+            "fusion_block",
+            "mm_eomt_selective_3d_enable",
+            "mm_eomt_selector_mode",
+            "mm_eomt_selector_score_threshold",
+            "mm_eomt_selector_topk",
+            "mm_eomt_selective_3d_merge_mode",
+            "mm_eomt_selective_3d_gate_type",
+            "mm_eomt_selective_3d_floor",
+            "mm_eomt_selective_3d_empty_fallback",
+            "eomt_config_path",
+            "eomt_ckpt_path",
+            "eomt_experiment_config_path",
+            "eomt_experiment_mode",
+        )
+        for field_name in tracked_fields:
+            field_value = getattr(self._eval_model_args, field_name, None)
+            if field_value is not None:
+                setattr(self._config, field_name, field_value)
+
+        if getattr(self._eval_model_args, "eomt_config_path", None) is not None:
+            eomt_dtype = next(self.model.parameters()).dtype
+            self.model.get_model().initialize_eomt_extractor(
+                model_args=self._eval_model_args,
+                device=self.device,
+                dtype=eomt_dtype,
+            )
+            eomt_extractor = self.model.get_model().get_eomt_extractor()
+            if eomt_extractor is not None:
+                eomt_extractor.to(dtype=eomt_dtype, device=self.device)
+
+    @staticmethod
+    def _infer_sample_id(doc: Dict[str, Any], doc_id: Any):
+        for key in ("id", "sample_id", "scene_name", "video_path"):
+            value = doc.get(key)
+            if value not in (None, ""):
+                return value
+        return doc_id
+
+    def _load_video_with_frame_indices(self, video_path):
+        if self.video_decode_backend == "decord":
+            vr = VideoReader(video_path, ctx=cpu(0))
+            total_frame_num = len(vr)
+            frame_indices = np.linspace(0, total_frame_num - 1, self.max_frames_num, dtype=int).tolist()
+            video = vr.get_batch(frame_indices).asnumpy()
+            return video, frame_indices
+        if self.video_decode_backend == "pyav":
+            return read_video_pyav_with_indices(video_path, num_frm=self.max_frames_num)
+        raise ValueError(f"Unsupported video_decode_backend: {self.video_decode_backend}")
+
+    def _prepare_video_inputs(self, video_path: str, doc: Dict[str, Any], doc_id: Any):
+        video_np, frame_indices = self._load_video_with_frame_indices(video_path)
+        processed_video = self._image_processor.preprocess(video_np, return_tensors="pt")["pixel_values"]
+        processed_video = processed_video.to(device=self.device, dtype=torch.float16)
+
+        source_path = os.path.abspath(video_path)
+        sample_id = self._infer_sample_id(doc, doc_id)
+        eomt_images = []
+        eomt_meta = []
+        for frame_offset, frame in enumerate(video_np):
+            pil_frame = Image.fromarray(frame).convert("RGB")
+            eomt_images.append(pil_frame.copy())
+            eomt_meta.append(
+                {
+                    "sample_id": sample_id,
+                    "source_path": source_path,
+                    "frame_index": int(frame_indices[frame_offset]),
+                    "frame_path": f"{source_path}#frame={int(frame_indices[frame_offset])}",
+                    "original_size": (pil_frame.size[0], pil_frame.size[1]),
+                    "modality": "video",
+                }
+            )
+
+        return processed_video, eomt_images, eomt_meta
 
     @property
     def config(self):
@@ -343,18 +555,22 @@ class Vlm3r(lmms):
         pbar = tqdm(total=len(requests), disable=(self.rank != 0), desc="Model Responding")
 
         for contexts, doc_to_target, doc_to_visual, doc_id, task, split in [reg.args for reg in requests]:
+            doc = self.task_dict[task][split][doc_id]
             # encode, pad, and truncate contexts for this batch
             if type(doc_to_target) == str:
                 continuation = doc_to_target
             else:
-                continuation = doc_to_target(self.task_dict[task][split][doc_id])
-            visuals = [doc_to_visual(self.task_dict[task][split][doc_id])]
+                continuation = doc_to_target(doc)
+            visuals = [doc_to_visual(doc)]
             visuals = self.flatten(visuals)
             videos = []
+            eomt_images = []
+            eomt_meta = []
             for visual in visuals:
-                video = self.load_video(visual, self.max_frames_num)
-                video = self._image_processor.preprocess(video, return_tensors="pt")["pixel_values"].half().cuda()
+                video, raw_frames, frame_meta = self._prepare_video_inputs(visual, doc, doc_id)
                 videos.append(video)
+                eomt_images.append(raw_frames)
+                eomt_meta.append(frame_meta)
 
             qs = contexts
             if self.model.config.mm_use_im_start_end:
@@ -374,15 +590,22 @@ class Vlm3r(lmms):
             conv.append_message(conv.roles[1], continuation)
             prompt = conv.get_prompt()
 
-            input_ids = tokenizer_image_token(prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt").unsqueeze(0).cuda()
-            attention_masks = input_ids.ne(self.tokenizer.pad_token_id).long().cuda()
+            input_ids = tokenizer_image_token(prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt").unsqueeze(0).to(self.device)
+            attention_masks = input_ids.ne(self.tokenizer.pad_token_id).long().to(self.device)
 
             labels = input_ids.clone()
             # Context part no need to calculate for loss
             labels[0, : contxt_id.shape[1]] = -100
 
             with torch.inference_mode():
-                outputs = self.model(input_ids=input_ids, labels=labels, images=videos, modalities="video")
+                outputs = self.model(
+                    input_ids=input_ids,
+                    labels=labels,
+                    images=videos,
+                    modalities=["video" for _ in videos],
+                    eomt_images=eomt_images,
+                    eomt_meta=eomt_meta,
+                )
 
             loss = outputs["loss"]
             # loss = torch.exp(loss)
@@ -408,20 +631,20 @@ class Vlm3r(lmms):
         pbar = tqdm(total=len(requests), disable=(self.rank != 0), desc="Model Responding")
 
         for contexts, gen_kwargs, doc_to_visual, doc_id, task, split in [reg.args for reg in requests]:
+            doc = self.task_dict[task][split][doc_id]
             # encode, pad, and truncate contexts for this batch
-            visuals = [doc_to_visual(self.task_dict[task][split][doc_id])]
+            visuals = [doc_to_visual(doc)]
             if visuals != [None]:
                 visuals = self.flatten(visuals)
                 videos = []
+                eomt_images = []
+                eomt_meta = []
                 try:
                     for visual in visuals:
-                        if self.video_decode_backend == "decord":
-                            video = self.load_video(visual, self.max_frames_num)
-                        elif self.video_decode_backend == "pyav":
-                            video = read_video_pyav(visual, num_frm=self.max_frames_num)
-                        # video = self.load_video(visual, self.max_frames_num)
-                        video = self._image_processor.preprocess(video, return_tensors="pt")["pixel_values"].half().cuda()
+                        video, raw_frames, frame_meta = self._prepare_video_inputs(visual, doc, doc_id)
                         videos.append(video)
+                        eomt_images.append(raw_frames)
+                        eomt_meta.append(frame_meta)
                 except Exception as e:
                     eval_logger.info(f"{e}")
                     eval_logger.info(f"Video {visuals} can not load, check the source")
@@ -437,6 +660,8 @@ class Vlm3r(lmms):
                     qs = DEFAULT_IMAGE_TOKEN * len(videos) + "\n" + qs
             else:
                 videos = None
+                eomt_images = None
+                eomt_meta = None
                 qs = contexts
 
             # This is much safer for llama3, as we now have some object type in it
@@ -449,11 +674,11 @@ class Vlm3r(lmms):
             conv.append_message(conv.roles[1], None)
             prompt = conv.get_prompt()
 
-            input_ids = tokenizer_image_token(prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt").unsqueeze(0).cuda()
+            input_ids = tokenizer_image_token(prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt").unsqueeze(0).to(self.device)
             pad_token_ids = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
             if "llama_3" in self.conv_template:
                 pad_token_ids = 0  # lmms-lab/llama3-llava-8b is trained on this pad token id. You may need to customize this for other models.
-            attention_masks = input_ids.ne(pad_token_ids).long().cuda()
+            attention_masks = input_ids.ne(pad_token_ids).long().to(self.device)
 
             stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
             keywords = [stop_str]
@@ -475,6 +700,8 @@ class Vlm3r(lmms):
                     images=videos,
                     attention_mask=attention_masks,
                     modalities=["video" for _ in videos] if videos is not None else None,
+                    eomt_images=eomt_images,
+                    eomt_meta=eomt_meta,
                     use_cache=self.use_cache,
                     stopping_criteria=[stopping_criteria],
                     do_sample=True if gen_kwargs["temperature"] > 0 else False,
