@@ -28,7 +28,15 @@ def record_video_length_packet(container):
     return frames
 
 
-def read_video_pyav(video_path, num_frm=8):
+def sample_frame_indices(total_frames, num_frm=8):
+    if total_frames <= 0:
+        raise ValueError(f"Video contains no decodable frames: total_frames={total_frames}")
+
+    sampled_frm = min(total_frames, num_frm)
+    return np.linspace(0, total_frames - 1, sampled_frm, dtype=int).astype(int)
+
+
+def read_video_pyav_with_indices(video_path, num_frm=8):
     container = av.open(video_path)
 
     if "webm" not in video_path and "mkv" not in video_path:
@@ -36,36 +44,25 @@ def read_video_pyav(video_path, num_frm=8):
         try:
             container = av.open(video_path)
             total_frames = container.streams.video[0].frames
-            sampled_frm = min(total_frames, num_frm)
-            indices = np.linspace(0, total_frames - 1, sampled_frm, dtype=int)
-
-            # Append the last frame index if not already included
-            if total_frames - 1 not in indices:
-                indices = np.append(indices, total_frames - 1)
-
+            indices = sample_frame_indices(total_frames, num_frm)
             frames = record_video_length_stream(container, indices)
-        except:
+        except Exception:
             container = av.open(video_path)
             frames = record_video_length_packet(container)
             total_frames = len(frames)
-            sampled_frm = min(total_frames, num_frm)
-            indices = np.linspace(0, total_frames - 1, sampled_frm, dtype=int)
-
-            # Append the last frame index if not already included
-            if total_frames - 1 not in indices:
-                indices = np.append(indices, total_frames - 1)
-
+            indices = sample_frame_indices(total_frames, num_frm)
             frames = [frames[i] for i in indices]
     else:
         container = av.open(video_path)
         frames = record_video_length_packet(container)
         total_frames = len(frames)
-        sampled_frm = min(total_frames, num_frm)
-        indices = np.linspace(0, total_frames - 1, sampled_frm, dtype=int)
-
-        # Append the last frame index if not already included
-        if total_frames - 1 not in indices:
-            indices = np.append(indices, total_frames - 1)
-
+        indices = sample_frame_indices(total_frames, num_frm)
         frames = [frames[i] for i in indices]
-    return np.stack([x.to_ndarray(format="rgb24") for x in frames])
+
+    video = np.stack([x.to_ndarray(format="rgb24") for x in frames])
+    return video, indices.tolist()
+
+
+def read_video_pyav(video_path, num_frm=8):
+    video, _ = read_video_pyav_with_indices(video_path, num_frm=num_frm)
+    return video
