@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=SMOKE_eomt_selective_3d
-#SBATCH --nodes=1
+#SBATCH --job-name=eomt_selective_soft_with_floor
+#SBATCH --nodes=4
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
 #SBATCH --cpus-per-task=32
-#SBATCH --time=00:30:00
+#SBATCH --time=08:30:00
 #SBATCH --partition=boost_usr_prod  
-#SBATCH --qos=boost_qos_dbg  # normal/boost_qos_dbg
+#SBATCH --qos=normal  # normal/boost_qos_dbg
 #SBATCH --output=logs/train/%x_%j.out
 #SBATCH --error=logs/train/%x_%j.err
 #SBATCH --mem=0
@@ -17,7 +17,7 @@ SUFFIX="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
 # ============================================================
 # User-defined variables: General
 # ============================================================
-NOTE="Smoke test: eomt selective_3d_round1 integration, 25% data, 1 epoch"
+NOTE="eomt selective_3d_round1 selective_soft_with_floor integration, 25% data, 1 epoch"
 CONDA_ENV_NAME="vlm3rEOMT"
 # ============================================================
 # User-defined variables: EoMT round-1 comparison
@@ -27,7 +27,7 @@ CONDA_ENV_NAME="vlm3rEOMT"
 # - selective_soft
 # - selective_soft_with_floor
 # - selective_soft_with_floor_zero_fallback
-EOMT_EXPERIMENT_MODE="baseline"
+EOMT_EXPERIMENT_MODE="selective_soft_with_floor"
 EOMT_DEBUG_MODE="${EOMT_DEBUG_MODE:-False}"
 EOMT_DEBUG_MAX_SAMPLES="${EOMT_DEBUG_MAX_SAMPLES:-4}"
 EOMT_DEBUG_TOP_K_MASKS="${EOMT_DEBUG_TOP_K_MASKS:-5}"
