@@ -139,6 +139,8 @@ class LlavaMetaModel:
                 return "SvfCatFeatFusion"
             if fusion_block_type == "svf_pose_prepend":
                 return "SvfPosePrependFusion"
+            if fusion_block_type == "svf_pose_geometry_bridge_reverse":
+                return "ReverseGeometryBridgeFusion"
             if fusion_block_type == "cross_attention_with_mlp":
                 return "CrossAttentionFusionWithMLP"
             if fusion_block_type == "mlp_after_clip_proj":
@@ -1138,6 +1140,16 @@ class LlavaMetaForCausalLM(ABC):
                     image_features, attn_weights = self.get_model().get_fusion_block()(
                         image_features,
                         camera_pose.to(self.dtype),
+                        patch_tokens.to(self.dtype),
+                    )
+                    image_features = self.get_model().mm_projector(image_features)
+
+                elif fusion_block_type == 'svf_pose_geometry_bridge_reverse':
+                    # Comparison 2b: patch tokens (Q=3D) attend to camera tokens (KV),
+                    # then 2D tokens attend to those geometry-aware tokens.
+                    image_features, attn_weights = self.get_model().get_fusion_block()(
+                        image_features,
+                        camera_tokens.to(self.dtype),
                         patch_tokens.to(self.dtype),
                     )
                     image_features = self.get_model().mm_projector(image_features)

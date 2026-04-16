@@ -171,14 +171,17 @@ class GeometryBridgeFusion(nn.Module):
         }
         return fused_features, attn_weights
 
-
 class ReverseGeometryBridgeFusion(nn.Module):
+    """Reverse of GeometryBridgeFusion: Stage 1 has patch_tokens query camera_tokens
+    (i.e. Q=3D patch features, KV=camera tokens), then Stage 2 has 2D tokens query
+    the resulting geometry-aware tokens.
+    """
     def __init__(self, d_clip, d_spatial_encoder, d_attn, num_heads, dropout_rate=0.1, d_camera_encoder=None):
         super(ReverseGeometryBridgeFusion, self).__init__()
 
         _d_cam = d_camera_encoder or d_spatial_encoder
 
-        # Stage 1: spatial patch tokens query camera tokens.
+        # Stage 1: patch tokens (Q) attend to camera tokens (KV).
         self.patch_norm = nn.LayerNorm(d_spatial_encoder)
         self.camera_norm = nn.LayerNorm(_d_cam)
         self.patch_query_proj = nn.Linear(d_spatial_encoder, d_attn)
@@ -230,6 +233,7 @@ class ReverseGeometryBridgeFusion(nn.Module):
             "clip_to_geometry": clip_geometry_attn,
         }
         return fused_features, attn_weights
+
 
 class SvfCatFeatFusion(nn.Module):
     """
@@ -689,5 +693,17 @@ def build_multimodal_fusion_block(config, delay_load=False, **kwargs):
             num_heads=18,
             dropout_rate=0.1,
             d_pose=12,
+        )
+    elif fusion_block_type == "svf_pose_geometry_bridge_reverse":
+        # Comparison 2b: reverse bridge — patch tokens (Q=3D) attend to camera tokens (KV),
+        # then 2D tokens attend to those geometry-aware tokens.
+        _d_cam = d_camera_encoder or 512  # camera_decoder out_dim
+        return ReverseGeometryBridgeFusion(
+            d_clip=d_clip,
+            d_spatial_encoder=d_spatial_encoder,
+            d_attn=d_attn,
+            num_heads=18,
+            dropout_rate=0.1,
+            d_camera_encoder=_d_cam,
         )
     raise ValueError(f"Unknown fusion block type: {fusion_block_type}")
