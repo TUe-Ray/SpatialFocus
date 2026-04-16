@@ -298,7 +298,9 @@ class MaskGuidedPooler(nn.Module):
 
         grid_tokens_flat = grid_tokens.view(batch_size, grid_h * grid_w, feat_dim)
         weights_flat = weights.view(batch_size, k, grid_h * grid_w)
-        pooled_tokens = torch.einsum("bkh,bhd->bkd", weights_flat, grid_tokens_flat)
+        # weights_flat is float32 (from mask normalisation above); cast to match
+        # visual features dtype to avoid dtype mismatch in mixed-precision training.
+        pooled_tokens = torch.einsum("bkh,bhd->bkd", weights_flat.to(grid_tokens_flat.dtype), grid_tokens_flat)
 
         return {
             "pooled_tokens": pooled_tokens,
