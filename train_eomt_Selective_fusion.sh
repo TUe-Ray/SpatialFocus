@@ -429,10 +429,15 @@ declare -A MODEL_ARGS=(
     [eomt_ckpt_path]="$EOMT_CKPT_PATH"
     [eomt_experiment_config_path]="$EOMT_EXPERIMENT_CONFIG_PATH"
     [eomt_experiment_mode]="$EOMT_EXPERIMENT_MODE"
-    [eomt_debug_mode]="$EOMT_DEBUG_MODE"
-    [eomt_debug_max_samples]="$EOMT_DEBUG_MAX_SAMPLES"
-    [eomt_debug_top_k_masks]="$EOMT_DEBUG_TOP_K_MASKS"
 )
+
+# Only pass debug CLI flags when debug mode is explicitly enabled.
+# This keeps smoke tests compatible across parser variants.
+if [[ "$EOMT_DEBUG_MODE" == "True" ]]; then
+    MODEL_ARGS[eomt_debug_mode]="$EOMT_DEBUG_MODE"
+    MODEL_ARGS[eomt_debug_max_samples]="$EOMT_DEBUG_MAX_SAMPLES"
+    MODEL_ARGS[eomt_debug_top_k_masks]="$EOMT_DEBUG_TOP_K_MASKS"
+fi
 
 declare -A DATA_ARGS=(
     [data_path]="$DATA_PATH_YAML"

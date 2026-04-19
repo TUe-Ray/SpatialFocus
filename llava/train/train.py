@@ -2320,11 +2320,44 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
     return model
 
 
+def _strip_legacy_eomt_debug_args(argv):
+    """Remove legacy EoMT debug CLI args for compatibility with older launches."""
+    legacy_flags = {
+        "--eomt_debug_mode",
+        "--eomt_debug_max_samples",
+        "--eomt_debug_top_k_masks",
+    }
+    filtered = []
+    idx = 0
+    while idx < len(argv):
+        arg = argv[idx]
+        if arg in legacy_flags:
+            idx += 1
+            if idx < len(argv) and not str(argv[idx]).startswith("--"):
+                idx += 1
+            continue
+        filtered.append(arg)
+        idx += 1
+    return filtered
+
+
 def train(attn_implementation=None):
     global local_rank
 
     parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
-    model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    try:
+        model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    except ValueError as exc:
+        message = str(exc)
+        if "Some specified arguments are not used by the HfArgumentParser" in message and any(
+            flag in message for flag in ["--eomt_debug_mode", "--eomt_debug_max_samples", "--eomt_debug_top_k_masks"]
+        ):
+            print("[WARN] Ignoring legacy EoMT debug CLI args for compatibility:", message)
+            model_args, data_args, training_args = parser.parse_args_into_dataclasses(
+                _strip_legacy_eomt_debug_args(sys.argv[1:])
+            )
+        else:
+            raise
     eomt_experiment_summary = resolve_eomt_experiment_config(model_args=model_args, raw_argv=sys.argv[1:])
     eomt_experiment_snapshot_path = write_eomt_experiment_snapshot(
         summary=eomt_experiment_summary,
