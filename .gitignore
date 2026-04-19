@@ -88,3 +88,5 @@ VLM-3R-DATA/
 # files
 train_4bvggt.sh
 settings.local.json
+.codex-work/
+.offline_runtime/

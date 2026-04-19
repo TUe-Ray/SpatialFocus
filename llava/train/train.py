@@ -248,6 +248,7 @@ class DataArguments:
     image_split_resolution: Optional[int] = field(default=None)
 
     video_folder: Optional[str] = field(default=None)
+    spatial_features_folder: Optional[str] = field(default=None, metadata={"help": "Override base path for pre-extracted spatial feature .pt files. Defaults to video_folder if not set."})
     video_fps: Optional[int] = field(default=1)
     frames_upbound: Optional[int] = field(default=0)
     add_time_instruction: Optional[bool] = field(default=False)
@@ -1802,8 +1803,8 @@ class LazySupervisedDataset(Dataset):
 
         # add spatial features
         if "video" in self.list_data_dict[i]:
-            video_folder = self.data_args.video_folder
-            spatial_features_path = os.path.join(video_folder, self.list_data_dict[i]['video'].replace('.mp4', '.pt').replace('videos', 'spatial_features'))
+            _sf_base = self.data_args.spatial_features_folder or self.data_args.video_folder
+            spatial_features_path = os.path.join(_sf_base, self.list_data_dict[i]['video'].replace('.mp4', '.pt').replace('videos', 'spatial_features'))
             if os.path.exists(spatial_features_path):
                 spatial_features = torch.load(spatial_features_path)
                 data_dict["spatial_features"] = spatial_features

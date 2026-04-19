@@ -7,7 +7,8 @@ import os
 from llava.utils import rank0_print
 from einops import rearrange
 import sys
-sys.path.append('CUT3R')
+_CUT3R_PATH = '/leonardo/home/userexternal/shuang00/VLM-3R_SN/CUT3R'
+sys.path.append(_CUT3R_PATH)
 from src.dust3r.model import ARCroco3DStereo
 import numpy as np
 
@@ -504,9 +505,7 @@ class Cut3rSpatialTower(nn.Module):
 
         self.is_loaded = False
 
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        vlm_3r_root = os.path.abspath(os.path.join(script_dir, '..', '..', '..'))
-        dynamic_weights_path = os.path.join(vlm_3r_root, 'CUT3R', 'src', 'cut3r_512_dpt_4_64.pth')
+        dynamic_weights_path = os.path.join(_CUT3R_PATH, 'src', 'cut3r_512_dpt_4_64.pth')
 
         self.config = Cut3rSpatialConfig(
             weights_path=dynamic_weights_path,

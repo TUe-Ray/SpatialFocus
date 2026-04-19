@@ -1,10 +1,10 @@
 #!/bin/bash
-#SBATCH --job-name=TrainVSI
-#SBATCH --nodes=4
+#SBATCH --job-name=Reproduction2
+#SBATCH --nodes=8
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
 #SBATCH --cpus-per-task=32
-#SBATCH --time=7:00:00
+#SBATCH --time=10:30:00
 #SBATCH --partition=boost_usr_prod  
 #SBATCH --qos=normal # normal/boost_qos_dbg/boost_qos_bprod/boost_qos_Iprod
 #SBATCH --output=logs/train/%x_%j.out
@@ -14,7 +14,7 @@
 #SBATCH --exclusive
 
 
-NOTE="Test run for VLM-3R 7B Qwen2 LoRA on VSI-Bench, pretrained by Journey9ni/vlm-3r-llava-qwen2-lora, model_base=lmms-lab/LLaVA-NeXT-Video-7B-Qwen2, conv_template=qwen_1_5, max_frames_num=32"
+NOTE="Reproduction run with 8 nodes, for 1 epoch, using LLaVA-NeXT-Video-7B-Qwen2 and SigLIP spatial features, with cross-attention fusion and LoRA tuning. This is a test run to verify the training pipeline and resource setup. No evaluation during training, and only 3 checkpoints will be saved for quick iteration."
 
 echo "-------- Note --------"
 echo "  note: $NOTE"
@@ -130,8 +130,8 @@ MID_RUN_NAME="llava_video_7b_qwen2_${SUFFIX}"
 OUTPUT_DIR="work_dirs_auto_eval/$MID_RUN_NAME"
 mkdir -p "$OUTPUT_DIR"
 
-LOCAL_MODEL_BASE="/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/LLaVA-NeXT-Video-7B-Qwen2"
-LOCAL_SIGLIP="/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/siglip-so400m-patch14-384"
+LOCAL_MODEL_BASE="/leonardo_work/EUHPC_D32_006/FAST/hf_models/VLM3R/LLaVA-NeXT-Video-7B-Qwen2"
+LOCAL_SIGLIP="/leonardo_work/EUHPC_D32_006/FAST/hf_models/VLM3R/siglip-so400m-patch14-384"
 
 if [[ ! -d "$LOCAL_MODEL_BASE" ]]; then
     echo "[ERROR] Local model base not found: $LOCAL_MODEL_BASE"
@@ -197,6 +197,7 @@ declare -A DATA_ARGS=(
     [data_path]="scripts/VLM_3R/vsibench_data.yaml"
     [image_folder]="/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r"
     [video_folder]="/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r"
+    [spatial_features_folder]="/leonardo_work/EUHPC_D32_006/FAST/train_data/vlm3r"
     [group_by_modality_length]="True"   #控制 dataloader sampler 是否按模態長度分組（
                                         #通常可減少 padding、讓 batch 更穩定）
 )
