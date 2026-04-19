@@ -4,10 +4,12 @@
   "shared": {
     "mm_eomt_selector_mode": "confidence_topk",
     "mm_eomt_selector_score_threshold": 0.35,
-    "mm_eomt_selector_topk": 4,
+    "mm_eomt_selector_topk": -1,
     "mm_eomt_selective_3d_merge_mode": "soft_max_union",
     "mm_eomt_selective_3d_floor": 0.1,
-    "mm_eomt_selective_3d_empty_fallback": "all_3d"
+    "mm_eomt_selective_3d_empty_fallback": "all_3d",
+    "eomt_smoke_test_enable": false,
+    "eomt_smoke_test_max_samples": 4
   },
   "modes": {
     "baseline": {

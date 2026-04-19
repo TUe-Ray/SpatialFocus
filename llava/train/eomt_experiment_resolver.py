@@ -48,6 +48,9 @@ ALLOWED_EOMT_OVERRIDE_KEYS = {
     "mm_eomt_selective_3d_gate_type",
     "mm_eomt_selective_3d_floor",
     "mm_eomt_selective_3d_empty_fallback",
+    "eomt_smoke_test_enable",
+    "eomt_smoke_test_max_samples",
+    "eomt_smoke_test_output_dir",
 }
 
 TRACKED_SUMMARY_KEYS = [
@@ -80,6 +83,9 @@ TRACKED_SUMMARY_KEYS = [
     "mm_eomt_selective_3d_gate_type",
     "mm_eomt_selective_3d_floor",
     "mm_eomt_selective_3d_empty_fallback",
+    "eomt_smoke_test_enable",
+    "eomt_smoke_test_max_samples",
+    "eomt_smoke_test_output_dir",
 ]
 
 

@@ -228,11 +228,14 @@ class ModelArguments:
     mm_eomt_external_socket_deduplicate: bool = field(default=True)
     mm_eomt_selective_3d_enable: bool = field(default=False)
     mm_eomt_selector_score_threshold: float = field(default=0.35)
-    mm_eomt_selector_topk: int = field(default=4)
+    mm_eomt_selector_topk: int = field(default=-1)  # -1 = disabled: keep all masks whose score >= threshold
     mm_eomt_selective_3d_merge_mode: str = field(default="soft_max_union")
     mm_eomt_selective_3d_gate_type: str = field(default="soft_with_floor")
     mm_eomt_selective_3d_floor: float = field(default=0.1)
     mm_eomt_selective_3d_empty_fallback: str = field(default="all_3d")
+    eomt_smoke_test_enable: bool = field(default=False, metadata={"help": "Enable selective-3D smoke test: save EoMT gate masks and overlays for the first N samples."})
+    eomt_smoke_test_max_samples: int = field(default=4, metadata={"help": "Number of samples to save in smoke-test mode."})
+    eomt_smoke_test_output_dir: Optional[str] = field(default=None, metadata={"help": "Directory for smoke-test outputs. Required when eomt_smoke_test_enable=True."})
 
     unfreeze_mm_vision_tower: bool = field(default=False)
     unfreeze_language_model: bool = field(default=False)
@@ -2599,6 +2602,9 @@ def train(attn_implementation=None):
         model.config.mm_eomt_selective_3d_gate_type = model_args.mm_eomt_selective_3d_gate_type
         model.config.mm_eomt_selective_3d_floor = model_args.mm_eomt_selective_3d_floor
         model.config.mm_eomt_selective_3d_empty_fallback = model_args.mm_eomt_selective_3d_empty_fallback
+        model.config.eomt_smoke_test_enable = model_args.eomt_smoke_test_enable
+        model.config.eomt_smoke_test_max_samples = model_args.eomt_smoke_test_max_samples
+        model.config.eomt_smoke_test_output_dir = model_args.eomt_smoke_test_output_dir
 
         ### Deciding train which part of the model
         if model_args.mm_tunable_parts is None:  # traditional way of deciding which part to train

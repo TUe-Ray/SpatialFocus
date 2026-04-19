@@ -38,7 +38,7 @@ class Selective3DConfig:
     enable: bool = False
     selector_mode: str = "confidence_topk"
     score_threshold: float = 0.35
-    topk: int = 4
+    topk: int = -1  # -1 = disabled: keep all masks whose score >= threshold
     merge_mode: str = "soft_max_union"
     gate_type: str = "soft_with_floor"
     floor: float = 0.1
@@ -54,6 +54,10 @@ class Selective3DConfig:
             raise ValueError(
                 f"Selective 3D round-1 only supports selector_mode='confidence_topk', got '{self.selector_mode}'. "
                 f"Valid: {sorted(self.VALID_SELECTOR_MODES)}"
+            )
+        if self.topk != -1 and self.topk < 1:
+            raise ValueError(
+                f"mm_eomt_selector_topk must be -1 (disabled, keep all above threshold) or >= 1, got {self.topk}."
             )
         if self.merge_mode not in self.VALID_MERGE_MODES:
             raise ValueError(
@@ -78,7 +82,7 @@ class Selective3DConfig:
             enable=bool(getattr(config, "mm_eomt_selective_3d_enable", False)),
             selector_mode=str(getattr(config, "mm_eomt_selector_mode", "confidence_topk")),
             score_threshold=float(getattr(config, "mm_eomt_selector_score_threshold", 0.35)),
-            topk=int(getattr(config, "mm_eomt_selector_topk", 4)),
+            topk=int(getattr(config, "mm_eomt_selector_topk", -1)),
             merge_mode=str(getattr(config, "mm_eomt_selective_3d_merge_mode", "soft_max_union")),
             gate_type=str(getattr(config, "mm_eomt_selective_3d_gate_type", "soft_with_floor")),
             floor=float(getattr(config, "mm_eomt_selective_3d_floor", 0.1)),
@@ -96,8 +100,10 @@ class SelectiveGateDebugInfo:
 
     num_masks_total: int = 0
     num_masks_after_threshold: int = 0
+    topk_disabled: bool = False
     num_masks_after_topk: int = 0
     selected_scores: List[float] = field(default_factory=list)
+    selected_query_indices: List[int] = field(default_factory=list)
     used_fallback: bool = False
     fallback_mode: str = ""
     fallback_reason: str = ""
@@ -107,13 +113,14 @@ class SelectiveGateDebugInfo:
 
     def log(self, prefix: str = "") -> None:
         tag = f"[Selective3DGate] {prefix}" if prefix else "[Selective3DGate]"
+        topk_msg = "disabled(all_above_thresh)" if self.topk_disabled else f"applied({self.num_masks_after_topk})"
         logger.info(
-            "%s queries: total=%d, after_thresh=%d, after_topk=%d, "
+            "%s queries: total=%d, after_thresh=%d, topk=%s, "
             "foreground_scores=%s, fallback=%s(%s), reason=%s, gate_stats=(min=%.4f, max=%.4f, mean=%.4f)",
             tag,
             self.num_masks_total,
             self.num_masks_after_threshold,
-            self.num_masks_after_topk,
+            topk_msg,
             [f"{s:.4f}" for s in self.selected_scores],
             self.used_fallback,
             self.fallback_mode,
@@ -133,16 +140,17 @@ def select_masks_by_confidence(
     threshold: float,
     topk: int,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Select query indices by foreground class confidence threshold then top-k.
+    """Select query indices by foreground class confidence threshold, then optionally top-k.
 
     Args:
         scores: (Q,) per-query foreground class confidence scores for a single frame.
         threshold: Minimum score to keep.
         topk: Maximum number of masks to keep after thresholding.
+            Pass -1 to disable top-k and keep all masks whose score >= threshold.
 
     Returns:
-        selected_indices: (K,) long tensor of selected query indices (K <= topk).
-        selected_scores: (K,) corresponding scores.
+        selected_indices: (K,) long tensor of selected query indices.
+        selected_scores: (K,) corresponding scores, sorted descending.
     """
     # 1) Threshold
     above_mask = scores >= threshold
@@ -156,7 +164,12 @@ def select_masks_by_confidence(
 
     above_scores = scores[above_indices]  # (M,)
 
-    # 2) Top-k (among survivors)
+    # 2) Top-k (among survivors) — only when topk != -1
+    if topk == -1:
+        # Disabled: return all above threshold, sorted by score descending.
+        sorted_order = torch.argsort(above_scores, descending=True)
+        return above_indices[sorted_order], above_scores[sorted_order]
+
     k = min(topk, above_indices.numel())
     topk_scores, topk_local_idx = torch.topk(above_scores, k, sorted=True)  # (K,)
     selected_indices = above_indices[topk_local_idx]
@@ -493,8 +506,10 @@ def apply_selective_3d_fusion(
         debug.num_masks_after_threshold = int(
             (frame_scores >= config.score_threshold).sum().item()
         )
+        debug.topk_disabled = (config.topk == -1)
         debug.num_masks_after_topk = sel_indices.numel()
         debug.selected_scores = sel_scores.tolist()
+        debug.selected_query_indices = sel_indices.tolist()
 
         if sel_indices.numel() == 0:
             gated_frame, fallback_debug = _apply_fallback_to_frame(
@@ -504,8 +519,10 @@ def apply_selective_3d_fusion(
                 num_queries=Q,
             )
             fallback_debug.num_masks_after_threshold = debug.num_masks_after_threshold
+            fallback_debug.topk_disabled = debug.topk_disabled
             fallback_debug.num_masks_after_topk = 0
             fallback_debug.selected_scores = debug.selected_scores
+            fallback_debug.selected_query_indices = []
             gated_frames.append(gated_frame)
             debug_infos.append(fallback_debug)
             continue

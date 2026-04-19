@@ -1124,6 +1124,216 @@ class LlavaMetaForCausalLM(ABC):
             self._eomt_debug_saved_count += 1
             rank0_print(f"[EOMT-DEBUG] saved debug artifacts to {record_path}")
 
+    def _maybe_dump_selective_3d_smoke_test(self, eomt_images, eomt_meta):
+        """Smoke-test dump for selective-3D gate masks (first N samples only).
+
+        Saves per-sample/per-frame:
+          - original image (PNG)
+          - binary/soft mask heatmap for each selected query (PNG)
+          - overlay (original + heatmap blend) for each selected query (PNG)
+          - combined overlay across all selected queries if more than one (PNG)
+          - metadata JSON with sample_id, source_path, frame_index, selected query
+            ids, scores, threshold, topk setting
+        """
+        if not bool(getattr(self.config, "eomt_smoke_test_enable", False)):
+            return
+        if not self._is_rank0_process():
+            return
+
+        max_samples = int(getattr(self.config, "eomt_smoke_test_max_samples", 4))
+        if max_samples <= 0 or eomt_images is None:
+            return
+
+        output_root = getattr(self.config, "eomt_smoke_test_output_dir", None)
+        if not output_root:
+            return
+
+        debug_infos = getattr(self, "_last_selective_3d_debug", None)
+        if not debug_infos:
+            return
+
+        eomt_outputs = getattr(self, "_last_eomt_outputs", None)
+        soft_masks = None
+        if isinstance(eomt_outputs, dict):
+            soft_masks = eomt_outputs.get("soft_masks", None)
+
+        if not hasattr(self, "_sel3d_smoke_saved_count"):
+            self._sel3d_smoke_saved_count = 0
+            self._sel3d_smoke_saved_keys = set()
+
+        if self._sel3d_smoke_saved_count >= max_samples:
+            return
+
+        os.makedirs(output_root, exist_ok=True)
+        manifest_path = os.path.join(output_root, "manifest.jsonl")
+
+        sample_frames_list = list(eomt_images)
+        if eomt_meta is None:
+            sample_meta_list = [None] * len(sample_frames_list)
+        else:
+            sample_meta_list = list(eomt_meta)
+            if len(sample_meta_list) < len(sample_frames_list):
+                sample_meta_list.extend([None] * (len(sample_frames_list) - len(sample_meta_list)))
+
+        # Compute global frame offsets (flat frame index across all samples in batch)
+        sample_frame_offsets = []
+        total = 0
+        for sf in sample_frames_list:
+            sample_frame_offsets.append(total)
+            total += len(sf) if sf is not None else 0
+
+        cfg_threshold = float(getattr(self.config, "mm_eomt_selector_score_threshold", 0.35))
+        cfg_topk = int(getattr(self.config, "mm_eomt_selector_topk", -1))
+        cfg_gate_type = str(getattr(self.config, "mm_eomt_selective_3d_gate_type", "soft_with_floor"))
+        cfg_floor = float(getattr(self.config, "mm_eomt_selective_3d_floor", 0.1))
+        cfg_fallback = str(getattr(self.config, "mm_eomt_selective_3d_empty_fallback", "all_3d"))
+
+        for sample_idx, sample_frames in enumerate(sample_frames_list):
+            if self._sel3d_smoke_saved_count >= max_samples:
+                break
+            if sample_frames is None or len(sample_frames) == 0:
+                continue
+
+            sample_frame_meta = []
+            if sample_idx < len(sample_meta_list) and sample_meta_list[sample_idx] is not None:
+                sample_frame_meta = list(sample_meta_list[sample_idx])
+
+            sample_key = self._build_eomt_debug_sample_key(sample_idx, sample_frames, sample_frame_meta)
+            if sample_key in self._sel3d_smoke_saved_keys:
+                continue
+
+            saved_idx = self._sel3d_smoke_saved_count
+            sample_dir = os.path.join(output_root, f"sample_{saved_idx:04d}")
+            os.makedirs(sample_dir, exist_ok=True)
+
+            frame_records = []
+            for frame_idx, pil_image in enumerate(sample_frames):
+                global_frame_idx = sample_frame_offsets[sample_idx] + frame_idx
+                frame_meta = {}
+                if frame_idx < len(sample_frame_meta) and isinstance(sample_frame_meta[frame_idx], dict):
+                    frame_meta = dict(sample_frame_meta[frame_idx])
+
+                original_path = os.path.join(sample_dir, f"frame_{frame_idx:02d}_original.png")
+                pil_image.save(original_path)
+
+                dbg = debug_infos[global_frame_idx] if global_frame_idx < len(debug_infos) else None
+
+                frame_record = {
+                    "frame_index": frame_idx,
+                    "global_frame_index": global_frame_idx,
+                    "sample_id": frame_meta.get("sample_id", ""),
+                    "source_path": frame_meta.get("source_path", ""),
+                    "original_size": frame_meta.get("original_size", None),
+                    "original_frame_path": original_path,
+                    "config": {
+                        "score_threshold": cfg_threshold,
+                        "topk": cfg_topk,
+                        "topk_disabled": cfg_topk == -1,
+                        "gate_type": cfg_gate_type,
+                        "floor": cfg_floor,
+                        "empty_fallback": cfg_fallback,
+                    },
+                    "selection": {
+                        "used_fallback": dbg.used_fallback if dbg else None,
+                        "fallback_mode": dbg.fallback_mode if dbg else None,
+                        "fallback_reason": dbg.fallback_reason if dbg else None,
+                        "num_queries_total": dbg.num_masks_total if dbg else None,
+                        "num_above_threshold": dbg.num_masks_after_threshold if dbg else None,
+                        "topk_disabled": dbg.topk_disabled if dbg else None,
+                        "num_selected": dbg.num_masks_after_topk if dbg else None,
+                        "selected_query_indices": dbg.selected_query_indices if dbg else [],
+                        "selected_scores": dbg.selected_scores if dbg else [],
+                    },
+                    "gate_stats": {
+                        "min": dbg.gate_min if dbg else None,
+                        "max": dbg.gate_max if dbg else None,
+                        "mean": dbg.gate_mean if dbg else None,
+                    } if dbg else None,
+                    "saved_masks": [],
+                }
+
+                # Save per-query mask and overlay for each selected query
+                if (
+                    dbg is not None
+                    and not dbg.used_fallback
+                    and len(dbg.selected_query_indices) > 0
+                    and soft_masks is not None
+                    and torch.is_tensor(soft_masks)
+                    and soft_masks.ndim == 4
+                    and global_frame_idx < soft_masks.shape[0]
+                ):
+                    combined_max_mask = None
+                    mask_records = []
+                    for rank_i, (q_idx, score) in enumerate(zip(dbg.selected_query_indices, dbg.selected_scores)):
+                        if q_idx < 0 or q_idx >= soft_masks.shape[1]:
+                            continue
+                        mask_tensor = soft_masks[global_frame_idx, q_idx]  # (H_m, W_m)
+                        mask_uint8, overlay = self._render_eomt_mask_artifacts(pil_image, mask_tensor)
+
+                        mask_path = os.path.join(
+                            sample_dir,
+                            f"frame_{frame_idx:02d}_rank{rank_i:02d}_q{q_idx:03d}_mask.png",
+                        )
+                        overlay_path = os.path.join(
+                            sample_dir,
+                            f"frame_{frame_idx:02d}_rank{rank_i:02d}_q{q_idx:03d}_overlay.png",
+                        )
+                        cv2.imwrite(mask_path, mask_uint8)
+                        cv2.imwrite(overlay_path, cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
+
+                        mask_records.append({
+                            "rank": rank_i,
+                            "query_index": q_idx,
+                            "score": score,
+                            "mask_path": mask_path,
+                            "overlay_path": overlay_path,
+                        })
+
+                        # Accumulate for combined overlay (pixelwise max, same as gate merge)
+                        mask_np_f = mask_tensor.detach().float().cpu().numpy()
+                        image_h, image_w = np.asarray(pil_image).shape[:2]
+                        mask_np_f = cv2.resize(mask_np_f, (image_w, image_h), interpolation=cv2.INTER_LINEAR)
+                        mask_np_f = np.clip(mask_np_f, 0.0, 1.0)
+                        combined_max_mask = mask_np_f if combined_max_mask is None else np.maximum(combined_max_mask, mask_np_f)
+
+                    frame_record["saved_masks"] = mask_records
+
+                    # Combined overlay (only when there are 2+ selected masks)
+                    if combined_max_mask is not None and len(mask_records) > 1:
+                        heatmap = (cm.get_cmap("jet")(combined_max_mask)[..., :3] * 255.0).astype(np.uint8)
+                        image_rgb = np.asarray(pil_image.convert("RGB"))
+                        combined_overlay = np.clip(
+                            0.55 * image_rgb.astype(np.float32) + 0.45 * heatmap.astype(np.float32),
+                            0.0, 255.0,
+                        ).astype(np.uint8)
+                        combined_path = os.path.join(sample_dir, f"frame_{frame_idx:02d}_combined_overlay.png")
+                        cv2.imwrite(combined_path, cv2.cvtColor(combined_overlay, cv2.COLOR_RGB2BGR))
+                        frame_record["combined_overlay_path"] = combined_path
+
+                frame_records.append(frame_record)
+
+            sample_record = {
+                "saved_sample_index": saved_idx,
+                "sample_key": sample_key,
+                "frames": frame_records,
+            }
+            record_path = os.path.join(sample_dir, "smoke_test_record.json")
+            with open(record_path, "w", encoding="utf-8") as handle:
+                json.dump(self._eomt_debug_to_jsonable(sample_record), handle, indent=2, sort_keys=True)
+                handle.write("\n")
+            with open(manifest_path, "a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(
+                        {"record_path": record_path, "sample_dir": sample_dir, "sample_key": sample_key},
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+
+            self._sel3d_smoke_saved_keys.add(sample_key)
+            self._sel3d_smoke_saved_count += 1
+            rank0_print(f"[SEL3D-SMOKE] saved smoke-test artifacts for sample {saved_idx} -> {record_path}")
+
     def _split_prefix_tokens_for_square_grid(self, image_feature):
         num_tokens = image_feature.shape[1]
         side = int(math.isqrt(num_tokens))
@@ -1801,6 +2011,7 @@ class LlavaMetaForCausalLM(ABC):
         self._last_eomt_pooled_outputs = self._compute_eomt_mask_pooled_side_output()
         self._last_eomt_object_block_outputs = self._compute_eomt_object_block_side_output()
         self._maybe_dump_eomt_debug_artifacts(eomt_images=eomt_images, eomt_meta=eomt_meta)
+        self._maybe_dump_selective_3d_smoke_test(eomt_images=eomt_images, eomt_meta=eomt_meta)
 
         # TODO: image start / end is not implemented here to support pretraining.
         if getattr(self.config, "tune_mm_mlp_adapter", False) and getattr(self.config, "mm_use_im_start_end", False):

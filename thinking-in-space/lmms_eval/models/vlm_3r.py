@@ -103,6 +103,9 @@ class Vlm3r(lmms):
         eomt_ckpt_path: Optional[str] = None,
         eomt_experiment_config_path: Optional[str] = None,
         eomt_experiment_mode: Optional[str] = None,
+        eomt_smoke_test_enable: Optional[Union[bool, str]] = None,
+        eomt_smoke_test_max_samples: Optional[Union[int, str]] = None,
+        eomt_smoke_test_output_dir: Optional[str] = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -156,6 +159,9 @@ class Vlm3r(lmms):
             eomt_ckpt_path=eomt_ckpt_path,
             eomt_experiment_config_path=eomt_experiment_config_path,
             eomt_experiment_mode=eomt_experiment_mode,
+            eomt_smoke_test_enable=eomt_smoke_test_enable,
+            eomt_smoke_test_max_samples=eomt_smoke_test_max_samples,
+            eomt_smoke_test_output_dir=eomt_smoke_test_output_dir,
         )
 
         if self.overwrite == True:
@@ -179,6 +185,9 @@ class Vlm3r(lmms):
                 "mm_eomt_selective_3d_gate_type",
                 "mm_eomt_selective_3d_floor",
                 "mm_eomt_selective_3d_empty_fallback",
+                "eomt_smoke_test_enable",
+                "eomt_smoke_test_max_samples",
+                "eomt_smoke_test_output_dir",
             ):
                 field_value = getattr(self._eval_model_args, field_name, None)
                 if field_value is not None:
@@ -356,6 +365,9 @@ class Vlm3r(lmms):
         eomt_ckpt_path,
         eomt_experiment_config_path,
         eomt_experiment_mode,
+        eomt_smoke_test_enable=None,
+        eomt_smoke_test_max_samples=None,
+        eomt_smoke_test_output_dir=None,
     ):
         model_args = SimpleNamespace(
             fusion_block=fusion_block or None,
@@ -371,6 +383,9 @@ class Vlm3r(lmms):
             eomt_ckpt_path=self._resolve_optional_path(eomt_ckpt_path),
             eomt_experiment_config_path=self._resolve_optional_path(eomt_experiment_config_path),
             eomt_experiment_mode=eomt_experiment_mode or None,
+            eomt_smoke_test_enable=self._coerce_optional_bool(eomt_smoke_test_enable),
+            eomt_smoke_test_max_samples=self._coerce_optional_int(eomt_smoke_test_max_samples),
+            eomt_smoke_test_output_dir=self._resolve_optional_path(eomt_smoke_test_output_dir),
         )
 
         if model_args.eomt_experiment_config_path or model_args.eomt_experiment_mode:
@@ -417,6 +432,9 @@ class Vlm3r(lmms):
             "eomt_ckpt_path",
             "eomt_experiment_config_path",
             "eomt_experiment_mode",
+            "eomt_smoke_test_enable",
+            "eomt_smoke_test_max_samples",
+            "eomt_smoke_test_output_dir",
         )
         for field_name in tracked_fields:
             field_value = getattr(self._eval_model_args, field_name, None)
