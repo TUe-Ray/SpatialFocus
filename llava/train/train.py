@@ -2637,7 +2637,10 @@ def train(attn_implementation=None):
         model.config.mm_eomt_selective_3d_empty_fallback = model_args.mm_eomt_selective_3d_empty_fallback
         model.config.eomt_smoke_test_enable = model_args.eomt_smoke_test_enable
         model.config.eomt_smoke_test_max_samples = model_args.eomt_smoke_test_max_samples
-        model.config.eomt_smoke_test_output_dir = model_args.eomt_smoke_test_output_dir
+        model.config.eomt_smoke_test_output_dir = (
+            model_args.eomt_smoke_test_output_dir
+            or os.path.join(training_args.output_dir, "eomt_smoke_test")
+        )
 
         ### Deciding train which part of the model
         if model_args.mm_tunable_parts is None:  # traditional way of deciding which part to train
