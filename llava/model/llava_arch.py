@@ -954,10 +954,6 @@ class LlavaMetaForCausalLM(ABC):
     def encode_images(self, images, spatial_features=None, point_maps=None):
         # vision features
         image_features = self.get_model().get_vision_tower()(images)
-        # Legacy debug cache only.
-        # EoMT pooling must use the explicit frame-aligned side cache built later in
-        # prepare_inputs_labels_for_multimodal(), not this early cache.
-        self._last_vision_grid_features = image_features.detach()
         # fuse with spatial features
         if self.get_model().get_spatial_tower() is not None and self.get_model().get_fusion_block() is not None:
             spatial_encoder_type = self.get_model().config.spatial_tower
