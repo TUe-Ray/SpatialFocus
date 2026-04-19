@@ -50,6 +50,10 @@ class Selective3DConfig:
     VALID_FALLBACKS = {"all_3d", "zero_3d"}
 
     def __post_init__(self):
+        # Backward compatibility: older experiment configs used "confidence".
+        if self.selector_mode == "confidence":
+            self.selector_mode = "confidence_topk"
+
         if self.selector_mode not in self.VALID_SELECTOR_MODES:
             raise ValueError(
                 f"Selective 3D round-1 only supports selector_mode='confidence_topk', got '{self.selector_mode}'. "
