@@ -691,7 +691,7 @@ class EVAVisionTransformer(nn.Module):
             if i == len(self.blocks) - 1:
                 continue
             if self.grad_checkpointing:
-                x = checkpoint(blk, x, (rel_pos_bias,))
+                x = checkpoint(blk, x, (rel_pos_bias,), use_reentrant=False)
             else:
                 x = blk(x, rel_pos_bias=rel_pos_bias)
 

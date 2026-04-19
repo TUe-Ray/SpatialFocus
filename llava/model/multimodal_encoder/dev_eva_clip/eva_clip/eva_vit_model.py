@@ -551,7 +551,7 @@ class EVAVisionTransformer(nn.Module):
         rel_pos_bias = self.rel_pos_bias() if self.rel_pos_bias is not None else None
         for blk in self.blocks:
             if self.grad_checkpointing:
-                x = checkpoint(blk, x, (rel_pos_bias,))
+                x = checkpoint(blk, x, (rel_pos_bias,), use_reentrant=False)
             else:
                 x = blk(x, rel_pos_bias=rel_pos_bias)
 

@@ -2308,6 +2308,33 @@ def train(attn_implementation=None):
 
     parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+
+    if training_args.gradient_checkpointing and hasattr(training_args, "gradient_checkpointing_kwargs") and training_args.gradient_checkpointing_kwargs is None:
+        training_args.gradient_checkpointing_kwargs = {"use_reentrant": False}
+
+    def disable_gradient_checkpointing_if_frozen(module):
+        if module is None:
+            return
+        if isinstance(module, list):
+            for submodule in module:
+                disable_gradient_checkpointing_if_frozen(submodule)
+            return
+        if any(param.requires_grad for param in module.parameters()):
+            return
+        for submodule in module.modules():
+            if hasattr(submodule, "gradient_checkpointing_disable"):
+                try:
+                    submodule.gradient_checkpointing_disable()
+                except TypeError:
+                    pass
+            if hasattr(submodule, "gradient_checkpointing"):
+                submodule.gradient_checkpointing = False
+            if hasattr(submodule, "grad_checkpointing"):
+                submodule.grad_checkpointing = False
+            config = getattr(submodule, "config", None)
+            if config is not None and hasattr(config, "gradient_checkpointing"):
+                config.gradient_checkpointing = False
+
     eomt_experiment_summary = resolve_eomt_experiment_config(model_args=model_args, raw_argv=sys.argv[1:])
     eomt_experiment_snapshot_path = write_eomt_experiment_snapshot(
         summary=eomt_experiment_summary,
@@ -2630,6 +2657,12 @@ def train(attn_implementation=None):
             if "fusion_block" in tunable_parts:
                 for p in model.get_fusion_block().parameters():
                     p.requires_grad = True
+
+        if training_args.gradient_checkpointing:
+            disable_gradient_checkpointing_if_frozen(vision_tower)
+            disable_gradient_checkpointing_if_frozen(model.get_model().vision_resampler)
+            disable_gradient_checkpointing_if_frozen(model.get_spatial_tower())
+            disable_gradient_checkpointing_if_frozen(model.get_fusion_block())
 
         total_params = sum(p.ds_numel if hasattr(p, "ds_numel") else p.numel() for p in model.parameters())
         trainable_params = sum(p.ds_numel if hasattr(p, "ds_numel") else p.numel() for p in model.parameters() if p.requires_grad)

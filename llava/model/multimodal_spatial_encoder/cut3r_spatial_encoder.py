@@ -10,6 +10,10 @@ import sys
 
 
 def _resolve_cut3r_root():
+    env_override = os.environ.get('CUT3R_ROOT_OVERRIDE', '').strip()
+    if env_override:
+        return env_override
+
     script_dir = os.path.dirname(os.path.abspath(__file__))
     vlm_3r_root = os.path.abspath(os.path.join(script_dir, '..', '..', '..'))
     candidates = [
@@ -24,8 +28,19 @@ def _resolve_cut3r_root():
 
 _CUT3R_ROOT = _resolve_cut3r_root()
 _DEFAULT_CUT3R_WEIGHTS_PATH = os.path.join(_CUT3R_ROOT, 'src', 'cut3r_512_dpt_4_64.pth')
-if _CUT3R_ROOT not in sys.path:
-    sys.path.append(_CUT3R_ROOT)
+# Ensure the resolved CUT3R root wins import precedence over any preexisting CUT3R path.
+for _path in list(sys.path):
+    if not _path:
+        continue
+    norm_path = os.path.normpath(_path)
+    if os.path.basename(norm_path) == 'CUT3R' and norm_path != os.path.normpath(_CUT3R_ROOT):
+        try:
+            sys.path.remove(_path)
+        except ValueError:
+            pass
+if _CUT3R_ROOT in sys.path:
+    sys.path.remove(_CUT3R_ROOT)
+sys.path.insert(0, _CUT3R_ROOT)
 
 from src.dust3r.model import ARCroco3DStereo
 import numpy as np

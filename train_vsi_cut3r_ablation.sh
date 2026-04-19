@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=ablation_cut3r_25p
+#SBATCH --job-name=DBG_4NODES_CUT3R
 #SBATCH --nodes=4
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
 #SBATCH --cpus-per-task=32
-#SBATCH --time=06:00:00
+#SBATCH --time=00:30:00
 #SBATCH --partition=boost_usr_prod  
-#SBATCH --qos=normal # normal/boost_qos_dbg
+#SBATCH --qos=boost_qos_dbg# normal/boost_qos_dbg
 #SBATCH --output=logs/train/%x_%j.out
 #SBATCH --error=logs/train/%x_%j.err
 #SBATCH --mem=0
@@ -17,7 +17,7 @@ SUFFIX="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
 # ============================================================
 # User-defined variables: General
 # ============================================================
-NOTE="ablation study: cut3r 25% training data"
+NOTE="CUT3R Reproduction"
 DATA_ROOT="/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r"
 SPATIAL_FEATURES_ROOT="/leonardo_work/EUHPC_D32_006/FAST/train_data/vlm3r"
 SPATIAL_FEATURES_SUBDIR="spatial_features"
@@ -56,6 +56,8 @@ RESUME_MODE="fresh"                 # choices: fresh / continue
 RESUME_CHECKPOINT_PATH="none"       # e.g. /path/to/checkpoint-1000
 ZERO_SPATIAL_FEATURES="False"       # choices: False / True
 SEED=42
+CUT3R_DEBUG_PROBE="${CUT3R_DEBUG_PROBE:-disabled}"  # first_log / no_log / disabled
+DEBUG_MAX_STEPS="${DEBUG_MAX_STEPS:-6}"
 
 # ============================================================
 # User-defined variables: Model/Data/Training presets
@@ -75,7 +77,7 @@ SEED=42
 # Legacy option kept for compatibility:
 # - cross_attention (uses spatial_tower_select_feature to choose camera/patch/all)
 # ============== Training percentage and shuffling (for ablation) ==============
-TRAIN_DATA_PERCENTAGE="25"
+TRAIN_DATA_PERCENTAGE="100"
 TRAIN_DATA_PERCENTAGE_SEED="$SEED"
 TRAIN_DATA_SHUFFLE="True"
 
@@ -124,10 +126,41 @@ REPORT_TO="wandb"
 DATALOADER_DROP_LAST="True"
 
 
+MAX_STEPS=""
+case "$CUT3R_DEBUG_PROBE" in
+    first_log)
+        NOTE="$NOTE | debug_probe=first_log"
+        SAVE_STRATEGY="no"
+        SAVE_STEPS="1000000"
+        REPORT_TO="none"
+        MAX_STEPS="$DEBUG_MAX_STEPS"
+        ;;
+    no_log)
+        NOTE="$NOTE | debug_probe=no_log"
+        LOGGING_STEPS="1000"
+        SAVE_STRATEGY="no"
+        SAVE_STEPS="1000000"
+        REPORT_TO="none"
+        MAX_STEPS="$DEBUG_MAX_STEPS"
+        ;;
+    disabled)
+        ;;
+    *)
+        echo "[ERROR] Unsupported CUT3R_DEBUG_PROBE: $CUT3R_DEBUG_PROBE"
+        echo "[ERROR] Supported values: first_log no_log disabled"
+        exit 1
+        ;;
+esac
+
+
 # ========================================================================================
 
 echo "-------- Note --------"
 echo "  note: $NOTE"
+echo "  cut3r_debug_probe: $CUT3R_DEBUG_PROBE"
+if [[ -n "$MAX_STEPS" ]]; then
+    echo "  debug_max_steps: $MAX_STEPS"
+fi
 mkdir -p logs/train
 mkdir -p "$LOG_DIR"
 
@@ -190,9 +223,15 @@ fi
 
 export WANDB_MODE="offline"
 export NCCL_NVLS_ENABLE=0
+# export NCCL_DEBUG=INFO
+# export TORCH_DISTRIBUTED_DEBUG=DETAIL
+# export NCCL_ASYNC_ERROR_HANDLING=1
 export WANDB_DIR="$WANDB_DIR"
 export WANDB_CACHE_DIR="$WANDB_CACHE_DIR"
 export WANDB_CONFIG_DIR="$WANDB_CONFIG_DIR"
+# if [[ "$REPORT_TO" == "none" ]]; then
+#     export WANDB_DISABLED=true
+# fi
 mkdir -p "$WANDB_DIR" "$WANDB_CACHE_DIR" "$WANDB_CONFIG_DIR"
 
 # Force local/offline Hugging Face resolution on compute nodes.
@@ -384,6 +423,10 @@ declare -A TRAINING_ARGS=(
     [seed]="$SEED"
     [data_seed]="$SEED"
 )
+
+if [[ -n "$MAX_STEPS" ]]; then
+    TRAINING_ARGS[max_steps]="$MAX_STEPS"
+fi
 
 echo "========================================"
 echo " Training Configuration"
