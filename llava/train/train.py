@@ -1972,7 +1972,8 @@ class LazySupervisedDataset(Dataset):
         )
         if use_preextracted_features and "video" in self.list_data_dict[i]:
             video_folder = self.data_args.video_folder
-            spatial_features_root = getattr(self.data_args, 'spatial_features_root', None) or video_folder or "."
+            explicit_spatial_features_root = getattr(self.data_args, 'spatial_features_root', None)
+            spatial_features_root = explicit_spatial_features_root or video_folder or "."
             spatial_features_subdir = getattr(self.data_args, 'spatial_features_subdir', 'spatial_features') or 'spatial_features'
             video_rel_path = self.list_data_dict[i]['video']
             video_pt_path = os.path.splitext(video_rel_path)[0] + '.pt'
@@ -1986,7 +1987,8 @@ class LazySupervisedDataset(Dataset):
                 path_parts_with_subdir = [spatial_features_subdir] + path_parts_with_subdir
 
             candidate_relative_paths = []
-            for parts in (path_parts_with_subdir, path_parts):
+            relative_path_candidates = (path_parts_with_subdir,) if explicit_spatial_features_root else (path_parts_with_subdir, path_parts)
+            for parts in relative_path_candidates:
                 if not parts:
                     continue
                 rel_path = os.path.join(*parts)
@@ -1994,7 +1996,8 @@ class LazySupervisedDataset(Dataset):
                     candidate_relative_paths.append(rel_path)
 
             candidate_roots = []
-            for root in (spatial_features_root, video_folder):
+            roots_to_consider = (spatial_features_root,) if explicit_spatial_features_root else (spatial_features_root, video_folder)
+            for root in roots_to_consider:
                 if root and root not in candidate_roots:
                     candidate_roots.append(root)
 
@@ -2003,7 +2006,7 @@ class LazySupervisedDataset(Dataset):
                 for rel_path in candidate_relative_paths:
                     candidate_paths.append(os.path.join(root, rel_path))
 
-            if os.path.isabs(video_pt_path):
+            if os.path.isabs(video_pt_path) and not explicit_spatial_features_root:
                 replaced_abs = video_pt_path.replace('/videos/', f'/{spatial_features_subdir}/', 1)
                 for abs_path in (replaced_abs, video_pt_path):
                     if abs_path not in candidate_paths:

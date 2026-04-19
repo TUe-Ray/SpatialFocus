@@ -969,22 +969,58 @@ class LlavaMetaForCausalLM(ABC):
                 image_features = self.get_model().mm_projector(image_features)
 
             else:
-                is_cut3r_spatial = spatial_encoder_type is not None and 'cut3r' in spatial_encoder_type
-                is_pi3x_spatial = spatial_encoder_type is not None and 'pi3x' in spatial_encoder_type
+                spatial_tower = self.get_model().get_spatial_tower()
+                cfg_spatial_tower_name = str(spatial_encoder_type or "").lower()
+                runtime_spatial_tower_name = str(
+                    getattr(spatial_tower, "spatial_tower_name", None)
+                    or getattr(spatial_tower, "tower_name", None)
+                    or getattr(spatial_tower, "model_name", None)
+                    or ""
+                ).lower()
+                spatial_tower_module = ""
+                spatial_tower_class_name = ""
+                if spatial_tower is not None:
+                    spatial_tower_module = getattr(spatial_tower.__class__, "__module__", "").lower()
+                    spatial_tower_class_name = spatial_tower.__class__.__name__.lower()
+
+                is_cut3r_spatial = any(
+                    "cut3r" in value
+                    for value in (
+                        cfg_spatial_tower_name,
+                        runtime_spatial_tower_name,
+                        spatial_tower_module,
+                        spatial_tower_class_name,
+                    )
+                )
+                is_pi3x_spatial = any(
+                    "pi3x" in value
+                    for value in (
+                        cfg_spatial_tower_name,
+                        runtime_spatial_tower_name,
+                        spatial_tower_module,
+                        spatial_tower_class_name,
+                    )
+                )
+                loaded_spatial_features = spatial_features[0] if spatial_features is not None else None
+                has_token_pair_features = (
+                    isinstance(loaded_spatial_features, dict)
+                    and "camera_tokens" in loaded_spatial_features
+                    and "patch_tokens" in loaded_spatial_features
+                )
 
                 _sf = None
                 camera_pose = None
 
                 if zero_spatial_features:
                     return self.get_model().mm_projector(image_features)
-                elif spatial_features is not None and is_cut3r_spatial:
-                    camera_tokens, patch_tokens = spatial_features[0]["camera_tokens"], spatial_features[0]["patch_tokens"]
+                elif spatial_features is not None and has_token_pair_features and (is_cut3r_spatial or not is_pi3x_spatial):
+                    camera_tokens, patch_tokens = loaded_spatial_features["camera_tokens"], loaded_spatial_features["patch_tokens"]
                 elif spatial_features is not None and is_pi3x_spatial:
-                    _sf = Pi3XDecodedFeatures.from_loaded(spatial_features[0])
+                    _sf = Pi3XDecodedFeatures.from_loaded(loaded_spatial_features)
                     if _sf.is_new_schema():
                         # Camera tokens must be computed from the stored decoded_features
                         # by running pi3.camera_decoder (lightweight head, no re-encoding).
-                        _spatial_tower = self.get_model().get_spatial_tower()
+                        _spatial_tower = spatial_tower
                         _cam_dec = getattr(_spatial_tower, "camera_decoder", None)
                         if _cam_dec is None:
                             raise RuntimeError(
@@ -1009,11 +1045,11 @@ class LlavaMetaForCausalLM(ABC):
                             camera_pose = _sf.camera_pose
                     camera_tokens, patch_tokens = _sf.camera_tokens, _sf.patch_tokens
                 else:
-                    camera_tokens, patch_tokens = self.get_model().get_spatial_tower()(images)
+                    camera_tokens, patch_tokens = spatial_tower(images)
                     # Runtime path parity for svf_pose_prepend (pi3x only):
                     # compute camera_pose from camera_head using runtime camera_tokens.
                     if fusion_block_type == 'svf_pose_prepend' and is_pi3x_spatial:
-                        _spatial_tower = self.get_model().get_spatial_tower()
+                        _spatial_tower = spatial_tower
                         _cam_head = getattr(_spatial_tower, "camera_head", None)
                         if _cam_head is None:
                             raise RuntimeError(
