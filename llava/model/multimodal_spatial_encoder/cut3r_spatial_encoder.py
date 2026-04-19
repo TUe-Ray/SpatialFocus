@@ -17,6 +17,7 @@ def _resolve_cut3r_root():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     vlm_3r_root = os.path.abspath(os.path.join(script_dir, '..', '..', '..'))
     candidates = [
+        '/leonardo/home/userexternal/shuang00/VLM-3R_SN/CUT3R',
         os.path.join(vlm_3r_root, 'third_party', 'CUT3R'),
         os.path.join(vlm_3r_root, 'CUT3R'),
     ]
