@@ -127,7 +127,7 @@ SEED=42
 # Set up training config
 SUFFIX="vlm_3r_vsibench_all_tokens_cross_attn_lora"
 MID_RUN_NAME="llava_video_7b_qwen2_${SUFFIX}"
-OUTPUT_DIR="work_dirs_auto_eval/$MID_RUN_NAME"
+OUTPUT_DIR="/leonardo_work/EUHPC_D32_006/Train_Model/VLM3R/${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
 mkdir -p "$OUTPUT_DIR"
 
 LOCAL_MODEL_BASE="/leonardo_work/EUHPC_D32_006/FAST/hf_models/VLM3R/LLaVA-NeXT-Video-7B-Qwen2"
