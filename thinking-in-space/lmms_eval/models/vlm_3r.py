@@ -95,6 +95,7 @@ class Vlm3r(lmms):
         mm_eomt_selector_mode: Optional[str] = None,
         mm_eomt_selector_score_threshold: Optional[Union[float, str]] = None,
         mm_eomt_selector_topk: Optional[Union[int, str]] = None,
+        mm_eomt_selector_class_type: Optional[str] = None,
         mm_eomt_selective_3d_merge_mode: Optional[str] = None,
         mm_eomt_selective_3d_gate_type: Optional[str] = None,
         mm_eomt_selective_3d_floor: Optional[Union[float, str]] = None,
@@ -151,6 +152,7 @@ class Vlm3r(lmms):
             mm_eomt_selector_mode=mm_eomt_selector_mode,
             mm_eomt_selector_score_threshold=mm_eomt_selector_score_threshold,
             mm_eomt_selector_topk=mm_eomt_selector_topk,
+            mm_eomt_selector_class_type=mm_eomt_selector_class_type,
             mm_eomt_selective_3d_merge_mode=mm_eomt_selective_3d_merge_mode,
             mm_eomt_selective_3d_gate_type=mm_eomt_selective_3d_gate_type,
             mm_eomt_selective_3d_floor=mm_eomt_selective_3d_floor,
@@ -181,6 +183,7 @@ class Vlm3r(lmms):
                 "mm_eomt_selector_mode",
                 "mm_eomt_selector_score_threshold",
                 "mm_eomt_selector_topk",
+                "mm_eomt_selector_class_type",
                 "mm_eomt_selective_3d_merge_mode",
                 "mm_eomt_selective_3d_gate_type",
                 "mm_eomt_selective_3d_floor",
@@ -368,6 +371,7 @@ class Vlm3r(lmms):
         eomt_smoke_test_enable=None,
         eomt_smoke_test_max_samples=None,
         eomt_smoke_test_output_dir=None,
+        mm_eomt_selector_class_type=None,
     ):
         model_args = SimpleNamespace(
             fusion_block=fusion_block or None,
@@ -375,6 +379,7 @@ class Vlm3r(lmms):
             mm_eomt_selector_mode=mm_eomt_selector_mode or None,
             mm_eomt_selector_score_threshold=self._coerce_optional_float(mm_eomt_selector_score_threshold),
             mm_eomt_selector_topk=self._coerce_optional_int(mm_eomt_selector_topk),
+            mm_eomt_selector_class_type=mm_eomt_selector_class_type or None,
             mm_eomt_selective_3d_merge_mode=mm_eomt_selective_3d_merge_mode or None,
             mm_eomt_selective_3d_gate_type=mm_eomt_selective_3d_gate_type or None,
             mm_eomt_selective_3d_floor=self._coerce_optional_float(mm_eomt_selective_3d_floor),
@@ -435,6 +440,7 @@ class Vlm3r(lmms):
             "eomt_smoke_test_enable",
             "eomt_smoke_test_max_samples",
             "eomt_smoke_test_output_dir",
+            "mm_eomt_selector_class_type",
         )
         for field_name in tracked_fields:
             field_value = getattr(self._eval_model_args, field_name, None)

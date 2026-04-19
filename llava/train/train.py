@@ -229,6 +229,10 @@ class ModelArguments:
     mm_eomt_selective_3d_enable: bool = field(default=False)
     mm_eomt_selector_score_threshold: float = field(default=0.35)
     mm_eomt_selector_topk: int = field(default=-1)  # -1 = disabled: keep all masks whose score >= threshold
+    mm_eomt_selector_class_type: str = field(
+        default="all",
+        metadata={"help": "Filter EoMT queries by panoptic class type before threshold/topk. 'all', 'things', or 'stuff'."}
+    )
     mm_eomt_selective_3d_merge_mode: str = field(default="soft_max_union")
     mm_eomt_selective_3d_gate_type: str = field(default="soft_with_floor")
     mm_eomt_selective_3d_floor: float = field(default=0.1)
@@ -2631,6 +2635,7 @@ def train(attn_implementation=None):
         model.config.mm_eomt_selective_3d_enable = model_args.mm_eomt_selective_3d_enable
         model.config.mm_eomt_selector_score_threshold = model_args.mm_eomt_selector_score_threshold
         model.config.mm_eomt_selector_topk = model_args.mm_eomt_selector_topk
+        model.config.mm_eomt_selector_class_type = model_args.mm_eomt_selector_class_type
         model.config.mm_eomt_selective_3d_merge_mode = model_args.mm_eomt_selective_3d_merge_mode
         model.config.mm_eomt_selective_3d_gate_type = model_args.mm_eomt_selective_3d_gate_type
         model.config.mm_eomt_selective_3d_floor = model_args.mm_eomt_selective_3d_floor

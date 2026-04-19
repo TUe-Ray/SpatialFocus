@@ -28,6 +28,50 @@ logger = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------- #
+#  COCO panoptic class name table (133 classes, model-space IDs 0-132)        #
+# --------------------------------------------------------------------------- #
+
+# Things: indices 0-79  (80 COCO instance categories)
+# Stuff:  indices 80-132 (53 COCO stuff categories)
+# Used for smoke-test filenames and class-type filtering debug info.
+COCO_PANOPTIC_CLASS_NAMES: List[str] = [
+    # Things (0-79)
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train",
+    "truck", "boat", "traffic_light", "fire_hydrant", "stop_sign",
+    "parking_meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
+    "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag",
+    "tie", "suitcase", "frisbee", "skis", "snowboard", "sports_ball", "kite",
+    "baseball_bat", "baseball_glove", "skateboard", "surfboard",
+    "tennis_racket", "bottle", "wine_glass", "cup", "fork", "knife", "spoon",
+    "bowl", "banana", "apple", "sandwich", "orange", "broccoli", "carrot",
+    "hot_dog", "pizza", "donut", "cake", "chair", "couch", "potted_plant",
+    "bed", "dining_table", "toilet", "tv", "laptop", "mouse", "remote",
+    "keyboard", "cell_phone", "microwave", "oven", "toaster", "sink",
+    "refrigerator", "book", "clock", "vase", "scissors", "teddy_bear",
+    "hair_drier", "toothbrush",
+    # Stuff (80-132)
+    "banner", "blanket", "bridge", "cardboard", "counter", "curtain", "door",
+    "floor_wood", "flower", "fruit", "gravel", "house", "light", "mirror",
+    "net", "pillow", "platform", "playingfield", "railroad", "river", "road",
+    "roof", "sand", "sea", "shelf", "snow", "stairs", "tent", "towel", "tree",
+    "wall_brick", "wall_concrete", "wall_panel", "wall_stone", "wall_tile",
+    "wall_wood", "water", "window_blind", "window", "pavement", "mountain",
+    "grass", "dirt", "paper", "food", "building", "rock", "wall", "ceiling",
+    "textile", "fence", "sky", "ground",
+]
+
+
+def _lookup_class_name(class_id: int) -> str:
+    """Return the COCO panoptic class name for a given 0-based model class ID.
+
+    Falls back to ``cls<id>`` for unknown IDs (e.g. non-COCO datasets).
+    """
+    if 0 <= class_id < len(COCO_PANOPTIC_CLASS_NAMES):
+        return COCO_PANOPTIC_CLASS_NAMES[class_id]
+    return f"cls{class_id}"
+
+
+# --------------------------------------------------------------------------- #
 #  Config dataclass                                                            #
 # --------------------------------------------------------------------------- #
 
@@ -43,11 +87,17 @@ class Selective3DConfig:
     gate_type: str = "soft_with_floor"
     floor: float = 0.1
     empty_fallback: str = "all_3d"
+    # Filter queries by COCO panoptic class type before threshold + top-k.
+    # "all"   – no filtering (default, keeps all classes)
+    # "things" – keep only queries whose argmax class is a "thing" (countable object)
+    # "stuff"  – keep only queries whose argmax class is "stuff" (background / uncountable)
+    class_type_filter: str = "all"
 
     VALID_SELECTOR_MODES = {"confidence_topk"}
     VALID_MERGE_MODES = {"soft_max_union"}
     VALID_GATE_TYPES = {"soft", "soft_with_floor"}
     VALID_FALLBACKS = {"all_3d", "zero_3d"}
+    VALID_CLASS_TYPE_FILTERS = {"all", "things", "stuff"}
 
     def __post_init__(self):
         # Backward compatibility: older experiment configs used "confidence".
@@ -78,6 +128,11 @@ class Selective3DConfig:
                 f"Invalid empty_fallback '{self.empty_fallback}'. "
                 f"Valid: {sorted(self.VALID_FALLBACKS)}"
             )
+        if self.class_type_filter not in self.VALID_CLASS_TYPE_FILTERS:
+            raise ValueError(
+                f"Invalid class_type_filter '{self.class_type_filter}'. "
+                f"Valid: {sorted(self.VALID_CLASS_TYPE_FILTERS)}"
+            )
 
     @classmethod
     def from_model_config(cls, config) -> "Selective3DConfig":
@@ -91,6 +146,7 @@ class Selective3DConfig:
             gate_type=str(getattr(config, "mm_eomt_selective_3d_gate_type", "soft_with_floor")),
             floor=float(getattr(config, "mm_eomt_selective_3d_floor", 0.1)),
             empty_fallback=str(getattr(config, "mm_eomt_selective_3d_empty_fallback", "all_3d")),
+            class_type_filter=str(getattr(config, "mm_eomt_selector_class_type", "all")),
         )
 
 
@@ -108,6 +164,8 @@ class SelectiveGateDebugInfo:
     num_masks_after_topk: int = 0
     selected_scores: List[float] = field(default_factory=list)
     selected_query_indices: List[int] = field(default_factory=list)
+    selected_class_ids: List[int] = field(default_factory=list)
+    selected_class_names: List[str] = field(default_factory=list)
     used_fallback: bool = False
     fallback_mode: str = ""
     fallback_reason: str = ""
@@ -118,14 +176,15 @@ class SelectiveGateDebugInfo:
     def log(self, prefix: str = "") -> None:
         tag = f"[Selective3DGate] {prefix}" if prefix else "[Selective3DGate]"
         topk_msg = "disabled(all_above_thresh)" if self.topk_disabled else f"applied({self.num_masks_after_topk})"
+        cls_summary = list(zip(self.selected_class_names, [f"{s:.4f}" for s in self.selected_scores]))
         logger.info(
             "%s queries: total=%d, after_thresh=%d, topk=%s, "
-            "foreground_scores=%s, fallback=%s(%s), reason=%s, gate_stats=(min=%.4f, max=%.4f, mean=%.4f)",
+            "selected=%s, fallback=%s(%s), reason=%s, gate_stats=(min=%.4f, max=%.4f, mean=%.4f)",
             tag,
             self.num_masks_total,
             self.num_masks_after_threshold,
             topk_msg,
-            [f"{s:.4f}" for s in self.selected_scores],
+            cls_summary,
             self.used_fallback,
             self.fallback_mode,
             self.fallback_reason,
@@ -466,6 +525,17 @@ def apply_selective_3d_fusion(
     # class_logits shape: (F_eomt, Q, C+1), last class is "no object"
     fg_probs = torch.softmax(class_logits.float(), dim=-1)[:, :, :-1]  # (F_eomt, Q, C)
     per_query_scores = fg_probs.max(dim=-1).values  # (F_eomt, Q)
+    # argmax class ID per query — used for class-type filtering and debug labels.
+    per_query_class_ids = fg_probs.argmax(dim=-1)  # (F_eomt, Q)
+
+    # Retrieve stuff class IDs from EoMT outputs (populated by the extractor).
+    stuff_class_ids: frozenset = eomt_outputs.get("stuff_class_ids", frozenset())
+    if config.class_type_filter != "all" and not stuff_class_ids:
+        logger.warning(
+            "[Selective3DGate] class_type_filter='%s' requested but stuff_class_ids is empty "
+            "(extractor may be using a non-COCO dataset or an older checkpoint). Skipping class-type filter.",
+            config.class_type_filter,
+        )
 
     # Gate each frame
     gated_frames = []
@@ -502,6 +572,21 @@ def apply_selective_3d_fusion(
                 f"Got '{config.selector_mode}'."
             )
 
+        # Optional: filter queries by panoptic class type (things / stuff) before
+        # applying the score threshold and top-k selection.
+        if config.class_type_filter != "all" and stuff_class_ids:
+            frame_class_ids_t = per_query_class_ids[eomt_f_idx]  # (Q,)
+            is_stuff = torch.tensor(
+                [int(cid.item()) in stuff_class_ids for cid in frame_class_ids_t],
+                dtype=torch.bool,
+                device=frame_scores.device,
+            )
+            frame_scores = frame_scores.clone()
+            if config.class_type_filter == "things":
+                frame_scores[is_stuff] = -1.0   # suppress stuff queries
+            else:  # "stuff"
+                frame_scores[~is_stuff] = -1.0  # suppress things queries
+
         # A. Select using max foreground class probability.
         sel_indices, sel_scores = select_masks_by_confidence(
             frame_scores, config.score_threshold, config.topk,
@@ -514,6 +599,12 @@ def apply_selective_3d_fusion(
         debug.num_masks_after_topk = sel_indices.numel()
         debug.selected_scores = sel_scores.tolist()
         debug.selected_query_indices = sel_indices.tolist()
+        # Resolve class IDs and human-readable names for the selected queries.
+        # We look up the argmax class from fg_probs (pre-filter) so the name
+        # reflects the actual predicted category even when class_type_filter is active.
+        _raw_class_ids = per_query_class_ids[eomt_f_idx]  # (Q,)
+        debug.selected_class_ids = [int(_raw_class_ids[qi].item()) for qi in sel_indices.tolist()]
+        debug.selected_class_names = [_lookup_class_name(cid) for cid in debug.selected_class_ids]
 
         if sel_indices.numel() == 0:
             gated_frame, fallback_debug = _apply_fallback_to_frame(

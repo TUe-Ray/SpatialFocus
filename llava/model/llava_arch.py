@@ -1270,13 +1270,27 @@ class LlavaMetaForCausalLM(ABC):
                         mask_tensor = soft_masks[global_frame_idx, q_idx]  # (H_m, W_m)
                         mask_uint8, overlay = self._render_eomt_mask_artifacts(pil_image, mask_tensor)
 
+                        # Build a filesystem-safe label from the predicted class name.
+                        _cls_name = "unknown"
+                        if (
+                            hasattr(dbg, "selected_class_names")
+                            and rank_i < len(dbg.selected_class_names)
+                        ):
+                            _cls_name = dbg.selected_class_names[rank_i]
+                        _cls_safe = _cls_name.replace(" ", "_").replace("-", "_")[:20]
+                        _cls_id = (
+                            dbg.selected_class_ids[rank_i]
+                            if hasattr(dbg, "selected_class_ids") and rank_i < len(dbg.selected_class_ids)
+                            else None
+                        )
+
                         mask_path = os.path.join(
                             sample_dir,
-                            f"frame_{frame_idx:02d}_rank{rank_i:02d}_q{q_idx:03d}_mask.png",
+                            f"frame_{frame_idx:02d}_rank{rank_i:02d}_{_cls_safe}_{score:.3f}_mask.png",
                         )
                         overlay_path = os.path.join(
                             sample_dir,
-                            f"frame_{frame_idx:02d}_rank{rank_i:02d}_q{q_idx:03d}_overlay.png",
+                            f"frame_{frame_idx:02d}_rank{rank_i:02d}_{_cls_safe}_{score:.3f}_overlay.png",
                         )
                         cv2.imwrite(mask_path, mask_uint8)
                         cv2.imwrite(overlay_path, cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
@@ -1284,6 +1298,8 @@ class LlavaMetaForCausalLM(ABC):
                         mask_records.append({
                             "rank": rank_i,
                             "query_index": q_idx,
+                            "class_id": _cls_id,
+                            "class_name": _cls_name,
                             "score": score,
                             "mask_path": mask_path,
                             "overlay_path": overlay_path,

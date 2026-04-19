@@ -134,6 +134,9 @@ class EoMTExtractor(nn.Module):
             self.num_classes = max(stuff_classes) + 1
         else:
             self.num_classes = eomt_config.get("num_classes", 133)
+        # Store stuff class IDs so downstream components (e.g. selective_3d_gate)
+        # can filter queries by panoptic class type (things vs stuff).
+        self.stuff_class_ids: frozenset = frozenset(int(c) for c in stuff_classes)
 
         # Determine img_size
         if "img_size" in eomt_config and eomt_config["img_size"] is not None:
@@ -282,6 +285,9 @@ class EoMTExtractor(nn.Module):
             "mask_resolution": (H_grid, W_grid),
             "query_count": self.num_q,
             "frame_meta": frame_meta,
+            # Taxonomy: frozenset of model-space class IDs classified as "stuff".
+            # Classes NOT in this set are "things" (countable instance categories).
+            "stuff_class_ids": self.stuff_class_ids,
         }
 
     @torch.no_grad()
