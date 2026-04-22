@@ -4,7 +4,7 @@ from transformers import PretrainedConfig, PreTrainedModel
 from transformers.modeling_outputs import BaseModelOutputWithPooling, BaseModelOutput
 from typing import Union, Optional, Tuple
 import os
-from llava.utils import rank0_print
+from llava.utils import rank0_print, rank_node_print
 from einops import rearrange
 import sys
 
@@ -29,6 +29,21 @@ def _resolve_cut3r_root():
 
 _CUT3R_ROOT = _resolve_cut3r_root()
 _DEFAULT_CUT3R_WEIGHTS_PATH = os.path.join(_CUT3R_ROOT, 'src', 'cut3r_512_dpt_4_64.pth')
+_CUT3R_DEBUG_PREPARE_INPUT_CALLS = 0
+
+
+def _cut3r_debug_enabled():
+    return os.environ.get('CUT3R_DEBUG_ALL_RANKS', '').strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
+
+
+def _cut3r_debug_limit():
+    raw_value = os.environ.get('CUT3R_DEBUG_MAX_CALLS', '').strip()
+    if not raw_value:
+        return 4
+    try:
+        return max(int(raw_value), 0)
+    except ValueError:
+        return 4
 # Ensure the resolved CUT3R root wins import precedence over any preexisting CUT3R path.
 for _path in list(sys.path):
     if not _path:
@@ -114,18 +129,23 @@ def prepare_input(pixel_values):
             f"Expected pixel_values to be a torch.Tensor, got {type(pixel_values)}"
         )
 
+    original_shape = tuple(pixel_values.shape)
+    input_layout = None
+
     if pixel_values.dim() == 3:
         # (C, H, W) -> (1, 1, C, H, W)
         pixel_values = pixel_values.unsqueeze(0).unsqueeze(0)
+        input_layout = 'chw_to_fbc_hw'
 
     elif pixel_values.dim() == 4:
         # VLM-3R eval passes video frame stacks here as (F, C, H, W).
         # Preserve frame order and treat each frame as a single-item batch.
         pixel_values = pixel_values.unsqueeze(1)
+        input_layout = 'fchw_to_fbchw'
 
     elif pixel_values.dim() == 5:
         # already (F, B, C, H, W)
-        pass
+        input_layout = 'fbchw_passthrough'
 
     else:
         raise ValueError(
@@ -135,6 +155,14 @@ def prepare_input(pixel_values):
     # Now pixel_values is always (F, B, C, H, W)
     F_max, B, C, H, W = pixel_values.shape
     device = pixel_values.device
+
+    global _CUT3R_DEBUG_PREPARE_INPUT_CALLS
+    if _cut3r_debug_enabled() and _CUT3R_DEBUG_PREPARE_INPUT_CALLS < _cut3r_debug_limit():
+        rank_node_print(
+            f"[CUT3R DEBUG] prepare_input input_shape={original_shape} layout={input_layout} "
+            f"normalized_shape={(F_max, B, C, H, W)} dtype={pixel_values.dtype} device={device}"
+        )
+        _CUT3R_DEBUG_PREPARE_INPUT_CALLS += 1
 
     # interpolate expects 4D: (N, C, H, W)
     pixel_values = pixel_values.reshape(F_max * B, C, H, W)

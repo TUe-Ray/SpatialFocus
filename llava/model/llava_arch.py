@@ -29,7 +29,7 @@ from .pi3x_decoded_features import Pi3XDecodedFeatures
 from llava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 
 from llava.mm_utils import get_anyres_image_grid_shape
-from llava.utils import rank0_print, rank_print
+from llava.utils import rank0_print, rank_print, rank_node_print
 import random
 from einops import rearrange
 
@@ -38,6 +38,21 @@ import numpy as np
 import cv2  # OpenCV for resizing and writing images
 import matplotlib.cm as cm # For colormaps
 import os
+_ENCODE_IMAGES_DEBUG_CALLS = 0
+
+
+def _encode_images_debug_enabled():
+    return os.environ.get('CUT3R_DEBUG_ALL_RANKS', '').strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
+
+
+def _encode_images_debug_limit():
+    raw_value = os.environ.get('CUT3R_DEBUG_MAX_CALLS', '').strip()
+    if not raw_value:
+        return 4
+    try:
+        return max(int(raw_value), 0)
+    except ValueError:
+        return 4
 class LlavaMetaModel:
 
     def __init__(self, config):
@@ -1011,10 +1026,16 @@ class LlavaMetaForCausalLM(ABC):
                 _sf = None
                 camera_pose = None
 
+                debug_route = None
+                debug_details = None
+
                 if zero_spatial_features:
+                    debug_route = 'zero_spatial_features'
                     return self.get_model().mm_projector(image_features)
                 elif spatial_features is not None and has_token_pair_features and (is_cut3r_spatial or not is_pi3x_spatial):
                     camera_tokens, patch_tokens = loaded_spatial_features["camera_tokens"], loaded_spatial_features["patch_tokens"]
+                    debug_route = 'loaded_token_pair_features'
+                    debug_details = f"loaded_keys={sorted(loaded_spatial_features.keys())}"
                 elif spatial_features is not None and is_pi3x_spatial:
                     _sf = Pi3XDecodedFeatures.from_loaded(loaded_spatial_features)
                     if _sf.is_new_schema():
@@ -1044,8 +1065,12 @@ class LlavaMetaForCausalLM(ABC):
                             _sf.compute_camera_pose(_cam_head, _patch_h, _patch_w, device=images.device)
                             camera_pose = _sf.camera_pose
                     camera_tokens, patch_tokens = _sf.camera_tokens, _sf.patch_tokens
+                    debug_route = 'loaded_pi3x_features'
+                    debug_details = f"loaded_type={type(loaded_spatial_features).__name__}"
                 else:
                     camera_tokens, patch_tokens = spatial_tower(images)
+                    debug_route = 'runtime_spatial_tower'
+                    debug_details = f"images_shape={tuple(images.shape)} tower={type(spatial_tower).__name__}"
                     # Runtime path parity for svf_pose_prepend (pi3x only):
                     # compute camera_pose from camera_head using runtime camera_tokens.
                     if fusion_block_type == 'svf_pose_prepend' and is_pi3x_spatial:
@@ -1072,6 +1097,20 @@ class LlavaMetaForCausalLM(ABC):
                         with torch.no_grad():
                             pose_4x4 = _cam_head(cam_tokens_for_pose, patch_side, patch_side)
                         camera_pose = pose_4x4[:, :3, :].reshape(pose_4x4.shape[0], 12)
+
+                global _ENCODE_IMAGES_DEBUG_CALLS
+                if _encode_images_debug_enabled() and _ENCODE_IMAGES_DEBUG_CALLS < _encode_images_debug_limit():
+                    loaded_keys = sorted(loaded_spatial_features.keys()) if isinstance(loaded_spatial_features, dict) else None
+                    rank_node_print(
+                        "[ENCODE_IMAGES DEBUG] "
+                        f"route={debug_route} cfg_tower={cfg_spatial_tower_name or 'none'} "
+                        f"runtime_tower={runtime_spatial_tower_name or 'none'} "
+                        f"is_cut3r={is_cut3r_spatial} is_pi3x={is_pi3x_spatial} "
+                        f"has_token_pair={has_token_pair_features} fusion={fusion_block_type} "
+                        f"images_shape={tuple(images.shape)} camera_shape={tuple(camera_tokens.shape)} "
+                        f"patch_shape={tuple(patch_tokens.shape)} loaded_keys={loaded_keys} details={debug_details}"
+                    )
+                    _ENCODE_IMAGES_DEBUG_CALLS += 1
                 
                 if fusion_block_type in ['cross_attention', 'svf_baseline']:
                     # Build spatial KV tokens.

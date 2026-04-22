@@ -13,6 +13,9 @@
 #SBATCH --exclude=lrdn0249,lrdn0612,lrdn0568,lrdn2400,lrdn0288,lrdn0418,lrdn0119,lrdn0159,lrdn0080,lrdn0843
 #SBATCH --exclusive
 
+export CUT3R_DEBUG_ALL_RANKS=1
+export CUT3R_DEBUG_MAX_CALLS=8
+
 SUFFIX="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
 # ============================================================
 # User-defined variables: General

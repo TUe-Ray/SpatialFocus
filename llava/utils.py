@@ -2,6 +2,7 @@ import datetime
 import logging
 import logging.handlers
 import os
+import socket
 import sys
 import numpy as np
 
@@ -83,6 +84,14 @@ def rank_print(*args):
         print(f"Rank {dist.get_rank()}: ", *args)
     else:
         print(*args)
+
+
+def rank_node_print(*args):
+    node_name = os.environ.get("SLURMD_NODENAME") or os.environ.get("HOSTNAME") or socket.gethostname()
+    if dist.is_initialized():
+        print(f"Rank {dist.get_rank()} @ {node_name}: ", *args)
+    else:
+        print(f"Node {node_name}: ", *args)
 
 def build_logger(logger_name, logger_filename):
     global handler
