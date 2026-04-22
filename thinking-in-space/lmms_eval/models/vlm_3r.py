@@ -92,6 +92,15 @@ class Vlm3r(lmms):
         zero_spatial_features: Union[bool, str] = False,
         fusion_block: Optional[str] = None,
         mm_eomt_selective_3d_enable: Optional[Union[bool, str]] = None,
+        mm_eomt_selective_3d_selector_mode: Optional[str] = None,
+        mm_eomt_selective_3d_score_threshold: Optional[Union[float, str]] = None,
+        mm_eomt_selective_3d_topk: Optional[Union[int, str]] = None,
+        mm_eomt_selective_3d_class_type: Optional[str] = None,
+        mm_eomt_selective_3d_word_match_enable: Optional[Union[bool, str]] = None,
+        mm_eomt_selective_3d_word_match_source: Optional[str] = None,
+        mm_eomt_selective_3d_word_match_mode: Optional[str] = None,
+        mm_eomt_selective_3d_word_match_no_match: Optional[str] = None,
+        mm_eomt_selective_3d_word_match_similarity_threshold: Optional[Union[float, str]] = None,
         mm_eomt_selector_mode: Optional[str] = None,
         mm_eomt_selector_score_threshold: Optional[Union[float, str]] = None,
         mm_eomt_selector_topk: Optional[Union[int, str]] = None,
@@ -149,6 +158,15 @@ class Vlm3r(lmms):
         self._eval_model_args = self._resolve_eval_model_args(
             fusion_block=fusion_block,
             mm_eomt_selective_3d_enable=mm_eomt_selective_3d_enable,
+            mm_eomt_selective_3d_selector_mode=mm_eomt_selective_3d_selector_mode,
+            mm_eomt_selective_3d_score_threshold=mm_eomt_selective_3d_score_threshold,
+            mm_eomt_selective_3d_topk=mm_eomt_selective_3d_topk,
+            mm_eomt_selective_3d_class_type=mm_eomt_selective_3d_class_type,
+            mm_eomt_selective_3d_word_match_enable=mm_eomt_selective_3d_word_match_enable,
+            mm_eomt_selective_3d_word_match_source=mm_eomt_selective_3d_word_match_source,
+            mm_eomt_selective_3d_word_match_mode=mm_eomt_selective_3d_word_match_mode,
+            mm_eomt_selective_3d_word_match_no_match=mm_eomt_selective_3d_word_match_no_match,
+            mm_eomt_selective_3d_word_match_similarity_threshold=mm_eomt_selective_3d_word_match_similarity_threshold,
             mm_eomt_selector_mode=mm_eomt_selector_mode,
             mm_eomt_selector_score_threshold=mm_eomt_selector_score_threshold,
             mm_eomt_selector_topk=mm_eomt_selector_topk,
@@ -180,10 +198,15 @@ class Vlm3r(lmms):
             for field_name in (
                 "fusion_block",
                 "mm_eomt_selective_3d_enable",
-                "mm_eomt_selector_mode",
-                "mm_eomt_selector_score_threshold",
-                "mm_eomt_selector_topk",
-                "mm_eomt_selector_class_type",
+                "mm_eomt_selective_3d_selector_mode",
+                "mm_eomt_selective_3d_score_threshold",
+                "mm_eomt_selective_3d_topk",
+                "mm_eomt_selective_3d_class_type",
+                "mm_eomt_selective_3d_word_match_enable",
+                "mm_eomt_selective_3d_word_match_source",
+                "mm_eomt_selective_3d_word_match_mode",
+                "mm_eomt_selective_3d_word_match_no_match",
+                "mm_eomt_selective_3d_word_match_similarity_threshold",
                 "mm_eomt_selective_3d_merge_mode",
                 "mm_eomt_selective_3d_gate_type",
                 "mm_eomt_selective_3d_floor",
@@ -357,6 +380,15 @@ class Vlm3r(lmms):
         self,
         fusion_block,
         mm_eomt_selective_3d_enable,
+        mm_eomt_selective_3d_selector_mode,
+        mm_eomt_selective_3d_score_threshold,
+        mm_eomt_selective_3d_topk,
+        mm_eomt_selective_3d_class_type,
+        mm_eomt_selective_3d_word_match_enable,
+        mm_eomt_selective_3d_word_match_source,
+        mm_eomt_selective_3d_word_match_mode,
+        mm_eomt_selective_3d_word_match_no_match,
+        mm_eomt_selective_3d_word_match_similarity_threshold,
         mm_eomt_selector_mode,
         mm_eomt_selector_score_threshold,
         mm_eomt_selector_topk,
@@ -373,13 +405,41 @@ class Vlm3r(lmms):
         eomt_smoke_test_output_dir=None,
         mm_eomt_selector_class_type=None,
     ):
+        resolved_selector_mode = (
+            mm_eomt_selective_3d_selector_mode
+            if mm_eomt_selective_3d_selector_mode is not None
+            else mm_eomt_selector_mode
+        )
+        resolved_score_threshold = (
+            mm_eomt_selective_3d_score_threshold
+            if mm_eomt_selective_3d_score_threshold is not None
+            else mm_eomt_selector_score_threshold
+        )
+        resolved_topk = (
+            mm_eomt_selective_3d_topk
+            if mm_eomt_selective_3d_topk is not None
+            else mm_eomt_selector_topk
+        )
+        resolved_class_type = (
+            mm_eomt_selective_3d_class_type
+            if mm_eomt_selective_3d_class_type is not None
+            else mm_eomt_selector_class_type
+        )
+
         model_args = SimpleNamespace(
             fusion_block=fusion_block or None,
             mm_eomt_selective_3d_enable=self._coerce_optional_bool(mm_eomt_selective_3d_enable),
-            mm_eomt_selector_mode=mm_eomt_selector_mode or None,
-            mm_eomt_selector_score_threshold=self._coerce_optional_float(mm_eomt_selector_score_threshold),
-            mm_eomt_selector_topk=self._coerce_optional_int(mm_eomt_selector_topk),
-            mm_eomt_selector_class_type=mm_eomt_selector_class_type or None,
+            mm_eomt_selective_3d_selector_mode=resolved_selector_mode or None,
+            mm_eomt_selective_3d_score_threshold=self._coerce_optional_float(resolved_score_threshold),
+            mm_eomt_selective_3d_topk=self._coerce_optional_int(resolved_topk),
+            mm_eomt_selective_3d_class_type=resolved_class_type or None,
+            mm_eomt_selective_3d_word_match_enable=self._coerce_optional_bool(mm_eomt_selective_3d_word_match_enable),
+            mm_eomt_selective_3d_word_match_source=mm_eomt_selective_3d_word_match_source or None,
+            mm_eomt_selective_3d_word_match_mode=mm_eomt_selective_3d_word_match_mode or None,
+            mm_eomt_selective_3d_word_match_no_match=mm_eomt_selective_3d_word_match_no_match or None,
+            mm_eomt_selective_3d_word_match_similarity_threshold=self._coerce_optional_float(
+                mm_eomt_selective_3d_word_match_similarity_threshold
+            ),
             mm_eomt_selective_3d_merge_mode=mm_eomt_selective_3d_merge_mode or None,
             mm_eomt_selective_3d_gate_type=mm_eomt_selective_3d_gate_type or None,
             mm_eomt_selective_3d_floor=self._coerce_optional_float(mm_eomt_selective_3d_floor),
@@ -426,9 +486,15 @@ class Vlm3r(lmms):
         tracked_fields = (
             "fusion_block",
             "mm_eomt_selective_3d_enable",
-            "mm_eomt_selector_mode",
-            "mm_eomt_selector_score_threshold",
-            "mm_eomt_selector_topk",
+            "mm_eomt_selective_3d_selector_mode",
+            "mm_eomt_selective_3d_score_threshold",
+            "mm_eomt_selective_3d_topk",
+            "mm_eomt_selective_3d_class_type",
+            "mm_eomt_selective_3d_word_match_enable",
+            "mm_eomt_selective_3d_word_match_source",
+            "mm_eomt_selective_3d_word_match_mode",
+            "mm_eomt_selective_3d_word_match_no_match",
+            "mm_eomt_selective_3d_word_match_similarity_threshold",
             "mm_eomt_selective_3d_merge_mode",
             "mm_eomt_selective_3d_gate_type",
             "mm_eomt_selective_3d_floor",
@@ -440,7 +506,6 @@ class Vlm3r(lmms):
             "eomt_smoke_test_enable",
             "eomt_smoke_test_max_samples",
             "eomt_smoke_test_output_dir",
-            "mm_eomt_selector_class_type",
         )
         for field_name in tracked_fields:
             field_value = getattr(self._eval_model_args, field_name, None)

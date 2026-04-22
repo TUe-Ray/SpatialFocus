@@ -1810,6 +1810,13 @@ def train(attn_implementation=None):
                     if "vision_tower" not in name and "mm_projector" not in name and "vision_resampler" not in name:
                         param.requires_grad_(True)
 
+        eomt_registered = model.ensure_eomt_registered_parameters()
+        if len(eomt_registered) > 0:
+            rank0_print(
+                "EoMT: registered object-block parameters before optimizer creation: "
+                + ", ".join(eomt_registered)
+            )
+
         total_params = sum(p.ds_numel if hasattr(p, "ds_numel") else p.numel() for p in model.parameters())
         trainable_params = sum(p.ds_numel if hasattr(p, "ds_numel") else p.numel() for p in model.parameters() if p.requires_grad)
         rank0_print(f"Total parameters: ~{total_params/1e6:.2f} MB)")
@@ -1853,6 +1860,7 @@ def train(attn_implementation=None):
             ref_model.config.mm_use_im_start_end = data_args.mm_use_im_start_end
             ref_model.config.mm_use_im_patch_token = model_args.mm_use_im_patch_token
             ref_model.initialize_vision_tokenizer(model_args, tokenizer=tokenizer)
+            ref_model.ensure_eomt_registered_parameters()
             parameter_names = [n for n, _ in ref_model.named_parameters()]
             for param_name in parameter_names:
                 param = ref_model.get_parameter(param_name)

@@ -232,6 +232,18 @@ class ModelArguments:
     mm_eomt_word_match_no_match: str = field(default="keep_masks")
     mm_eomt_word_match_similarity_threshold: float = field(default=0.86)
     mm_eomt_selective_3d_enable: bool = field(default=False)
+    mm_eomt_selective_3d_selector_mode: str = field(default="confidence")
+    mm_eomt_selective_3d_score_threshold: float = field(default=0.35)
+    mm_eomt_selective_3d_topk: int = field(default=-1)  # -1 = disabled: keep all masks whose score >= threshold
+    mm_eomt_selective_3d_class_type: str = field(
+        default="all",
+        metadata={"help": "Selective-3D filter for EoMT queries by panoptic class type before threshold/topk. 'all', 'things', or 'stuff'."}
+    )
+    mm_eomt_selective_3d_word_match_enable: bool = field(default=True)
+    mm_eomt_selective_3d_word_match_source: str = field(default="visible_grounded_words")
+    mm_eomt_selective_3d_word_match_mode: str = field(default="hybrid_safe")
+    mm_eomt_selective_3d_word_match_no_match: str = field(default="keep_masks")
+    mm_eomt_selective_3d_word_match_similarity_threshold: float = field(default=0.86)
     mm_eomt_selector_score_threshold: float = field(default=0.35)
     mm_eomt_selector_topk: int = field(default=-1)  # -1 = disabled: keep all masks whose score >= threshold
     mm_eomt_selector_class_type: str = field(
@@ -2405,6 +2417,16 @@ def train(attn_implementation=None):
                     "keep_stuff": tracked.get("mm_eomt_selector_keep_stuff"),
                     "keep_things": tracked.get("mm_eomt_selector_keep_things"),
                     "drop_no_object": tracked.get("mm_eomt_selector_drop_no_object"),
+                    "selective_3d_enabled": tracked.get("mm_eomt_selective_3d_enable"),
+                    "selective_3d_selector_mode": tracked.get("mm_eomt_selective_3d_selector_mode"),
+                    "selective_3d_score_threshold": tracked.get("mm_eomt_selective_3d_score_threshold"),
+                    "selective_3d_topk": tracked.get("mm_eomt_selective_3d_topk"),
+                    "selective_3d_class_type": tracked.get("mm_eomt_selective_3d_class_type"),
+                    "selective_3d_word_match_enable": tracked.get("mm_eomt_selective_3d_word_match_enable"),
+                    "selective_3d_word_match_source": tracked.get("mm_eomt_selective_3d_word_match_source"),
+                    "selective_3d_word_match_mode": tracked.get("mm_eomt_selective_3d_word_match_mode"),
+                    "selective_3d_gate_type": tracked.get("mm_eomt_selective_3d_gate_type"),
+                    "selective_3d_empty_fallback": tracked.get("mm_eomt_selective_3d_empty_fallback"),
                 },
                 sort_keys=True,
             )
@@ -2643,6 +2665,15 @@ def train(attn_implementation=None):
         model.config.mm_eomt_word_match_no_match = model_args.mm_eomt_word_match_no_match
         model.config.mm_eomt_word_match_similarity_threshold = model_args.mm_eomt_word_match_similarity_threshold
         model.config.mm_eomt_selective_3d_enable = model_args.mm_eomt_selective_3d_enable
+        model.config.mm_eomt_selective_3d_selector_mode = model_args.mm_eomt_selective_3d_selector_mode
+        model.config.mm_eomt_selective_3d_score_threshold = model_args.mm_eomt_selective_3d_score_threshold
+        model.config.mm_eomt_selective_3d_topk = model_args.mm_eomt_selective_3d_topk
+        model.config.mm_eomt_selective_3d_class_type = model_args.mm_eomt_selective_3d_class_type
+        model.config.mm_eomt_selective_3d_word_match_enable = model_args.mm_eomt_selective_3d_word_match_enable
+        model.config.mm_eomt_selective_3d_word_match_source = model_args.mm_eomt_selective_3d_word_match_source
+        model.config.mm_eomt_selective_3d_word_match_mode = model_args.mm_eomt_selective_3d_word_match_mode
+        model.config.mm_eomt_selective_3d_word_match_no_match = model_args.mm_eomt_selective_3d_word_match_no_match
+        model.config.mm_eomt_selective_3d_word_match_similarity_threshold = model_args.mm_eomt_selective_3d_word_match_similarity_threshold
         model.config.mm_eomt_selector_score_threshold = model_args.mm_eomt_selector_score_threshold
         model.config.mm_eomt_selector_topk = model_args.mm_eomt_selector_topk
         model.config.mm_eomt_selector_class_type = model_args.mm_eomt_selector_class_type
@@ -2728,6 +2759,13 @@ def train(attn_implementation=None):
             if "fusion_block" in tunable_parts:
                 for p in model.get_fusion_block().parameters():
                     p.requires_grad = True
+
+        eomt_registered = model.ensure_eomt_registered_parameters()
+        if len(eomt_registered) > 0:
+            rank0_print(
+                "EoMT: registered object-block parameters before optimizer creation: "
+                + ", ".join(eomt_registered)
+            )
 
         total_params = sum(p.ds_numel if hasattr(p, "ds_numel") else p.numel() for p in model.parameters())
         trainable_params = sum(p.ds_numel if hasattr(p, "ds_numel") else p.numel() for p in model.parameters() if p.requires_grad)

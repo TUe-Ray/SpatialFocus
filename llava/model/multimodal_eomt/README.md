@@ -119,15 +119,43 @@ Current default behavior:
 
 This is intentional because COCO class coverage is limited for indoor categories such as `cabinet`, `desk`, `whiteboard`, and `radiator`.
 
-## Config knobs added for word matching
+## Config knobs for selection and word matching
 
-These knobs are read from the model config and are used by both selector-side and selective-3D word matching:
+Object-block selection keeps the original post-pool namespace:
 
+- `mm_eomt_selector_mode`
+- `mm_eomt_selector_keep_stuff`
+- `mm_eomt_selector_keep_things`
+- `mm_eomt_selector_drop_no_object`
+- `mm_eomt_selector_order`
+- `mm_eomt_selector_no_object_class_id`
 - `mm_eomt_word_match_enable`
 - `mm_eomt_word_match_source`
 - `mm_eomt_word_match_mode`
 - `mm_eomt_word_match_no_match`
 - `mm_eomt_word_match_similarity_threshold`
+
+Selective 3D uses a separate namespace so it can coexist with the object block:
+
+- `mm_eomt_selective_3d_selector_mode`
+- `mm_eomt_selective_3d_score_threshold`
+- `mm_eomt_selective_3d_topk`
+- `mm_eomt_selective_3d_class_type`
+- `mm_eomt_selective_3d_word_match_enable`
+- `mm_eomt_selective_3d_word_match_source`
+- `mm_eomt_selective_3d_word_match_mode`
+- `mm_eomt_selective_3d_word_match_no_match`
+- `mm_eomt_selective_3d_word_match_similarity_threshold`
+- `mm_eomt_selective_3d_merge_mode`
+- `mm_eomt_selective_3d_gate_type`
+- `mm_eomt_selective_3d_floor`
+- `mm_eomt_selective_3d_empty_fallback`
+
+Experiment families now live in:
+
+- `configs/eomt/eomt_objinfo_round1.json`
+- `configs/eomt/eomt_selective_3d_round1.json`
+- `configs/eomt/eomt_combined_round1.json`
 
 ## If another agent needs to modify behavior
 
@@ -153,3 +181,4 @@ These knobs are read from the model config and are used by both selector-side an
 - This folder assumes COCO-like class IDs for readable class names and aliases.
 - `frame_meta` is important. If metadata does not propagate, question-aware matching will silently become less useful.
 - Some repo-level imports pull optional dependencies like `transformers` and video packages. Lightweight validation scripts should avoid depending on the full LM stack when possible.
+- `scripts/validate_eomt_experiment_configs.py` validates the experiment-family resolver and the legacy selective-3D key aliasing without requiring Torch.

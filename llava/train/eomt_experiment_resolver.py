@@ -47,6 +47,15 @@ ALLOWED_EOMT_OVERRIDE_KEYS = {
     "mm_eomt_word_match_no_match",
     "mm_eomt_word_match_similarity_threshold",
     "mm_eomt_selective_3d_enable",
+    "mm_eomt_selective_3d_selector_mode",
+    "mm_eomt_selective_3d_score_threshold",
+    "mm_eomt_selective_3d_topk",
+    "mm_eomt_selective_3d_class_type",
+    "mm_eomt_selective_3d_word_match_enable",
+    "mm_eomt_selective_3d_word_match_source",
+    "mm_eomt_selective_3d_word_match_mode",
+    "mm_eomt_selective_3d_word_match_no_match",
+    "mm_eomt_selective_3d_word_match_similarity_threshold",
     "mm_eomt_selector_score_threshold",
     "mm_eomt_selector_topk",
     "mm_eomt_selector_class_type",
@@ -88,6 +97,15 @@ TRACKED_SUMMARY_KEYS = [
     "eomt_config_path",
     "eomt_ckpt_path",
     "mm_eomt_selective_3d_enable",
+    "mm_eomt_selective_3d_selector_mode",
+    "mm_eomt_selective_3d_score_threshold",
+    "mm_eomt_selective_3d_topk",
+    "mm_eomt_selective_3d_class_type",
+    "mm_eomt_selective_3d_word_match_enable",
+    "mm_eomt_selective_3d_word_match_source",
+    "mm_eomt_selective_3d_word_match_mode",
+    "mm_eomt_selective_3d_word_match_no_match",
+    "mm_eomt_selective_3d_word_match_similarity_threshold",
     "mm_eomt_selector_score_threshold",
     "mm_eomt_selector_topk",
     "mm_eomt_selector_class_type",
@@ -99,6 +117,18 @@ TRACKED_SUMMARY_KEYS = [
     "eomt_smoke_test_max_samples",
     "eomt_smoke_test_output_dir",
 ]
+
+LEGACY_SELECTIVE_3D_ALIASES = {
+    "mm_eomt_selector_mode": "mm_eomt_selective_3d_selector_mode",
+    "mm_eomt_selector_score_threshold": "mm_eomt_selective_3d_score_threshold",
+    "mm_eomt_selector_topk": "mm_eomt_selective_3d_topk",
+    "mm_eomt_selector_class_type": "mm_eomt_selective_3d_class_type",
+    "mm_eomt_word_match_enable": "mm_eomt_selective_3d_word_match_enable",
+    "mm_eomt_word_match_source": "mm_eomt_selective_3d_word_match_source",
+    "mm_eomt_word_match_mode": "mm_eomt_selective_3d_word_match_mode",
+    "mm_eomt_word_match_no_match": "mm_eomt_selective_3d_word_match_no_match",
+    "mm_eomt_word_match_similarity_threshold": "mm_eomt_selective_3d_word_match_similarity_threshold",
+}
 
 
 def _normalize_value(value: Any) -> Any:
@@ -132,7 +162,32 @@ def _load_json_file(config_path: str) -> Dict[str, Any]:
     return payload
 
 
-def _validate_override_block(block_name: str, overrides: Any) -> Dict[str, Any]:
+def _normalize_override_aliases(
+    block_name: str,
+    overrides: Dict[str, Any],
+    alias_map: Dict[str, str],
+) -> Dict[str, Any]:
+    if not alias_map:
+        return {str(key): _normalize_value(value) for key, value in overrides.items()}
+
+    normalized: Dict[str, Any] = {}
+    for key, value in overrides.items():
+        canonical_key = alias_map.get(str(key), str(key))
+        normalized_value = _normalize_value(value)
+        if canonical_key in normalized and normalized[canonical_key] != normalized_value:
+            raise EoMTExperimentConfigError(
+                f"Conflicting EoMT experiment override keys in {block_name}: "
+                f"{key!r} maps to {canonical_key!r} but both define different values."
+            )
+        normalized[canonical_key] = normalized_value
+    return normalized
+
+
+def _validate_override_block(
+    block_name: str,
+    overrides: Any,
+    alias_map: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
     if overrides is None:
         return {}
     if not isinstance(overrides, dict):
@@ -147,7 +202,11 @@ def _validate_override_block(block_name: str, overrides: Any) -> Dict[str, Any]:
             f"Allowed keys: {sorted(ALLOWED_EOMT_OVERRIDE_KEYS)}"
         )
 
-    return {str(key): _normalize_value(value) for key, value in overrides.items()}
+    return _normalize_override_aliases(
+        block_name=block_name,
+        overrides=overrides,
+        alias_map=alias_map or {},
+    )
 
 
 def _validate_payload(payload: Dict[str, Any], config_path: str) -> Dict[str, Any]:
@@ -176,7 +235,11 @@ def _validate_payload(payload: Dict[str, Any], config_path: str) -> Dict[str, An
             f"EoMT experiment config '{config_path}' field 'metadata' must be a JSON object if provided."
         )
 
-    shared = _validate_override_block("shared", payload.get("shared", {}))
+    alias_map = {}
+    if family == "eomt_selective_3d_round1":
+        alias_map = LEGACY_SELECTIVE_3D_ALIASES
+
+    shared = _validate_override_block("shared", payload.get("shared", {}), alias_map=alias_map)
     modes_raw = payload.get("modes", None)
     if not isinstance(modes_raw, dict) or len(modes_raw) == 0:
         raise EoMTExperimentConfigError(
@@ -189,7 +252,11 @@ def _validate_payload(payload: Dict[str, Any], config_path: str) -> Dict[str, An
             raise EoMTExperimentConfigError(
                 f"EoMT experiment config '{config_path}' contains an invalid mode name: {mode_name!r}."
             )
-        modes[mode_name] = _validate_override_block(f"modes.{mode_name}", overrides)
+        modes[mode_name] = _validate_override_block(
+            f"modes.{mode_name}",
+            overrides,
+            alias_map=alias_map,
+        )
 
     return {
         "experiment_family": family,
@@ -242,9 +309,13 @@ def resolve_eomt_experiment_config(model_args: Any, raw_argv: Optional[Sequence[
 
     baseline_forced_disable = False
     if mode_name == "baseline":
-        if resolved.get("mm_eomt_enable_object_block", False) is not False:
+        if (
+            resolved.get("mm_eomt_enable_object_block", False) is not False
+            or resolved.get("mm_eomt_selective_3d_enable", False) is not False
+        ):
             baseline_forced_disable = True
         resolved["mm_eomt_enable_object_block"] = False
+        resolved["mm_eomt_selective_3d_enable"] = False
 
     explicit_cli_fields = extract_explicit_eomt_cli_fields(raw_argv)
     conflicting_fields = []

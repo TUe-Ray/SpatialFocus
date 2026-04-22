@@ -1,0 +1,68 @@
+{
+  "experiment_family": "eomt_combined_round1",
+  "description": "Joint round-1 comparison for object block plus selective 3D gating. Keeps object-block selection post-pooling and selective-3D selection on raw EoMT queries.",
+  "shared": {
+    "eomt_pool_top_k": 5,
+    "eomt_pool_selection": "class_confidence",
+    "eomt_pool_mask_area_threshold": 0.5,
+    "eomt_pool_score_threshold": 0.2,
+    "mm_eomt_object_block_position": "after_visual",
+    "mm_eomt_object_block_max_objects": 8,
+    "mm_eomt_object_block_max_per_frame": 2,
+    "mm_eomt_selector_mode": "class_aware",
+    "mm_eomt_selector_keep_stuff": true,
+    "mm_eomt_selector_keep_things": true,
+    "mm_eomt_selector_drop_no_object": true,
+    "mm_eomt_selector_no_object_class_id": -1,
+    "mm_eomt_selector_order": "frame_then_score",
+    "mm_eomt_obj_info_mode": "none",
+    "mm_eomt_use_object_type_embedding": false,
+    "mm_eomt_obj_info_text": "Object information from the image:",
+    "mm_eomt_obj_info_trainable": true,
+    "mm_eomt_selective_3d_selector_mode": "confidence",
+    "mm_eomt_selective_3d_score_threshold": 0.8,
+    "mm_eomt_selective_3d_topk": -1,
+    "mm_eomt_selective_3d_class_type": "things",
+    "mm_eomt_selective_3d_merge_mode": "soft_max_union",
+    "mm_eomt_selective_3d_floor": 0.1,
+    "mm_eomt_selective_3d_empty_fallback": "all_3d",
+    "eomt_smoke_test_enable": true,
+    "eomt_smoke_test_max_samples": 4
+  },
+  "modes": {
+    "baseline": {
+      "mm_eomt_enable_object_block": false,
+      "mm_eomt_selective_3d_enable": false
+    },
+    "object_only": {
+      "mm_eomt_enable_object_block": true,
+      "mm_eomt_selective_3d_enable": false
+    },
+    "selective_soft": {
+      "mm_eomt_enable_object_block": false,
+      "mm_eomt_selective_3d_enable": true,
+      "mm_eomt_selective_3d_gate_type": "soft",
+      "mm_eomt_selective_3d_empty_fallback": "all_3d"
+    },
+    "combined_soft": {
+      "mm_eomt_enable_object_block": true,
+      "mm_eomt_selective_3d_enable": true,
+      "mm_eomt_selective_3d_gate_type": "soft",
+      "mm_eomt_selective_3d_empty_fallback": "all_3d"
+    },
+    "combined_soft_with_floor": {
+      "mm_eomt_enable_object_block": true,
+      "mm_eomt_selective_3d_enable": true,
+      "mm_eomt_selective_3d_gate_type": "soft_with_floor",
+      "mm_eomt_selective_3d_floor": 0.1,
+      "mm_eomt_selective_3d_empty_fallback": "all_3d"
+    },
+    "combined_soft_with_floor_zero_fallback": {
+      "mm_eomt_enable_object_block": true,
+      "mm_eomt_selective_3d_enable": true,
+      "mm_eomt_selective_3d_gate_type": "soft_with_floor",
+      "mm_eomt_selective_3d_floor": 0.1,
+      "mm_eomt_selective_3d_empty_fallback": "zero_3d"
+    }
+  }
+}

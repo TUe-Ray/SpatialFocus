@@ -340,6 +340,34 @@ class LlavaMetaForCausalLM(ABC):
     def get_fusion_block(self):
         return self.get_model().get_fusion_block()
 
+    def ensure_eomt_registered_parameters(self):
+        model = self.get_model()
+        if model is None or not hasattr(model, "embed_tokens"):
+            return []
+
+        hidden_size = int(model.embed_tokens.weight.shape[1])
+        registered = []
+
+        obj_info_mode = str(getattr(self.config, "mm_eomt_obj_info_mode", "none"))
+        obj_info_trainable = bool(getattr(self.config, "mm_eomt_obj_info_trainable", True))
+        if obj_info_mode == "learnable_embedding":
+            self._get_or_create_eomt_vector_parameter(
+                name="eomt_obj_info_learnable_embedding",
+                hidden_size=hidden_size,
+                trainable=obj_info_trainable,
+            )
+            registered.append("eomt_obj_info_learnable_embedding")
+
+        if bool(getattr(self.config, "mm_eomt_use_object_type_embedding", False)):
+            self._get_or_create_eomt_vector_parameter(
+                name="eomt_object_type_embedding",
+                hidden_size=hidden_size,
+                trainable=True,
+            )
+            registered.append("eomt_object_type_embedding")
+
+        return registered
+
     def _get_eomt_mask_pooler(self):
         pooler = getattr(self, "_eomt_mask_pooler", None)
         if pooler is None:

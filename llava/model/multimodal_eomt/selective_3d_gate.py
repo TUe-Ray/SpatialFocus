@@ -124,7 +124,8 @@ class Selective3DConfig:
             )
         if self.topk != -1 and self.topk < 1:
             raise ValueError(
-                f"mm_eomt_selector_topk must be -1 (disabled, keep all above threshold) or >= 1, got {self.topk}."
+                "mm_eomt_selective_3d_topk must be -1 (disabled, keep all above threshold) "
+                f"or >= 1, got {self.topk}."
             )
         if self.merge_mode not in self.VALID_MERGE_MODES:
             raise ValueError(
@@ -163,28 +164,90 @@ class Selective3DConfig:
             )
         if not (0.0 <= self.word_match_similarity_threshold <= 1.0):
             raise ValueError(
-                "mm_eomt_word_match_similarity_threshold must be in [0, 1], "
+                "mm_eomt_selective_3d_word_match_similarity_threshold must be in [0, 1], "
                 f"got {self.word_match_similarity_threshold}."
             )
 
     @classmethod
     def from_model_config(cls, config) -> "Selective3DConfig":
         """Build from a model config object (getattr-based)."""
+        def _get_with_legacy(primary_name, legacy_name, default):
+            value = getattr(config, primary_name, None)
+            if value is None:
+                value = getattr(config, legacy_name, default)
+            if value is None:
+                return default
+            return value
+
         return cls(
             enable=bool(getattr(config, "mm_eomt_selective_3d_enable", False)),
-            selector_mode=str(getattr(config, "mm_eomt_selector_mode", "confidence")),
-            score_threshold=float(getattr(config, "mm_eomt_selector_score_threshold", 0.35)),
-            topk=int(getattr(config, "mm_eomt_selector_topk", -1)),
+            selector_mode=str(
+                _get_with_legacy(
+                    "mm_eomt_selective_3d_selector_mode",
+                    "mm_eomt_selector_mode",
+                    "confidence",
+                )
+            ),
+            score_threshold=float(
+                _get_with_legacy(
+                    "mm_eomt_selective_3d_score_threshold",
+                    "mm_eomt_selector_score_threshold",
+                    0.35,
+                )
+            ),
+            topk=int(
+                _get_with_legacy(
+                    "mm_eomt_selective_3d_topk",
+                    "mm_eomt_selector_topk",
+                    -1,
+                )
+            ),
             merge_mode=str(getattr(config, "mm_eomt_selective_3d_merge_mode", "soft_max_union")),
             gate_type=str(getattr(config, "mm_eomt_selective_3d_gate_type", "soft_with_floor")),
             floor=float(getattr(config, "mm_eomt_selective_3d_floor", 0.1)),
             empty_fallback=str(getattr(config, "mm_eomt_selective_3d_empty_fallback", "all_3d")),
-            class_type_filter=str(getattr(config, "mm_eomt_selector_class_type", "all")),
-            word_match_enable=bool(getattr(config, "mm_eomt_word_match_enable", True)),
-            word_match_source=str(getattr(config, "mm_eomt_word_match_source", "visible_grounded_words")),
-            word_match_mode=str(getattr(config, "mm_eomt_word_match_mode", "hybrid_safe")),
-            word_match_no_match=str(getattr(config, "mm_eomt_word_match_no_match", "keep_masks")),
-            word_match_similarity_threshold=float(getattr(config, "mm_eomt_word_match_similarity_threshold", 0.86)),
+            class_type_filter=str(
+                _get_with_legacy(
+                    "mm_eomt_selective_3d_class_type",
+                    "mm_eomt_selector_class_type",
+                    "all",
+                )
+            ),
+            word_match_enable=bool(
+                _get_with_legacy(
+                    "mm_eomt_selective_3d_word_match_enable",
+                    "mm_eomt_word_match_enable",
+                    True,
+                )
+            ),
+            word_match_source=str(
+                _get_with_legacy(
+                    "mm_eomt_selective_3d_word_match_source",
+                    "mm_eomt_word_match_source",
+                    "visible_grounded_words",
+                )
+            ),
+            word_match_mode=str(
+                _get_with_legacy(
+                    "mm_eomt_selective_3d_word_match_mode",
+                    "mm_eomt_word_match_mode",
+                    "hybrid_safe",
+                )
+            ),
+            word_match_no_match=str(
+                _get_with_legacy(
+                    "mm_eomt_selective_3d_word_match_no_match",
+                    "mm_eomt_word_match_no_match",
+                    "keep_masks",
+                )
+            ),
+            word_match_similarity_threshold=float(
+                _get_with_legacy(
+                    "mm_eomt_selective_3d_word_match_similarity_threshold",
+                    "mm_eomt_word_match_similarity_threshold",
+                    0.86,
+                )
+            ),
         )
 
     def word_match_config(self) -> WordClassMatchConfig:
