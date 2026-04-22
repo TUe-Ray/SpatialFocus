@@ -226,6 +226,11 @@ class ModelArguments:
     mm_eomt_use_object_type_embedding: bool = field(default=False)
     mm_eomt_external_socket_word_topn: int = field(default=1)
     mm_eomt_external_socket_deduplicate: bool = field(default=True)
+    mm_eomt_word_match_enable: bool = field(default=True)
+    mm_eomt_word_match_source: str = field(default="visible_grounded_words")
+    mm_eomt_word_match_mode: str = field(default="hybrid_safe")
+    mm_eomt_word_match_no_match: str = field(default="keep_masks")
+    mm_eomt_word_match_similarity_threshold: float = field(default=0.86)
     mm_eomt_selective_3d_enable: bool = field(default=False)
     mm_eomt_selector_score_threshold: float = field(default=0.35)
     mm_eomt_selector_topk: int = field(default=-1)  # -1 = disabled: keep all masks whose score >= threshold
@@ -2632,6 +2637,11 @@ def train(attn_implementation=None):
         model.config.mm_eomt_use_object_type_embedding = model_args.mm_eomt_use_object_type_embedding
         model.config.mm_eomt_external_socket_word_topn = model_args.mm_eomt_external_socket_word_topn
         model.config.mm_eomt_external_socket_deduplicate = model_args.mm_eomt_external_socket_deduplicate
+        model.config.mm_eomt_word_match_enable = model_args.mm_eomt_word_match_enable
+        model.config.mm_eomt_word_match_source = model_args.mm_eomt_word_match_source
+        model.config.mm_eomt_word_match_mode = model_args.mm_eomt_word_match_mode
+        model.config.mm_eomt_word_match_no_match = model_args.mm_eomt_word_match_no_match
+        model.config.mm_eomt_word_match_similarity_threshold = model_args.mm_eomt_word_match_similarity_threshold
         model.config.mm_eomt_selective_3d_enable = model_args.mm_eomt_selective_3d_enable
         model.config.mm_eomt_selector_score_threshold = model_args.mm_eomt_selector_score_threshold
         model.config.mm_eomt_selector_topk = model_args.mm_eomt_selector_topk
