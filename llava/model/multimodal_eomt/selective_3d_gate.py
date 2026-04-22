@@ -24,6 +24,14 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn.functional as F
 
+from .word_class_matcher import (
+    VALID_WORD_MATCH_MODES,
+    VALID_WORD_NO_MATCH_BEHAVIORS,
+    VALID_WORD_SOURCES,
+    WordClassMatchConfig,
+    match_entry_words_to_class_names,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -92,6 +100,11 @@ class Selective3DConfig:
     # "things" – keep only queries whose argmax class is a "thing" (countable object)
     # "stuff"  – keep only queries whose argmax class is "stuff" (background / uncountable)
     class_type_filter: str = "all"
+    word_match_enable: bool = True
+    word_match_source: str = "visible_grounded_words"
+    word_match_mode: str = "hybrid_safe"
+    word_match_no_match: str = "keep_masks"
+    word_match_similarity_threshold: float = 0.86
 
     VALID_SELECTOR_MODES = {"confidence"}
     VALID_MERGE_MODES = {"soft_max_union"}
@@ -133,6 +146,26 @@ class Selective3DConfig:
                 f"Invalid class_type_filter '{self.class_type_filter}'. "
                 f"Valid: {sorted(self.VALID_CLASS_TYPE_FILTERS)}"
             )
+        if self.word_match_source not in VALID_WORD_SOURCES:
+            raise ValueError(
+                f"Invalid word_match_source '{self.word_match_source}'. "
+                f"Valid: {sorted(VALID_WORD_SOURCES)}"
+            )
+        if self.word_match_mode not in VALID_WORD_MATCH_MODES:
+            raise ValueError(
+                f"Invalid word_match_mode '{self.word_match_mode}'. "
+                f"Valid: {sorted(VALID_WORD_MATCH_MODES)}"
+            )
+        if self.word_match_no_match not in VALID_WORD_NO_MATCH_BEHAVIORS:
+            raise ValueError(
+                f"Invalid word_match_no_match '{self.word_match_no_match}'. "
+                f"Valid: {sorted(VALID_WORD_NO_MATCH_BEHAVIORS)}"
+            )
+        if not (0.0 <= self.word_match_similarity_threshold <= 1.0):
+            raise ValueError(
+                "mm_eomt_word_match_similarity_threshold must be in [0, 1], "
+                f"got {self.word_match_similarity_threshold}."
+            )
 
     @classmethod
     def from_model_config(cls, config) -> "Selective3DConfig":
@@ -147,6 +180,20 @@ class Selective3DConfig:
             floor=float(getattr(config, "mm_eomt_selective_3d_floor", 0.1)),
             empty_fallback=str(getattr(config, "mm_eomt_selective_3d_empty_fallback", "all_3d")),
             class_type_filter=str(getattr(config, "mm_eomt_selector_class_type", "all")),
+            word_match_enable=bool(getattr(config, "mm_eomt_word_match_enable", True)),
+            word_match_source=str(getattr(config, "mm_eomt_word_match_source", "visible_grounded_words")),
+            word_match_mode=str(getattr(config, "mm_eomt_word_match_mode", "hybrid_safe")),
+            word_match_no_match=str(getattr(config, "mm_eomt_word_match_no_match", "keep_masks")),
+            word_match_similarity_threshold=float(getattr(config, "mm_eomt_word_match_similarity_threshold", 0.86)),
+        )
+
+    def word_match_config(self) -> WordClassMatchConfig:
+        return WordClassMatchConfig(
+            enable=self.word_match_enable,
+            source=self.word_match_source,
+            mode=self.word_match_mode,
+            no_match_behavior=self.word_match_no_match,
+            similarity_threshold=self.word_match_similarity_threshold,
         )
 
 
@@ -166,6 +213,17 @@ class SelectiveGateDebugInfo:
     selected_query_indices: List[int] = field(default_factory=list)
     selected_class_ids: List[int] = field(default_factory=list)
     selected_class_names: List[str] = field(default_factory=list)
+    word_match_enabled: bool = False
+    word_match_source_used: str = ""
+    word_match_source_note: Optional[str] = None
+    word_match_input_words: List[str] = field(default_factory=list)
+    word_match_matched_words: List[str] = field(default_factory=list)
+    word_match_unmatched_words: List[str] = field(default_factory=list)
+    word_match_candidate_class_names: List[str] = field(default_factory=list)
+    word_match_matched_class_names: List[str] = field(default_factory=list)
+    word_match_kept_class_names: List[str] = field(default_factory=list)
+    word_filter_applied: bool = False
+    word_filter_reason: str = ""
     used_fallback: bool = False
     fallback_mode: str = ""
     fallback_reason: str = ""
@@ -178,13 +236,17 @@ class SelectiveGateDebugInfo:
         topk_msg = "disabled(all_above_thresh)" if self.topk_disabled else f"applied({self.num_masks_after_topk})"
         cls_summary = list(zip(self.selected_class_names, [f"{s:.4f}" for s in self.selected_scores]))
         logger.info(
-            "%s queries: total=%d, after_thresh=%d, topk=%s, "
-            "selected=%s, fallback=%s(%s), reason=%s, gate_stats=(min=%.4f, max=%.4f, mean=%.4f)",
+            "%s queries: total=%d, after_thresh=%d, topk=%s, selected=%s, "
+            "word_filter=%s(%s), kept_classes=%s, fallback=%s(%s), reason=%s, "
+            "gate_stats=(min=%.4f, max=%.4f, mean=%.4f)",
             tag,
             self.num_masks_total,
             self.num_masks_after_threshold,
             topk_msg,
             cls_summary,
+            self.word_filter_applied,
+            self.word_filter_reason,
+            self.word_match_kept_class_names,
             self.used_fallback,
             self.fallback_mode,
             self.fallback_reason,
@@ -530,6 +592,8 @@ def apply_selective_3d_fusion(
 
     # Retrieve stuff class IDs from EoMT outputs (populated by the extractor).
     stuff_class_ids: frozenset = eomt_outputs.get("stuff_class_ids", frozenset())
+    frame_meta = eomt_outputs.get("frame_meta", [])
+    word_match_config = config.word_match_config()
     if config.class_type_filter != "all" and not stuff_class_ids:
         logger.warning(
             "[Selective3DGate] class_type_filter='%s' requested but stuff_class_ids is empty "
@@ -563,8 +627,10 @@ def apply_selective_3d_fusion(
 
         frame_scores = per_query_scores[eomt_f_idx]  # (Q,)
         frame_soft_masks = soft_masks[eomt_f_idx]  # (Q, H_m, W_m)
+        frame_class_ids_t = per_query_class_ids[eomt_f_idx]  # (Q,)
 
         debug = SelectiveGateDebugInfo(num_masks_total=Q)
+        debug.word_match_enabled = word_match_config.enable
 
         if config.selector_mode != "confidence":
             raise ValueError(
@@ -575,7 +641,6 @@ def apply_selective_3d_fusion(
         # Optional: filter queries by panoptic class type (things / stuff) before
         # applying the score threshold and top-k selection.
         if config.class_type_filter != "all" and stuff_class_ids:
-            frame_class_ids_t = per_query_class_ids[eomt_f_idx]  # (Q,)
             is_stuff = torch.tensor(
                 [int(cid.item()) in stuff_class_ids for cid in frame_class_ids_t],
                 dtype=torch.bool,
@@ -586,6 +651,57 @@ def apply_selective_3d_fusion(
                 frame_scores[is_stuff] = -1.0   # suppress stuff queries
             else:  # "stuff"
                 frame_scores[~is_stuff] = -1.0  # suppress things queries
+
+        frame_meta_entry = {}
+        if isinstance(frame_meta, list) and eomt_f_idx < len(frame_meta) and isinstance(frame_meta[eomt_f_idx], dict):
+            frame_meta_entry = frame_meta[eomt_f_idx]
+
+        candidate_class_names = []
+        seen_class_names = set()
+        for class_id in frame_class_ids_t.tolist():
+            class_name = _lookup_class_name(int(class_id))
+            if class_name in seen_class_names:
+                continue
+            seen_class_names.add(class_name)
+            candidate_class_names.append(class_name)
+
+        word_match_result = match_entry_words_to_class_names(
+            frame_meta_entry,
+            candidate_class_names=candidate_class_names,
+            match_config=word_match_config,
+        )
+        debug.word_match_source_used = word_match_result.source_used
+        debug.word_match_source_note = word_match_result.source_note
+        debug.word_match_input_words = word_match_result.input_words
+        debug.word_match_matched_words = word_match_result.matched_words
+        debug.word_match_unmatched_words = word_match_result.unmatched_words
+        debug.word_match_candidate_class_names = word_match_result.candidate_class_names
+        debug.word_match_matched_class_names = word_match_result.matched_class_names
+        debug.word_match_kept_class_names = word_match_result.kept_class_names
+        debug.word_filter_reason = word_match_result.filter_reason
+
+        if word_match_result.filter_applied:
+            kept_class_names = set(word_match_result.kept_class_names)
+            if kept_class_names:
+                class_match_mask = torch.tensor(
+                    [int(_lookup_class_name(int(cid.item())) in kept_class_names) for cid in frame_class_ids_t],
+                    dtype=torch.bool,
+                    device=frame_scores.device,
+                )
+                has_confident_kept = bool(
+                    ((frame_scores >= config.score_threshold) & class_match_mask).any().item()
+                )
+                if has_confident_kept or word_match_result.no_match_behavior != "keep_masks":
+                    frame_scores = frame_scores.clone()
+                    frame_scores[~class_match_mask] = -1.0
+                    debug.word_filter_applied = True
+                    if not has_confident_kept:
+                        debug.word_filter_reason = (
+                            f"{word_match_result.filter_reason}_no_confident_candidate"
+                        )
+            elif word_match_result.no_match_behavior == "filter_out":
+                frame_scores = torch.full_like(frame_scores, fill_value=-1.0)
+                debug.word_filter_applied = True
 
         # A. Select using max foreground class probability.
         sel_indices, sel_scores = select_masks_by_confidence(
@@ -616,8 +732,21 @@ def apply_selective_3d_fusion(
             fallback_debug.num_masks_after_threshold = debug.num_masks_after_threshold
             fallback_debug.topk_disabled = debug.topk_disabled
             fallback_debug.num_masks_after_topk = 0
+            fallback_debug.word_match_enabled = debug.word_match_enabled
+            fallback_debug.word_match_source_used = debug.word_match_source_used
+            fallback_debug.word_match_source_note = debug.word_match_source_note
+            fallback_debug.word_match_input_words = debug.word_match_input_words
+            fallback_debug.word_match_matched_words = debug.word_match_matched_words
+            fallback_debug.word_match_unmatched_words = debug.word_match_unmatched_words
+            fallback_debug.word_match_candidate_class_names = debug.word_match_candidate_class_names
+            fallback_debug.word_match_matched_class_names = debug.word_match_matched_class_names
+            fallback_debug.word_match_kept_class_names = debug.word_match_kept_class_names
+            fallback_debug.word_filter_applied = debug.word_filter_applied
+            fallback_debug.word_filter_reason = debug.word_filter_reason
             fallback_debug.selected_scores = debug.selected_scores
             fallback_debug.selected_query_indices = []
+            fallback_debug.selected_class_ids = debug.selected_class_ids
+            fallback_debug.selected_class_names = debug.selected_class_names
             gated_frames.append(gated_frame)
             debug_infos.append(fallback_debug)
             continue

@@ -410,16 +410,26 @@ class LlavaMetaForCausalLM(ABC):
                 sample_idx = idx
                 frame_idx = idx
 
-            socket_dict = meta.get("external_selection", meta)
+            socket_dict = {}
+            if isinstance(meta, dict):
+                socket_dict.update(meta)
+            nested_socket = meta.get("external_selection", None) if isinstance(meta, dict) else None
+            if isinstance(nested_socket, dict):
+                socket_dict.update(nested_socket)
+            if len(socket_dict) == 0:
+                socket_dict = meta
+
+            visible_grounded_words = socket_dict.get("visible_grounded_words", None)
             selected_words = socket_dict.get("selected_words", None)
             selected_mask_ids = socket_dict.get("selected_mask_ids", None)
             selected_query_ids = socket_dict.get("selected_query_ids", None)
 
-            if any(x is not None for x in [selected_words, selected_mask_ids, selected_query_ids]):
+            if any(x is not None for x in [visible_grounded_words, selected_words, selected_mask_ids, selected_query_ids]):
                 entries.append(
                     {
                         "sample_idx": sample_idx,
                         "frame_idx": frame_idx,
+                        "visible_grounded_words": visible_grounded_words,
                         "selected_words": selected_words,
                         "selected_mask_ids": selected_mask_ids,
                         "selected_query_ids": selected_query_ids,
@@ -1243,6 +1253,16 @@ class LlavaMetaForCausalLM(ABC):
                         "num_selected": dbg.num_masks_after_topk if dbg else None,
                         "selected_query_indices": dbg.selected_query_indices if dbg else [],
                         "selected_scores": dbg.selected_scores if dbg else [],
+                        "word_match_enabled": dbg.word_match_enabled if dbg else None,
+                        "word_match_source_used": dbg.word_match_source_used if dbg else None,
+                        "word_match_source_note": dbg.word_match_source_note if dbg else None,
+                        "word_match_input_words": dbg.word_match_input_words if dbg else [],
+                        "word_match_matched_words": dbg.word_match_matched_words if dbg else [],
+                        "word_match_unmatched_words": dbg.word_match_unmatched_words if dbg else [],
+                        "word_match_matched_class_names": dbg.word_match_matched_class_names if dbg else [],
+                        "word_match_kept_class_names": dbg.word_match_kept_class_names if dbg else [],
+                        "word_filter_applied": dbg.word_filter_applied if dbg else None,
+                        "word_filter_reason": dbg.word_filter_reason if dbg else None,
                     },
                     "gate_stats": {
                         "min": dbg.gate_min if dbg else None,

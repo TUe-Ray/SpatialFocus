@@ -8,6 +8,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
+from .word_class_matcher import (
+    WordClassMatchConfig,
+    canonicalize_word_list,
+    lookup_class_name,
+    match_entry_words_to_class_names,
+)
+
 
 class EoMTObjectTokenSelector:
     """Select pooled object tokens with deterministic ordering and budgets."""
@@ -91,6 +98,140 @@ class EoMTObjectTokenSelector:
             return class_id == no_object_class_id or class_id < 0
         return class_id < 0
 
+    def _merge_socket_word_fields(
+        self,
+        merged: Dict[str, Any],
+        item: Dict[str, Any],
+    ) -> None:
+        for field_name in ("visible_grounded_words", "selected_words"):
+            values = canonicalize_word_list(item.get(field_name, []))
+            if not values:
+                continue
+            merged_values = canonicalize_word_list(merged.get(field_name, []))
+            merged[field_name] = merged_values + [value for value in values if value not in set(merged_values)]
+
+    def _apply_external_socket_words(
+        self,
+        candidates: List[Dict[str, Any]],
+        word_entries_by_key: Dict[Tuple[int, int], Dict[str, Any]],
+        config: Any,
+        contract: Dict[str, Any],
+    ) -> Tuple[List[Dict[str, Any]], Optional[str], Optional[str]]:
+        match_config = WordClassMatchConfig.from_config(config)
+        candidates_by_key: Dict[Tuple[int, int], List[Dict[str, Any]]] = {}
+        for cand in candidates:
+            key = (int(cand["sample_idx"]), int(cand["frame_idx"]))
+            candidates_by_key.setdefault(key, []).append(cand)
+
+        filtered: List[Dict[str, Any]] = []
+        frame_results: List[Dict[str, Any]] = []
+        matched_frames = 0
+        kept_frames_without_match = 0
+        recovered_frames = 0
+        filter_out_frames = 0
+        missing_candidate_frames = 0
+
+        contract["word_match_enabled"] = bool(match_config.enable)
+        contract["word_source_requested"] = match_config.source
+        contract["word_match_mode"] = match_config.mode
+        contract["word_no_match_behavior"] = match_config.no_match_behavior
+        contract["word_similarity_threshold"] = float(match_config.similarity_threshold)
+
+        for key, entry in word_entries_by_key.items():
+            frame_candidates = candidates_by_key.get(key, [])
+            if len(frame_candidates) == 0:
+                missing_candidate_frames += 1
+                frame_results.append(
+                    {
+                        "sample_idx": int(key[0]),
+                        "frame_idx": int(key[1]),
+                        "filter_applied": False,
+                        "filter_reason": "missing_candidate_frame",
+                    }
+                )
+                continue
+
+            candidate_class_names: List[str] = []
+            seen_class_names = set()
+            for cand in frame_candidates:
+                class_name = str(cand.get("class_name", ""))
+                if not class_name or class_name in seen_class_names:
+                    continue
+                seen_class_names.add(class_name)
+                candidate_class_names.append(class_name)
+
+            match_result = match_entry_words_to_class_names(
+                entry,
+                candidate_class_names=candidate_class_names,
+                match_config=match_config,
+            )
+            frame_result = match_result.to_dict()
+            frame_result["sample_idx"] = int(key[0])
+            frame_result["frame_idx"] = int(key[1])
+            frame_result["candidate_count"] = len(frame_candidates)
+            frame_results.append(frame_result)
+
+            if match_result.matched_class_names:
+                matched_frames += 1
+            elif match_result.filter_reason == "no_word_class_match_keep_masks":
+                kept_frames_without_match += 1
+            elif match_result.filter_reason == "no_word_class_match_keep_best_similar":
+                recovered_frames += 1
+            elif match_result.filter_reason == "no_word_class_match_filter_out":
+                filter_out_frames += 1
+
+            if match_result.filter_applied:
+                kept_class_names = set(match_result.kept_class_names)
+                if kept_class_names:
+                    filtered.extend(
+                        cand for cand in frame_candidates if cand.get("class_name") in kept_class_names
+                    )
+                continue
+
+            filtered.extend(frame_candidates)
+
+        if bool(getattr(config, "mm_eomt_external_socket_deduplicate", True)):
+            deduped: List[Dict[str, Any]] = []
+            seen = set()
+            for cand in filtered:
+                dedupe_key = (cand["sample_idx"], cand["frame_idx"], cand["query_idx"])
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                deduped.append(cand)
+            filtered = deduped
+
+        contract["word_frame_result_count"] = len(frame_results)
+        contract["word_frame_results"] = frame_results
+        contract["word_frames_with_matches"] = matched_frames
+        contract["word_frames_keep_masks"] = kept_frames_without_match
+        contract["word_frames_keep_best_similar"] = recovered_frames
+        contract["word_frames_filter_out"] = filter_out_frames
+        contract["word_frames_missing_candidates"] = missing_candidate_frames
+        contract["matched_candidate_count"] = int(len(filtered))
+
+        if not match_config.enable:
+            contract["matching_status"] = "word_match_disabled"
+            return [], "no_matched_masks", "word_match_disabled"
+        if len(filtered) == 0:
+            if filter_out_frames > 0:
+                contract["matching_status"] = "words_no_match_filter_out"
+                return [], "no_matched_masks", "words_no_match_filter_out"
+            contract["matching_status"] = "words_no_matched_candidates"
+            return [], "no_matched_masks", "words_no_matched_candidates"
+        if matched_frames > 0:
+            contract["matching_status"] = "words_matched"
+            return filtered, None, "words_matched"
+        if recovered_frames > 0:
+            contract["matching_status"] = "words_no_match_keep_best_similar"
+            return filtered, None, "words_no_match_keep_best_similar"
+        if kept_frames_without_match > 0:
+            contract["matching_status"] = "words_no_match_keep_masks"
+            return filtered, None, "words_no_match_keep_masks"
+
+        contract["matching_status"] = "words_candidates_retained"
+        return filtered, None, "words_candidates_retained"
+
     def _apply_external_socket(
         self,
         candidates: List[Dict[str, Any]],
@@ -105,6 +246,7 @@ class EoMTObjectTokenSelector:
         #       "frame_idx": int,
         #       "selected_query_ids": Optional[List[int]],
         #       "selected_mask_ids": Optional[List[int]],
+        #       "visible_grounded_words": Optional[List[str]],
         #       "selected_words": Optional[List[str]],
         #     },
         #     ...
@@ -112,6 +254,7 @@ class EoMTObjectTokenSelector:
         # }
         contract = {
             "selected_words_present": False,
+            "visible_grounded_words_present": False,
             "selected_mask_ids_present": False,
             "selected_query_ids_present": False,
             "word_topn": int(getattr(config, "mm_eomt_external_socket_word_topn", 1)),
@@ -138,6 +281,7 @@ class EoMTObjectTokenSelector:
 
         query_map: Dict[Tuple[int, int], set] = {}
         word_entries = 0
+        word_entries_by_key: Dict[Tuple[int, int], Dict[str, Any]] = {}
         unique_ids_all = set()
         candidate_query_ids_by_key: Dict[Tuple[int, int], set] = {}
         for cand in candidates:
@@ -156,10 +300,15 @@ class EoMTObjectTokenSelector:
             selected_query_ids = self._normalize_id_list(item.get("selected_query_ids", None))
             selected_mask_ids = self._normalize_id_list(item.get("selected_mask_ids", None))
             selected_words = item.get("selected_words", None)
+            visible_grounded_words = item.get("visible_grounded_words", None)
+            has_word_payload = False
 
             if isinstance(selected_words, (list, tuple)) and len(selected_words) > 0:
-                word_entries += 1
+                has_word_payload = True
                 contract["selected_words_present"] = True
+            if isinstance(visible_grounded_words, (list, tuple)) and len(visible_grounded_words) > 0:
+                has_word_payload = True
+                contract["visible_grounded_words_present"] = True
             if len(selected_mask_ids) > 0:
                 contract["selected_mask_ids_present"] = True
             if len(selected_query_ids) > 0:
@@ -185,51 +334,121 @@ class EoMTObjectTokenSelector:
                     query_map[key] = set()
                 query_map[key].update(allowed_ids)
 
+            if has_word_payload:
+                word_entries += 1
+                key = (sample_idx, frame_idx)
+                merged_entry = word_entries_by_key.setdefault(
+                    key,
+                    {
+                        "sample_idx": sample_idx,
+                        "frame_idx": frame_idx,
+                        "selected_words": [],
+                        "visible_grounded_words": [],
+                    },
+                )
+                self._merge_socket_word_fields(merged_entry, item)
+
         contract["selected_id_unique"] = int(len(unique_ids_all))
 
-        if len(query_map) == 0:
-            if word_entries > 0:
-                contract["matching_status"] = "word_matching_deferred_no_ids"
-                return [], contract, "no_matched_masks", "word_matching_deferred"
+        if len(query_map) == 0 and word_entries == 0:
             contract["matching_status"] = "no_query_or_mask_ids"
             return [], contract, "no_valid_selected_masks", None
 
-        out_of_range = 0
-        for key, ids in query_map.items():
-            valid_ids = candidate_query_ids_by_key.get(key, set())
-            out_of_range += sum(1 for query_id in ids if query_id not in valid_ids)
-        contract["selected_id_out_of_range"] = int(out_of_range)
+        filtered_by_ids: List[Dict[str, Any]] = []
+        id_reason: Optional[str] = None
+        id_note: Optional[str] = None
+        id_status: Optional[str] = None
 
-        filtered = [
-            cand
-            for cand in candidates
-            if cand["query_idx"] in query_map.get((cand["sample_idx"], cand["frame_idx"]), set())
-        ]
+        if len(query_map) > 0:
+            out_of_range = 0
+            for key, ids in query_map.items():
+                valid_ids = candidate_query_ids_by_key.get(key, set())
+                out_of_range += sum(1 for query_id in ids if query_id not in valid_ids)
+            contract["selected_id_out_of_range"] = int(out_of_range)
 
+            filtered_by_ids = [
+                cand
+                for cand in candidates
+                if cand["query_idx"] in query_map.get((cand["sample_idx"], cand["frame_idx"]), set())
+            ]
+
+            if bool(getattr(config, "mm_eomt_external_socket_deduplicate", True)):
+                deduped: List[Dict[str, Any]] = []
+                seen = set()
+                for cand in filtered_by_ids:
+                    dedupe_key = (cand["sample_idx"], cand["frame_idx"], cand["query_idx"])
+                    if dedupe_key in seen:
+                        continue
+                    seen.add(dedupe_key)
+                    deduped.append(cand)
+                filtered_by_ids = deduped
+
+            if len(filtered_by_ids) == 0:
+                if contract["selected_id_out_of_range"] > 0:
+                    id_status = "ids_out_of_range_or_unmatched"
+                else:
+                    id_status = "ids_provided_but_no_matches"
+                id_reason = "no_valid_selected_masks"
+            elif contract["selected_id_duplicates"] > 0 and bool(getattr(config, "mm_eomt_external_socket_deduplicate", True)):
+                id_status = "ids_matched_deduplicated"
+            else:
+                id_status = "ids_matched"
+
+            contract["id_matching_status"] = id_status
+
+        filtered_by_words: List[Dict[str, Any]] = []
+        word_reason: Optional[str] = None
+        word_note: Optional[str] = None
+        word_status: Optional[str] = None
+        word_entries_without_ids = {
+            key: entry for key, entry in word_entries_by_key.items() if key not in query_map
+        }
+        if len(word_entries_without_ids) > 0:
+            word_candidates = [
+                cand
+                for cand in candidates
+                if (cand["sample_idx"], cand["frame_idx"]) in word_entries_without_ids
+            ]
+            filtered_by_words, word_reason, word_note = self._apply_external_socket_words(
+                candidates=word_candidates,
+                word_entries_by_key=word_entries_without_ids,
+                config=config,
+                contract=contract,
+            )
+            word_status = contract.get("matching_status")
+            contract["word_matching_status"] = word_status
+
+        filtered = filtered_by_ids + filtered_by_words
         if bool(getattr(config, "mm_eomt_external_socket_deduplicate", True)):
-            deduped = []
+            deduped: List[Dict[str, Any]] = []
             seen = set()
             for cand in filtered:
-                key = (cand["sample_idx"], cand["frame_idx"], cand["query_idx"])
-                if key in seen:
+                dedupe_key = (cand["sample_idx"], cand["frame_idx"], cand["query_idx"])
+                if dedupe_key in seen:
                     continue
-                seen.add(key)
+                seen.add(dedupe_key)
                 deduped.append(cand)
             filtered = deduped
         contract["matched_candidate_count"] = int(len(filtered))
 
         if len(filtered) == 0:
-            if contract["selected_id_out_of_range"] > 0:
-                contract["matching_status"] = "ids_out_of_range_or_unmatched"
-            else:
-                contract["matching_status"] = "ids_provided_but_no_matches"
+            if id_reason is not None:
+                contract["matching_status"] = id_status or "ids_provided_but_no_matches"
+                return [], contract, id_reason, id_note
+            if word_reason is not None:
+                contract["matching_status"] = word_status or "words_no_matched_candidates"
+                return [], contract, word_reason, word_note
+            contract["matching_status"] = "no_valid_selected_masks"
             return [], contract, "no_valid_selected_masks", None
 
-        if contract["selected_id_duplicates"] > 0 and bool(getattr(config, "mm_eomt_external_socket_deduplicate", True)):
-            contract["matching_status"] = "ids_matched_deduplicated"
-        else:
-            contract["matching_status"] = "ids_matched"
-        return filtered, contract, None, None
+        if id_status is not None and word_status is not None:
+            contract["matching_status"] = "mixed_ids_and_words"
+            return filtered, contract, None, "mixed_ids_and_words"
+        if id_status is not None:
+            contract["matching_status"] = id_status
+            return filtered, contract, None, id_note
+        contract["matching_status"] = word_status or "words_candidates_retained"
+        return filtered, contract, None, word_note
 
     def select(
         self,
@@ -364,11 +583,14 @@ class EoMTObjectTokenSelector:
                     query_idx = int(selected_indices[frame_idx, obj_idx].item())
                     if query_idx < 0:
                         continue
+                    class_name = lookup_class_name(class_id)
                     candidates.append(
                         {
                             "sample_idx": int(sample_idx),
                             "frame_idx": int(sample_frame_idx),
                             "query_idx": query_idx,
+                            "class_id": class_id,
+                            "class_name": class_name,
                             "score": score,
                             "token": pooled_tokens[frame_idx, obj_idx],
                             "pair": (int(sample_idx), int(sample_frame_idx)),
@@ -382,7 +604,7 @@ class EoMTObjectTokenSelector:
                     config=config,
                 )
                 if external_reason is not None:
-                    return self._empty_result(
+                    empty = self._empty_result(
                         selector_mode=selector_mode,
                         ordering_mode=ordering_mode,
                         append_position=append_position,
@@ -390,9 +612,11 @@ class EoMTObjectTokenSelector:
                         taxonomy_note=taxonomy_note,
                         external_socket_note=external_socket_note,
                     )
+                    empty["external_selection_contract"] = external_selection_contract
+                    return empty
 
             if len(candidates) == 0:
-                return self._empty_result(
+                empty = self._empty_result(
                     selector_mode=selector_mode,
                     ordering_mode=ordering_mode,
                     append_position=append_position,
@@ -400,6 +624,8 @@ class EoMTObjectTokenSelector:
                     taxonomy_note=taxonomy_note,
                     external_socket_note=external_socket_note,
                 )
+                empty["external_selection_contract"] = external_selection_contract
+                return empty
 
             if ordering_mode == "score_desc":
                 candidates.sort(
@@ -444,7 +670,7 @@ class EoMTObjectTokenSelector:
                 final_selected.append(cand)
 
             if len(final_selected) == 0:
-                return self._empty_result(
+                empty = self._empty_result(
                     selector_mode=selector_mode,
                     ordering_mode=ordering_mode,
                     append_position=append_position,
@@ -452,6 +678,8 @@ class EoMTObjectTokenSelector:
                     taxonomy_note=taxonomy_note,
                     external_socket_note=external_socket_note,
                 )
+                empty["external_selection_contract"] = external_selection_contract
+                return empty
 
             selected_tokens_by_sample: Dict[int, torch.Tensor] = {}
             selected_pairs: List[Tuple[int, int]] = []
