@@ -95,11 +95,15 @@ class LlavaMetaModel:
     def initialize_spatial_tower(self, model_args, fsdp=None):
         cli_spatial_tower = model_args.spatial_tower
         self.config.mm_spatial_tower = cli_spatial_tower
+        requested_delay_load = getattr(model_args, "delay_load", True)
+        spatial_tower_name = str(cli_spatial_tower or "").lower()
+        # Pi3X needs its auxiliary decoder/head even when consuming pre-extracted features.
+        # Keep other towers lazy so CUT3R token-pair training does not instantiate the full
+        # spatial tower on every rank unless the runtime path actually needs it.
+        delay_load = False if "pi3x" in spatial_tower_name else requested_delay_load
 
         if self.get_spatial_tower() is None:
-            # When creating the spatial tower for the first time, force eager load.
-            # Otherwise some towers keep only config (delay_load=True) and fail at first forward.
-            spatial_tower = build_spatial_tower(model_args, delay_load=False)
+            spatial_tower = build_spatial_tower(model_args, delay_load=delay_load)
 
             if hasattr(spatial_tower.config, "to_dict"):
                 cfg_dict = spatial_tower.config.to_dict()
@@ -973,18 +977,29 @@ class LlavaMetaForCausalLM(ABC):
         if self.get_model().get_spatial_tower() is not None and self.get_model().get_fusion_block() is not None:
             spatial_encoder_type = self.get_model().config.spatial_tower
             fusion_block_type = self.get_model().config.fusion_block
+            spatial_tower = self.get_model().get_spatial_tower()
+
+            def ensure_spatial_tower_loaded():
+                if spatial_tower is None:
+                    return
+                if getattr(spatial_tower, "is_loaded", True):
+                    return
+                load_model = getattr(spatial_tower, "load_model", None)
+                if callable(load_model):
+                    load_model()
+                    spatial_tower.to(device=images.device, dtype=image_features.dtype)
 
             zero_spatial_features = getattr(self.get_model().config, "zero_spatial_features", False)
             if isinstance(zero_spatial_features, str):
                 zero_spatial_features = zero_spatial_features.lower() in {"1", "true", "yes", "y", "on"}
 
             if spatial_encoder_type.endswith("points"):
-                points = self.get_model().get_spatial_tower()(images)
+                ensure_spatial_tower_loaded()
+                points = spatial_tower(images)
                 image_features = self.get_model().get_fusion_block()(image_features, points)
                 image_features = self.get_model().mm_projector(image_features)
 
             else:
-                spatial_tower = self.get_model().get_spatial_tower()
                 cfg_spatial_tower_name = str(spatial_encoder_type or "").lower()
                 runtime_spatial_tower_name = str(
                     getattr(spatial_tower, "spatial_tower_name", None)
@@ -1037,6 +1052,7 @@ class LlavaMetaForCausalLM(ABC):
                     debug_route = 'loaded_token_pair_features'
                     debug_details = f"loaded_keys={sorted(loaded_spatial_features.keys())}"
                 elif spatial_features is not None and is_pi3x_spatial:
+                    ensure_spatial_tower_loaded()
                     _sf = Pi3XDecodedFeatures.from_loaded(loaded_spatial_features)
                     if _sf.is_new_schema():
                         # Camera tokens must be computed from the stored decoded_features
@@ -1068,6 +1084,7 @@ class LlavaMetaForCausalLM(ABC):
                     debug_route = 'loaded_pi3x_features'
                     debug_details = f"loaded_type={type(loaded_spatial_features).__name__}"
                 else:
+                    ensure_spatial_tower_loaded()
                     camera_tokens, patch_tokens = spatial_tower(images)
                     debug_route = 'runtime_spatial_tower'
                     debug_details = f"images_shape={tuple(images.shape)} tower={type(spatial_tower).__name__}"
