@@ -21,6 +21,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from llava.model.llava_arch import LlavaMetaForCausalLM
+from llava.model.multimodal_eomt.word_class_matcher import coco_class_id_from_name
 
 
 class DummyIntegrationValidator(LlavaMetaForCausalLM):
@@ -56,10 +57,10 @@ def make_pooled_outputs_two_samples(hidden_size: int = 8) -> Dict[str, Any]:
     )
     selected_class_ids = torch.tensor(
         [
-            [1, 2, -1],
-            [3, 4, -1],
-            [5, 6, -1],
-            [7, 8, -1],
+            [int(coco_class_id_from_name("chair")), int(coco_class_id_from_name("light")), -1],
+            [int(coco_class_id_from_name("cup")), int(coco_class_id_from_name("dining_table")), -1],
+            [int(coco_class_id_from_name("couch")), int(coco_class_id_from_name("sink")), -1],
+            [int(coco_class_id_from_name("tv")), int(coco_class_id_from_name("mouse")), -1],
         ],
         dtype=torch.long,
     )
@@ -88,7 +89,8 @@ def make_external_socket_pooled_outputs(hidden_size: int = 8) -> Dict[str, Any]:
     # Add external socket hints in frame metadata for sample0 only.
     pooled["frame_meta"][0]["selected_query_ids"] = [0, 1]
     pooled["frame_meta"][1]["selected_mask_ids"] = [3]
-    pooled["frame_meta"][2]["selected_words"] = ["cup", "table"]
+    pooled["frame_meta"][2]["visible_grounded_words"] = ["sofa", "sink"]
+    pooled["frame_meta"][2]["selected_words"] = ["sofa", "sink", "route", "to"]
     return pooled
 
 
@@ -361,11 +363,14 @@ def case_external_socket_contract() -> Dict[str, Any]:
     present_ok = bool(side_out.get("external_socket_present", False))
     contract_ok = isinstance(contract, dict) and contract.get("matching_status") in {
         "ids_matched",
-        "word_matching_deferred_no_ids",
+        "mixed_ids_and_words",
+        "words_matched",
     }
+    words_ok = contract.get("word_frames_with_matches", 0) >= 1
+    socket_note_ok = side_out.get("external_socket_note") in {None, "mixed_ids_and_words"}
 
     return {
-        "pass": bool(present_ok and contract_ok),
+        "pass": bool(present_ok and contract_ok and words_ok and socket_note_ok),
         "details": {
             "external_socket_present": side_out.get("external_socket_present", False),
             "contract": contract,
@@ -423,12 +428,20 @@ def case_external_socket_fallback_matrix() -> Dict[str, Any]:
     v_oob._last_eomt_pooled_outputs = p_oob
     out_oob = v_oob._compute_eomt_object_block_side_output()
 
-    # Words-only path is accepted but matching is deferred.
+    # Words-only path now performs matching by class names.
     p_words = make_pooled_outputs_two_samples()
-    p_words["frame_meta"][0]["selected_words"] = ["chair", "lamp"]
+    p_words["frame_meta"][0]["visible_grounded_words"] = ["chair", "lamp"]
+    p_words["frame_meta"][0]["selected_words"] = ["chair", "lamp", "left", "right"]
     v_words = DummyIntegrationValidator(SimpleNamespace(**base_cfg))
     v_words._last_eomt_pooled_outputs = p_words
     out_words = v_words._compute_eomt_object_block_side_output()
+
+    # No-match keep_masks should preserve candidates for listed frames.
+    p_keep_masks = make_pooled_outputs_two_samples()
+    p_keep_masks["frame_meta"][0]["visible_grounded_words"] = ["cabinet"]
+    v_keep_masks = DummyIntegrationValidator(SimpleNamespace(**base_cfg))
+    v_keep_masks._last_eomt_pooled_outputs = p_keep_masks
+    out_keep_masks = v_keep_masks._compute_eomt_object_block_side_output()
 
     missing_ok = out_missing.get("fallback_reason") == "missing_external_selection"
     empty_ok = (
@@ -444,13 +457,19 @@ def case_external_socket_fallback_matrix() -> Dict[str, Any]:
         and out_oob.get("external_selection_contract", {}).get("matching_status") == "ids_out_of_range_or_unmatched"
     )
     words_ok = (
-        out_words.get("fallback_reason") == "no_matched_masks"
-        and out_words.get("external_socket_note") == "word_matching_deferred"
-        and out_words.get("external_selection_contract", {}).get("matching_status") == "word_matching_deferred_no_ids"
+        out_words.get("fallback_reason") is None
+        and out_words.get("external_socket_note") == "words_matched"
+        and out_words.get("external_selection_contract", {}).get("matching_status") == "words_matched"
+        and out_words.get("selected_count", 0) >= 1
+    )
+    keep_masks_ok = (
+        out_keep_masks.get("fallback_reason") is None
+        and out_keep_masks.get("external_selection_contract", {}).get("matching_status") == "words_no_match_keep_masks"
+        and out_keep_masks.get("selected_count", 0) >= 1
     )
 
     return {
-        "pass": bool(missing_ok and empty_ok and duplicates_ok and oob_ok and words_ok),
+        "pass": bool(missing_ok and empty_ok and duplicates_ok and oob_ok and words_ok and keep_masks_ok),
         "details": {
             "missing_external_selection": {
                 "fallback_reason": out_missing.get("fallback_reason"),
@@ -472,6 +491,11 @@ def case_external_socket_fallback_matrix() -> Dict[str, Any]:
                 "fallback_reason": out_words.get("fallback_reason"),
                 "socket_note": out_words.get("external_socket_note"),
                 "contract": out_words.get("external_selection_contract", {}),
+            },
+            "words_no_match_keep_masks": {
+                "fallback_reason": out_keep_masks.get("fallback_reason"),
+                "socket_note": out_keep_masks.get("external_socket_note"),
+                "contract": out_keep_masks.get("external_selection_contract", {}),
             },
         },
     }
