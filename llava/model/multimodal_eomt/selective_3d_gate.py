@@ -80,7 +80,7 @@ class Selective3DConfig:
     """Configuration for selective 3D gating, read from model config attrs."""
 
     enable: bool = False
-    selector_mode: str = "confidence_topk"
+    selector_mode: str = "confidence"
     score_threshold: float = 0.35
     topk: int = -1  # -1 = disabled: keep all masks whose score >= threshold
     merge_mode: str = "soft_max_union"
@@ -93,20 +93,20 @@ class Selective3DConfig:
     # "stuff"  – keep only queries whose argmax class is "stuff" (background / uncountable)
     class_type_filter: str = "all"
 
-    VALID_SELECTOR_MODES = {"confidence_topk"}
+    VALID_SELECTOR_MODES = {"confidence"}
     VALID_MERGE_MODES = {"soft_max_union"}
     VALID_GATE_TYPES = {"soft", "soft_with_floor"}
     VALID_FALLBACKS = {"all_3d", "zero_3d"}
     VALID_CLASS_TYPE_FILTERS = {"all", "things", "stuff"}
 
     def __post_init__(self):
-        # Backward compatibility: older experiment configs used "confidence".
-        if self.selector_mode == "confidence":
-            self.selector_mode = "confidence_topk"
+        # Backward compatibility: older experiment configs used "confidence_topk".
+        if self.selector_mode == "confidence_topk":
+            self.selector_mode = "confidence"
 
         if self.selector_mode not in self.VALID_SELECTOR_MODES:
             raise ValueError(
-                f"Selective 3D round-1 only supports selector_mode='confidence_topk', got '{self.selector_mode}'. "
+                f"Selective 3D round-1 only supports selector_mode='confidence', got '{self.selector_mode}'. "
                 f"Valid: {sorted(self.VALID_SELECTOR_MODES)}"
             )
         if self.topk != -1 and self.topk < 1:
@@ -139,7 +139,7 @@ class Selective3DConfig:
         """Build from a model config object (getattr-based)."""
         return cls(
             enable=bool(getattr(config, "mm_eomt_selective_3d_enable", False)),
-            selector_mode=str(getattr(config, "mm_eomt_selector_mode", "confidence_topk")),
+            selector_mode=str(getattr(config, "mm_eomt_selector_mode", "confidence")),
             score_threshold=float(getattr(config, "mm_eomt_selector_score_threshold", 0.35)),
             topk=int(getattr(config, "mm_eomt_selector_topk", -1)),
             merge_mode=str(getattr(config, "mm_eomt_selective_3d_merge_mode", "soft_max_union")),
@@ -566,9 +566,9 @@ def apply_selective_3d_fusion(
 
         debug = SelectiveGateDebugInfo(num_masks_total=Q)
 
-        if config.selector_mode != "confidence_topk":
+        if config.selector_mode != "confidence":
             raise ValueError(
-                "Selective 3D round-1 only supports selector_mode='confidence_topk'. "
+                "Selective 3D round-1 only supports selector_mode='confidence'. "
                 f"Got '{config.selector_mode}'."
             )
 

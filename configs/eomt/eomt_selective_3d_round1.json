@@ -2,7 +2,7 @@
   "experiment_family": "eomt_selective_3d_round1",
   "description": "Round-1 ablation for svf_patch_only: full 3D patch branch vs selective 3D patch gating using max foreground class probability.",
   "shared": {
-    "mm_eomt_selector_mode": "confidence_topk",
+    "mm_eomt_selector_mode": "confidence",
     "mm_eomt_selector_score_threshold": 0.8,
     "mm_eomt_selector_topk": -1,
     "mm_eomt_selector_class_type": "things",
