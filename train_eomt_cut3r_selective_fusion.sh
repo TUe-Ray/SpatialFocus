@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=SMOKE_eomt_cut3r_selective_xattn
-#SBATCH --nodes=1
+#SBATCH --job-name=selec_baseline
+#SBATCH --nodes=4
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
 #SBATCH --cpus-per-task=32
-#SBATCH --time=00:30:00
+#SBATCH --time=8:30:00
 #SBATCH --partition=boost_usr_prod  
-#SBATCH --qos=boost_qos_dbg  # normal/boost_qos_dbg
+#SBATCH --qos=normal  # normal/boost_qos_dbg
 #SBATCH --output=logs/train/%x_%j.out
 #SBATCH --error=logs/train/%x_%j.err
 #SBATCH --mem=0
@@ -17,7 +17,8 @@ SUFFIX="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
 # ============================================================
 # User-defined variables: General
 # ============================================================
-NOTE="CUT3R original cross_attention + EoMT selective 3D gating, 25% data, 1 epoch"
+DEFAULT_NOTE="baseline: EoMT selective 3D gating, 50% data, 1 epoch"
+NOTE="${NOTE:-$DEFAULT_NOTE}"
 CONDA_ENV_NAME="vlm3rEOMT"
 # ============================================================
 # User-defined variables: EoMT round-1 comparison
@@ -27,7 +28,7 @@ CONDA_ENV_NAME="vlm3rEOMT"
 # - selective_soft
 # - selective_soft_with_floor
 # - selective_soft_with_floor_zero_fallback
-EOMT_EXPERIMENT_MODE="selective_soft_with_floor_zero_fallback"
+EOMT_EXPERIMENT_MODE="${EOMT_EXPERIMENT_MODE:-baseline}"
 EOMT_DEBUG_MODE="${EOMT_DEBUG_MODE:-False}"
 EOMT_DEBUG_MAX_SAMPLES="${EOMT_DEBUG_MAX_SAMPLES:-4}"
 EOMT_DEBUG_TOP_K_MASKS="${EOMT_DEBUG_TOP_K_MASKS:-5}"
@@ -88,23 +89,8 @@ MODEL_LORA_ALPHA="256"
 MODEL_SPATIAL_TOWER="cut3r"
 MODEL_SPATIAL_TOWER_SELECT_FEATURE="all_tokens"
 MODEL_SPATIAL_FEATURE_DIM="768"
-# Fusion options for ablation:
-# - cross_attention
-#     Original CUT3R method: Q=2D visual tokens, KV=[camera_tokens, patch_tokens]
-#     when MODEL_SPATIAL_TOWER_SELECT_FEATURE="all_tokens".
-# - svf_patch_only
-#     Baseline: Q=2D visual tokens, KV=patch tokens only.
-# - svf_cat_feat
-#     Comparison-1: feature concat [camera||patch] as one KV stream.
-# - svf_pose_geometry_bridge
-#     Comparison-2: camera_tokens -> projected to d_features;
-#     cross(Q=camera_tokens, KV=3D features)=geometry-aware tokens;
-#     final=2D + crossattn(Q=2D, KV=geometry-aware tokens).
-# - svf_pose_prepend
-#     Comparison-3: prepend one pose token (12-dim camera pose -> projected to d_clip).
 
-# ============== Training percentage and shuffling (for ablation) ==============
-TRAIN_DATA_PERCENTAGE="25"
+TRAIN_DATA_PERCENTAGE="${TRAIN_DATA_PERCENTAGE:-50}"  #使用多少百分比的训练数据进行训练（0-100），例如 50 表示使用一半数据，100 表示使用全部数据
 TRAIN_DATA_PERCENTAGE_SEED="$SEED"
 TRAIN_DATA_SHUFFLE="True"
 
@@ -114,7 +100,7 @@ MODEL_TUNE_FUSION_BLOCK="True"
 MODEL_TUNE_MM_MLP_ADAPTER="True"
 MODEL_VERSION="qwen_1_5"
 MODEL_MM_PROJECTOR_TYPE="mlp2x_gelu"
-MODEL_MM_VISION_SELECT_LAYER="-1"   #  从视觉编码器选择第几层特征
+MODEL_MM_VISION_SELECT_LAYER="-2"   #  从视觉编码器选择第几层特征
 MODEL_MM_USE_IM_START_END="False"   #是否添加特殊的图像起止标记 <image>...</image>
 MODEL_MM_USE_IM_PATCH_TOKEN="False" #是否使用图像补丁标记（如 <im_patch_0>）来保留空间位置信息，通常配合融合模块的空间池化使用
 MODEL_IMAGE_ASPECT_RATIO="anyres_max_9"
