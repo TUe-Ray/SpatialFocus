@@ -6,6 +6,9 @@ from collections import defaultdict
 from pathlib import Path
 
 
+LETTERS = ["A", "B", "C", "D"]
+
+
 def load_json(path, default=None):
     path = Path(path)
     if not path.exists():
@@ -47,6 +50,58 @@ def fmt_value(value, percent=False):
     if isinstance(value, float):
         return f"{value:.3f}"
     return str(value)
+
+
+def ordered_option_items(options):
+    if not options:
+        return []
+    if isinstance(options, dict):
+        ordered = []
+        seen = set()
+        for letter in LETTERS:
+            if letter in options:
+                ordered.append((letter, options[letter]))
+                seen.add(letter)
+        for letter, text in options.items():
+            if letter not in seen:
+                ordered.append((letter, text))
+        return ordered
+    if isinstance(options, str):
+        return [(None, line.strip()) for line in options.splitlines() if line.strip()]
+    ordered = []
+    for item in options:
+        text = str(item)
+        parts = text.split(". ", 1)
+        if len(parts) == 2 and parts[0].strip():
+            ordered.append((parts[0].strip(), parts[1].strip()))
+        else:
+            ordered.append((None, text))
+    return ordered
+
+
+def append_options_block(lines, label, options, indent="  "):
+    if not options:
+        lines.append(f"{indent}{label}: n/a")
+        return
+    lines.append(f"{indent}{label}:")
+    for letter, text in ordered_option_items(options):
+        if letter:
+            lines.append(f"{indent}  {letter}. {text}")
+        else:
+            lines.append(f"{indent}  {text}")
+
+
+def format_presented_letter(letter):
+    return letter or "n/a"
+
+
+def format_original_letter(letter, original_options):
+    if not letter:
+        return "n/a"
+    answer_text = None
+    if isinstance(original_options, dict):
+        answer_text = original_options.get(letter)
+    return f"{letter} ({answer_text})" if answer_text else letter
 
 
 def options_text(options):
@@ -95,7 +150,27 @@ def add_example(lines, record, include_raw=False, include_uncertainty=False):
         lines.append(f"  Uncertainty: {record.get('uncertainty') or 'n/a'}")
 
 
+def add_option_shuffle_example(lines, record, include_raw=False):
+    original_options = record.get("original_options") or {}
+    presented_options = record.get("presented_options") or record.get("options")
+
+    lines.append(f"- Question: {record.get('question')}")
+    append_options_block(lines, "Presented options", presented_options)
+    append_options_block(lines, "Original options", original_options)
+    lines.append(f"  Ground-truth presented answer: {format_presented_letter(record.get('gt_presented_letter'))}")
+    lines.append(f"  Ground-truth original answer: {format_original_letter(record.get('gt_original_letter'), original_options)}")
+    lines.append(f"  Raw presented answer: {format_presented_letter(record.get('model_presented_letter'))}")
+    lines.append(f"  Mapped original answer: {format_original_letter(record.get('model_original_letter'), original_options)}")
+    if include_raw:
+        lines.append(f"  Raw model output: `{short_text(record.get('model_raw_prediction'))}`")
+
+
 def add_parse_failure(lines, record):
+    if record.get("prompt_variant") == "option_shuffle":
+        add_option_shuffle_example(lines, record, include_raw=True)
+        lines.append(f"  Parse error: {record.get('parse_error') or 'n/a'}")
+        return
+
     add_example(lines, record, include_raw=True)
     errors = []
     if record.get("parse_error"):
@@ -223,14 +298,20 @@ def build_report(run_dir):
 
     lines.extend(["### Correct examples", ""])
     for record in correct[:3]:
-        add_example(lines, record)
+        if variant == "option_shuffle":
+            add_option_shuffle_example(lines, record)
+        else:
+            add_example(lines, record)
         lines.append("")
     if not correct:
         lines.extend(["No parsed correct examples found.", ""])
 
     lines.extend(["### Wrong examples with raw output", ""])
     for record in wrong[:5]:
-        add_example(lines, record, include_raw=True, include_uncertainty=True)
+        if variant == "option_shuffle":
+            add_option_shuffle_example(lines, record, include_raw=True)
+        else:
+            add_example(lines, record, include_raw=True, include_uncertainty=True)
         lines.append("")
     if not wrong:
         lines.extend(["No parsed wrong examples found.", ""])
@@ -262,10 +343,19 @@ def build_report(run_dir):
                 inconsistent.append((rows[0], rows, answers))
         lines.extend(["### Option-shuffle inconsistent examples", ""])
         for first, rows, answers in inconsistent[:5]:
+            original_options = first.get("original_options") or {}
             lines.append(f"- Question: {first.get('question')}")
-            lines.append(f"  Semantic answers: {', '.join(answers)}")
+            append_options_block(lines, "Original options", original_options)
+            lines.append(f"  Semantic answers: {', '.join(format_original_letter(answer, original_options) for answer in answers)}")
             for row in sorted(rows, key=lambda item: item.get("option_shuffle_seed")):
-                lines.append(f"  Seed {row.get('option_shuffle_seed')}: presented {row.get('model_presented_letter')}, original {row.get('model_original_letter')}, correct {row.get('correct_original_space')}")
+                lines.append(f"  Seed {row.get('option_shuffle_seed')}:")
+                lines.append(f"    Raw presented answer: {format_presented_letter(row.get('model_presented_letter'))}")
+                lines.append(f"    Mapped original answer: {format_original_letter(row.get('model_original_letter'), original_options)}")
+                append_options_block(lines, "Presented options", row.get("presented_options") or row.get("options"), indent="    ")
+                lines.append(f"    Ground-truth presented answer: {format_presented_letter(row.get('gt_presented_letter'))}")
+                lines.append(f"    Ground-truth original answer: {format_original_letter(row.get('gt_original_letter'), original_options)}")
+                lines.append(f"    Correct: {row.get('correct_original_space')}")
+                lines.append(f"    Raw model output: `{short_text(row.get('model_raw_prediction'))}`")
             lines.append("")
         if not inconsistent:
             lines.extend(["No parsed inconsistent examples found.", ""])

@@ -166,11 +166,53 @@ def test_analyzer_report_and_compare():
         base_report = (base / "report.md").read_text()
         assert "Base samples" in base_report
         assert "Evaluated rows" in base_report
+        assert "Presented options:" in base_report
+        assert "Original options:" in base_report
+        assert "Ground-truth presented answer:" in base_report
+        assert "Ground-truth original answer:" in base_report
+        assert "Raw presented answer:" in base_report
+        assert "Mapped original answer:" in base_report
 
         run_cmd(["scripts/analyze_vsibench_probe.py", "--run-dir", str(new)])
         failed = run_cmd(["scripts/compare_vsibench_probe_runs.py", "--runs", str(base), str(new), "--output", str(root / "compare_fail")], check=False)
         assert failed.returncode != 0
         run_cmd(["scripts/compare_vsibench_probe_runs.py", "--runs", str(base), str(new), "--output", str(root / "compare_ok"), "--allow-mismatch"])
+
+        option_report_run = root / "option_report"
+        option_report_run.mkdir()
+        option_report_records = []
+        correct_doc = option_doc("fmt_s1", 1, 0, "B")
+        option_report_records.append(utils._process_option_shuffle(correct_doc, correct_doc["gt_presented_letter"]))
+        for seed in [0, 1, 2]:
+            inconsistent_doc = option_doc("fmt_s0", 0, seed, "A")
+            if seed == 0:
+                prediction = inconsistent_doc["gt_presented_letter"]
+            elif seed == 1:
+                prediction = next(letter for letter in ["A", "B", "C", "D"] if letter != inconsistent_doc["gt_presented_letter"])
+            else:
+                prediction = "A/B/C/D"
+            option_report_records.append(utils._process_option_shuffle(inconsistent_doc, prediction))
+        for seed in [1, 2]:
+            extra_correct_doc = option_doc("fmt_s1", 1, seed, "B")
+            option_report_records.append(utils._process_option_shuffle(extra_correct_doc, extra_correct_doc["gt_presented_letter"]))
+
+        write_raw_run(option_report_run, option_report_records, selected(["fmt_s0", "fmt_s1"], [0, 1, 2]))
+        run_cmd(["scripts/analyze_vsibench_probe.py", "--run-dir", str(option_report_run)])
+        run_cmd(["scripts/generate_vsibench_probe_report.py", "--run-dir", str(option_report_run)])
+        option_report = (option_report_run / "report.md").read_text()
+        assert "| Base samples | 2 |" in option_report
+        assert "| Evaluated rows | 6 |" in option_report
+        assert "### Wrong examples with raw output" in option_report
+        assert "### Parse failure examples" in option_report
+        assert "### Option-shuffle inconsistent examples" in option_report
+        assert "Raw presented answer:" in option_report
+        assert "Mapped original answer:" in option_report
+        assert "Ground-truth presented answer:" in option_report
+        assert "Ground-truth original answer:" in option_report
+        assert "Raw model output: `A/B/C/D`" in option_report
+        assert "Seed 0:" in option_report
+        assert "Seed 1:" in option_report
+        assert "Seed 2:" in option_report
 
         evidence = root / "evidence"
         evidence.mkdir()
