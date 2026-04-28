@@ -82,11 +82,15 @@ class LlavaMetaModel:
     def initialize_spatial_tower(self, model_args, fsdp=None):
         cli_spatial_tower = model_args.spatial_tower
         self.config.mm_spatial_tower = cli_spatial_tower
+        requested_delay_load = getattr(model_args, "delay_load", True)
+        spatial_tower_name = str(cli_spatial_tower or "").lower()
+        # Pi3X needs auxiliary decoder/head modules even when consuming
+        # pre-extracted features. Keep CUT3R and other towers lazy unless a
+        # runtime path actually needs them.
+        delay_load = False if "pi3x" in spatial_tower_name else requested_delay_load
 
         if self.get_spatial_tower() is None:
-            # When creating the spatial tower for the first time, force eager load.
-            # Otherwise some towers keep only config (delay_load=True) and fail at first forward.
-            spatial_tower = build_spatial_tower(model_args, delay_load=False)
+            spatial_tower = build_spatial_tower(model_args, delay_load=delay_load)
 
             if hasattr(spatial_tower.config, "to_dict"):
                 cfg_dict = spatial_tower.config.to_dict()
@@ -117,7 +121,8 @@ class LlavaMetaModel:
             print("[DEBUG] spatial_tower_name =", getattr(spatial_tower, "spatial_tower_name", None))
             print("[DEBUG] tower_name =", getattr(spatial_tower, "tower_name", None))
             print("[DEBUG] model_name =", getattr(spatial_tower, "model_name", None))
-            spatial_tower.load_model()
+            if not delay_load and hasattr(spatial_tower, "load_model"):
+                spatial_tower.load_model()
 
     def initialize_fusion_block(self, model_args, fsdp=None):
         requested_fusion_block = getattr(model_args, "fusion_block", None)
@@ -828,6 +833,20 @@ class LlavaMetaForCausalLM(ABC):
         if soft_masks is None:
             return _skipped_result("missing_soft_masks")
 
+        if not torch.is_tensor(soft_masks) or soft_masks.ndim != 4:
+            return _skipped_result("invalid_soft_masks")
+
+        if soft_masks.shape[1] == 0:
+            reason = eomt_outputs.get("skip_reason", "no_eomt_queries")
+            return _skipped_result(reason)
+
+        if class_logits is not None and torch.is_tensor(class_logits):
+            if class_logits.ndim != 3:
+                return _skipped_result("invalid_class_logits")
+            if class_logits.shape[1] == 0 or class_logits.shape[-1] <= 1:
+                reason = eomt_outputs.get("skip_reason", "no_foreground_classes")
+                return _skipped_result(reason)
+
         if pool_visual_features is None or (torch.is_tensor(pool_visual_features) and pool_visual_features.shape[0] == 0):
             return _skipped_result("no_frame_aligned_visual_features")
 
@@ -1511,6 +1530,17 @@ class LlavaMetaForCausalLM(ABC):
         if self.get_model().get_spatial_tower() is not None and self.get_model().get_fusion_block() is not None:
             spatial_encoder_type = self.get_model().config.spatial_tower
             fusion_block_type = self.get_model().config.fusion_block
+            spatial_tower = self.get_model().get_spatial_tower()
+
+            def ensure_spatial_tower_loaded():
+                if spatial_tower is None:
+                    return
+                if getattr(spatial_tower, "is_loaded", True):
+                    return
+                load_model = getattr(spatial_tower, "load_model", None)
+                if callable(load_model):
+                    load_model()
+                    spatial_tower.to(device=images.device, dtype=image_features.dtype)
 
             zero_spatial_features = getattr(self.get_model().config, "zero_spatial_features", False)
             if isinstance(zero_spatial_features, str):
@@ -1522,24 +1552,63 @@ class LlavaMetaForCausalLM(ABC):
                 return self.get_model().mm_projector(image_features)
 
             if spatial_encoder_type.endswith("points"):
-                points = self.get_model().get_spatial_tower()(images)
+                ensure_spatial_tower_loaded()
+                points = spatial_tower(images)
                 image_features = self.get_model().get_fusion_block()(image_features, points)
                 image_features = self.get_model().mm_projector(image_features)
             
             else:
-                supports_preextracted = spatial_encoder_type is not None and (
-                    'cut3r' in spatial_encoder_type or 'pi3x' in spatial_encoder_type
+                cfg_spatial_tower_name = str(spatial_encoder_type or "").lower()
+                runtime_spatial_tower_name = str(
+                    getattr(spatial_tower, "spatial_tower_name", None)
+                    or getattr(spatial_tower, "tower_name", None)
+                    or getattr(spatial_tower, "model_name", None)
+                    or ""
+                ).lower()
+                spatial_tower_module = ""
+                spatial_tower_class_name = ""
+                if spatial_tower is not None:
+                    spatial_tower_module = getattr(spatial_tower.__class__, "__module__", "").lower()
+                    spatial_tower_class_name = spatial_tower.__class__.__name__.lower()
+
+                is_cut3r_spatial = any(
+                    "cut3r" in value
+                    for value in (
+                        cfg_spatial_tower_name,
+                        runtime_spatial_tower_name,
+                        spatial_tower_module,
+                        spatial_tower_class_name,
+                    )
+                )
+                is_pi3x_spatial = any(
+                    "pi3x" in value
+                    for value in (
+                        cfg_spatial_tower_name,
+                        runtime_spatial_tower_name,
+                        spatial_tower_module,
+                        spatial_tower_class_name,
+                    )
+                )
+                loaded_spatial_features = spatial_features[0] if spatial_features is not None else None
+                has_token_pair_features = (
+                    isinstance(loaded_spatial_features, dict)
+                    and "camera_tokens" in loaded_spatial_features
+                    and "patch_tokens" in loaded_spatial_features
                 )
 
                 _sf = None
                 camera_pose = None
 
-                if spatial_features is not None and supports_preextracted:
-                    _sf = Pi3XDecodedFeatures.from_loaded(spatial_features[0])
+                if spatial_features is not None and has_token_pair_features and (is_cut3r_spatial or not is_pi3x_spatial):
+                    camera_tokens = loaded_spatial_features["camera_tokens"]
+                    patch_tokens = loaded_spatial_features["patch_tokens"]
+                elif spatial_features is not None and is_pi3x_spatial:
+                    ensure_spatial_tower_loaded()
+                    _sf = Pi3XDecodedFeatures.from_loaded(loaded_spatial_features)
                     if _sf.is_new_schema():
                         # Camera tokens must be computed from the stored decoded_features
                         # by running pi3.camera_decoder (lightweight head, no re-encoding).
-                        _spatial_tower = self.get_model().get_spatial_tower()
+                        _spatial_tower = spatial_tower
                         _cam_dec = getattr(_spatial_tower, "camera_decoder", None)
                         if _cam_dec is None:
                             raise RuntimeError(
@@ -1564,11 +1633,12 @@ class LlavaMetaForCausalLM(ABC):
                             camera_pose = _sf.camera_pose
                     camera_tokens, patch_tokens = _sf.camera_tokens, _sf.patch_tokens
                 else:
-                    camera_tokens, patch_tokens = self.get_model().get_spatial_tower()(images)
-                    # Runtime path parity for svf_pose_prepend:
+                    ensure_spatial_tower_loaded()
+                    camera_tokens, patch_tokens = spatial_tower(images)
+                    # Runtime path parity for svf_pose_prepend (Pi3X only):
                     # compute camera_pose from camera_head using runtime camera_tokens.
-                    if fusion_block_type == 'svf_pose_prepend':
-                        _spatial_tower = self.get_model().get_spatial_tower()
+                    if fusion_block_type == 'svf_pose_prepend' and is_pi3x_spatial:
+                        _spatial_tower = spatial_tower
                         _cam_head = getattr(_spatial_tower, "camera_head", None)
                         if _cam_head is None:
                             raise RuntimeError(
@@ -1595,9 +1665,10 @@ class LlavaMetaForCausalLM(ABC):
                 # --- Selective 3D gating (round-1 patch-only experiment) ---
                 _sel3d_enable = bool(getattr(self.get_model().config, "mm_eomt_selective_3d_enable", False))
                 if _sel3d_enable:
-                    if fusion_block_type != 'svf_patch_only':
+                    if fusion_block_type not in {'svf_patch_only', 'cross_attention'}:
                         raise ValueError(
-                            "Round-1 selective 3D fusion currently only supports fusion_block='svf_patch_only'. "
+                            "Selective 3D fusion currently supports fusion_block='svf_patch_only' "
+                            "or original CUT3R fusion_block='cross_attention'. "
                             f"Got '{fusion_block_type}'."
                         )
                     _sel3d_cfg = Selective3DConfig.from_model_config(self.get_model().config)
@@ -1624,17 +1695,30 @@ class LlavaMetaForCausalLM(ABC):
                     else:
                         # Legacy cross_attention keeps runtime-selectable spatial token composition.
                         spatial_tower_select_feature = getattr(self.config, "spatial_tower_select_feature", "patch_tokens")
-                        spatial_tower_select_feature_list = spatial_tower_select_feature.split(",")
+                        spatial_tower_select_feature_list = [
+                            feature.strip()
+                            for feature in spatial_tower_select_feature.split(",")
+                            if feature.strip()
+                        ]
                         selected_tokens = []
-                        for spatial_tower_select_feature in spatial_tower_select_feature_list:
-                            if spatial_tower_select_feature == "camera_tokens":
+                        for selected_feature_name in spatial_tower_select_feature_list:
+                            if selected_feature_name == "camera_tokens":
                                 selected_tokens.append(camera_tokens)
-                            elif spatial_tower_select_feature == "patch_tokens":
+                            elif selected_feature_name == "patch_tokens":
                                 selected_tokens.append(patch_tokens)
-                            elif spatial_tower_select_feature in ["all", "all_tokens"]:
+                            elif selected_feature_name in ["all", "all_tokens"]:
                                 selected_tokens = [camera_tokens, patch_tokens]
                             else:
-                                raise ValueError(f"Unexpected spatial_tower_select_feature: {spatial_tower_select_feature}")
+                                raise ValueError(f"Unexpected spatial_tower_select_feature: {selected_feature_name}")
+                        if not selected_tokens:
+                            raise ValueError("spatial_tower_select_feature must select at least one token stream.")
+                        selected_dims = {int(tokens.shape[-1]) for tokens in selected_tokens}
+                        if len(selected_dims) != 1:
+                            raise ValueError(
+                                "cross_attention requires selected spatial tokens to share the same "
+                                f"feature dimension, got {sorted(selected_dims)} from "
+                                f"spatial_tower_select_feature='{spatial_tower_select_feature}'."
+                            )
                         final_image_features = torch.cat(selected_tokens, dim=1).to(self.dtype)
 
                     image_features, attn_weights = self.get_model().get_fusion_block()(image_features, final_image_features)

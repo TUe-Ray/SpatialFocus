@@ -9,6 +9,7 @@ from contextlib import nullcontext
 import os
 import sys
 import warnings
+from importlib import import_module
 from typing import Optional
 
 import numpy as np
@@ -18,6 +19,7 @@ import torch.nn.functional as F
 from PIL import Image
 
 EOMT_AVAILABLE = False
+EOMT_IMPORT_ERROR = None
 
 
 def _env_flag(name: str) -> bool:
@@ -51,20 +53,33 @@ def _resolve_local_backbone_path(explicit_local_backbone_path: Optional[str]) ->
 
 
 def _ensure_eomt_importable():
-    """Add third_party/EoMT to sys.path so its modules can be imported."""
-    global EOMT_AVAILABLE
+    """Make the vendored EoMT modules importable.
+
+    Prefer the package-qualified import path to avoid collisions with other
+    top-level packages named ``models``.
+    """
+    global EOMT_AVAILABLE, EOMT_IMPORT_ERROR
     eomt_root = os.path.normpath(
         os.path.join(os.path.dirname(__file__), "..", "..", "..", "third_party", "EoMT")
     )
-    if eomt_root not in sys.path:
-        sys.path.insert(0, eomt_root)
+    project_root = os.path.dirname(os.path.dirname(eomt_root))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
     try:
-        from models.eomt import EoMT as _EoMT  # noqa: F401
-        from models.vit import ViT as _ViT  # noqa: F401
+        import_module("third_party.EoMT.models.eomt")
+        import_module("third_party.EoMT.models.vit")
 
         EOMT_AVAILABLE = True
-    except ImportError:
+        EOMT_IMPORT_ERROR = None
+    except ImportError as exc:
         EOMT_AVAILABLE = False
+        EOMT_IMPORT_ERROR = exc
+
+
+def _import_eomt_classes():
+    eomt_mod = import_module("third_party.EoMT.models.eomt")
+    vit_mod = import_module("third_party.EoMT.models.vit")
+    return eomt_mod.EoMT, vit_mod.ViT
 
 
 class EoMTExtractor(nn.Module):
@@ -95,16 +110,17 @@ class EoMTExtractor(nn.Module):
             warnings.warn(
                 "EoMT is not available. EoMTExtractor will be a no-op. "
                 "Make sure third_party/EoMT is present and its dependencies "
-                "(timm, transformers) are installed."
+                "(timm, transformers) are installed. "
+                f"Import error: {EOMT_IMPORT_ERROR!r}"
             )
             self.img_size = eomt_config.get("img_size", (640, 640))
             self.num_q = 0
             self.num_classes = 0
+            self._warned_unavailable_forward = False
             return
 
         import yaml
-        from models.eomt import EoMT as _EoMT
-        from models.vit import ViT as _ViT
+        _EoMT, _ViT = _import_eomt_classes()
 
         # Parse config
         with open(self.config_path, "r") as f:
@@ -238,7 +254,9 @@ class EoMTExtractor(nn.Module):
                 - frame_meta: pass-through
         """
         if not self.is_available:
-            warnings.warn("EoMT is not available. Returning empty outputs.")
+            if not getattr(self, "_warned_unavailable_forward", False):
+                warnings.warn("EoMT is not available. Returning empty outputs.")
+                self._warned_unavailable_forward = True
             B = len(pil_images)
             H, W = self.img_size
             return {
@@ -248,6 +266,8 @@ class EoMTExtractor(nn.Module):
                 "mask_resolution": (H, W),
                 "query_count": 0,
                 "frame_meta": frame_meta,
+                "is_available": False,
+                "skip_reason": "eomt_unavailable",
             }
 
         # Preprocess
@@ -285,6 +305,7 @@ class EoMTExtractor(nn.Module):
             "mask_resolution": (H_grid, W_grid),
             "query_count": self.num_q,
             "frame_meta": frame_meta,
+            "is_available": True,
             # Taxonomy: frozenset of model-space class IDs classified as "stuff".
             # Classes NOT in this set are "things" (countable instance categories).
             "stuff_class_ids": self.stuff_class_ids,

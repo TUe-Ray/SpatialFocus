@@ -325,6 +325,7 @@ class DataArguments:
     spatial_tower_type: Optional[str] = field(default=None, metadata={"help": "Spatial tower type (e.g. cut3r, vggt, pi3x). Set automatically from model_args. Controls whether .pt files are loaded."})
     spatial_features_root: Optional[str] = field(default=None, metadata={"help": "Root directory used to locate pre-extracted spatial features. If unset, video_folder is used."})
     spatial_features_subdir: Optional[str] = field(default="spatial_features", metadata={"help": "Subdirectory used to locate pre-extracted spatial features relative to video paths (default: spatial_features)."})
+    require_spatial_features: bool = field(default=False, metadata={"help": "If True, fail when a CUT3R/Pi3X pre-extracted .pt file is missing instead of falling back to runtime encoding."})
 
 
 @dataclass
@@ -2010,7 +2011,8 @@ class LazySupervisedDataset(Dataset):
         )
         if use_preextracted_features and "video" in self.list_data_dict[i]:
             video_folder = self.data_args.video_folder
-            spatial_features_root = getattr(self.data_args, 'spatial_features_root', None) or video_folder or "."
+            explicit_spatial_features_root = getattr(self.data_args, 'spatial_features_root', None)
+            spatial_features_root = explicit_spatial_features_root or video_folder or "."
             spatial_features_subdir = getattr(self.data_args, 'spatial_features_subdir', 'spatial_features') or 'spatial_features'
             video_rel_path = self.list_data_dict[i]['video']
             video_pt_path = os.path.splitext(video_rel_path)[0] + '.pt'
@@ -2024,7 +2026,8 @@ class LazySupervisedDataset(Dataset):
                 path_parts_with_subdir = [spatial_features_subdir] + path_parts_with_subdir
 
             candidate_relative_paths = []
-            for parts in (path_parts_with_subdir, path_parts):
+            relative_path_candidates = (path_parts_with_subdir,) if explicit_spatial_features_root else (path_parts_with_subdir, path_parts)
+            for parts in relative_path_candidates:
                 if not parts:
                     continue
                 rel_path = os.path.join(*parts)
@@ -2032,7 +2035,8 @@ class LazySupervisedDataset(Dataset):
                     candidate_relative_paths.append(rel_path)
 
             candidate_roots = []
-            for root in (spatial_features_root, video_folder):
+            roots_to_consider = (spatial_features_root,) if explicit_spatial_features_root else (spatial_features_root, video_folder)
+            for root in roots_to_consider:
                 if root and root not in candidate_roots:
                     candidate_roots.append(root)
 
@@ -2041,7 +2045,7 @@ class LazySupervisedDataset(Dataset):
                 for rel_path in candidate_relative_paths:
                     candidate_paths.append(os.path.join(root, rel_path))
 
-            if os.path.isabs(video_pt_path):
+            if os.path.isabs(video_pt_path) and not explicit_spatial_features_root:
                 replaced_abs = video_pt_path.replace('/videos/', f'/{spatial_features_subdir}/', 1)
                 for abs_path in (replaced_abs, video_pt_path):
                     if abs_path not in candidate_paths:
@@ -2053,6 +2057,15 @@ class LazySupervisedDataset(Dataset):
                 if self.data_args.zero_spatial_features:
                     spatial_features = zero_nested_tensors(spatial_features)
                 data_dict["spatial_features"] = spatial_features
+            elif getattr(self.data_args, 'require_spatial_features', False):
+                preview_paths = "\n  - ".join(candidate_paths[:8])
+                if len(candidate_paths) > 8:
+                    preview_paths += f"\n  - ... ({len(candidate_paths) - 8} more)"
+                raise FileNotFoundError(
+                    "Missing required pre-extracted spatial feature file for "
+                    f"video='{video_rel_path}' spatial_tower_type='{spatial_tower_type}'. "
+                    f"Checked:\n  - {preview_paths}"
+                )
 
         # add point cloud
         if "_with_depth" in self.list_data_dict[i] and self.list_data_dict[i]["_with_depth"]:
