@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=DBGCUT3R
+#SBATCH --job-name=DBGCUT3R_NEW
 #SBATCH --nodes=4
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
@@ -13,7 +13,7 @@
 #SBATCH --exclude=lrdn0249,lrdn0612,lrdn0568,lrdn2400,lrdn0288,lrdn0418,lrdn0119,lrdn0159,lrdn0080,lrdn0843
 #SBATCH --exclusive
 
-export CUT3R_DEBUG_ALL_RANKS=1
+export CUT3R_DEBUG_ALL_RANKS=0
 export CUT3R_DEBUG_MAX_CALLS=8
 
 SUFFIX="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
