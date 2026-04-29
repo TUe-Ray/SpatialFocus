@@ -18,7 +18,6 @@ MODES=(
     "eomt_obj_only"
     "eomt_obj_text_phrase"
     "eomt_obj_learnable"
-    "eomt_obj_only_keep_stuff"
     "eomt_obj_only_word_filter"
 )
 
@@ -28,7 +27,6 @@ short_mode_name() {
         eomt_obj_only) echo "obj" ;;
         eomt_obj_text_phrase) echo "objtext" ;;
         eomt_obj_learnable) echo "objlearn" ;;
-        eomt_obj_only_keep_stuff) echo "objstuff" ;;
         eomt_obj_only_word_filter) echo "objword" ;;
         *) echo "unknown" ;;
     esac
