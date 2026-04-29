@@ -2,19 +2,24 @@
   "experiment_family": "eomt_objinfo_round1",
   "description": "Round-1 ablation: baseline vs object-block with different OBJ_INFO modes.",
   "shared": {
-    "eomt_pool_top_k": 5,
+    "eomt_pool_top_k": -1,
     "eomt_pool_selection": "class_confidence",
     "eomt_pool_mask_area_threshold": 0.5,
-    "eomt_pool_score_threshold": 0.2,
+    "eomt_pool_score_threshold": 0.8,
     "mm_eomt_object_block_position": "after_visual",
-    "mm_eomt_object_block_max_objects": 8,
-    "mm_eomt_object_block_max_per_frame": 2,
+    "mm_eomt_object_block_max_objects": -1,
+    "mm_eomt_object_block_max_per_frame": -1,
     "mm_eomt_selector_mode": "class_aware",
-    "mm_eomt_selector_keep_stuff": true,
+    "mm_eomt_selector_keep_stuff": false,
     "mm_eomt_selector_keep_things": true,
     "mm_eomt_selector_drop_no_object": true,
     "mm_eomt_selector_no_object_class_id": -1,
     "mm_eomt_selector_order": "frame_then_score",
+    "mm_eomt_word_match_enable": false,
+    "mm_eomt_word_match_source": "visible_grounded_words",
+    "mm_eomt_word_match_mode": "exact_alias",
+    "mm_eomt_word_match_no_match": "filter_out", 
+    "mm_eomt_word_match_similarity_threshold": 0.86,
     "mm_eomt_use_object_type_embedding": false,
     "mm_eomt_obj_info_text": "Object information from the image:",
     "mm_eomt_obj_info_trainable": true
@@ -34,6 +39,12 @@
     "eomt_obj_learnable": {
       "mm_eomt_enable_object_block": true,
       "mm_eomt_obj_info_mode": "learnable_embedding"
+    },
+    "eomt_obj_only_word_filter": {
+      "mm_eomt_enable_object_block": true,
+      "mm_eomt_obj_info_mode": "none",
+      "mm_eomt_word_match_enable": true,
+      "mm_eomt_word_match_no_match": "filter_out"
     }
   }
 }

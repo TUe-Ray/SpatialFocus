@@ -161,7 +161,9 @@ class MaskGuidedPooler(nn.Module):
                 "all_scores": soft_masks.new_zeros((bsz, 0), dtype=torch.float32),
             }
 
-        effective_k = max(1, min(int(top_k), num_queries))
+        requested_top_k = int(top_k)
+        # Non-positive top_k means "unlimited": keep all EoMT queries.
+        effective_k = num_queries if requested_top_k <= 0 else min(requested_top_k, num_queries)
         scores = self._compute_query_scores(
             soft_masks=soft_masks,
             class_logits=class_logits,

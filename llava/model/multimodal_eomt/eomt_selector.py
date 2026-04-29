@@ -450,6 +450,103 @@ class EoMTObjectTokenSelector:
         contract["matching_status"] = word_status or "words_candidates_retained"
         return filtered, contract, None, word_note
 
+    def _apply_class_aware_word_filter(
+        self,
+        candidates: List[Dict[str, Any]],
+        external_selection: Optional[Dict[str, Any]],
+        config: Any,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], Optional[str], Optional[str]]:
+        contract = {
+            "word_filter_path": "class_aware",
+            "word_match_enabled": bool(getattr(config, "mm_eomt_word_match_enable", False)),
+            "matching_status": "not_requested",
+            "input_entry_count": 0,
+            "parsed_entry_count": 0,
+            "word_entry_count": 0,
+            "untouched_candidate_count": 0,
+            "matched_candidate_count": int(len(candidates)),
+        }
+
+        if not contract["word_match_enabled"]:
+            contract["matching_status"] = "word_match_disabled"
+            return candidates, contract, None, "word_match_disabled"
+
+        if not isinstance(external_selection, dict):
+            contract["matching_status"] = "missing_external_selection"
+            return candidates, contract, None, "missing_external_selection"
+
+        entries = external_selection.get("entries", None)
+        if not isinstance(entries, list) or len(entries) == 0:
+            contract["matching_status"] = "empty_external_selection"
+            return candidates, contract, None, "empty_external_selection"
+        contract["input_entry_count"] = int(len(entries))
+
+        word_entries_by_key: Dict[Tuple[int, int], Dict[str, Any]] = {}
+        for item in entries:
+            if not isinstance(item, dict):
+                continue
+            sample_idx = int(item.get("sample_idx", -1))
+            frame_idx = int(item.get("frame_idx", -1))
+            if sample_idx < 0 or frame_idx < 0:
+                continue
+            contract["parsed_entry_count"] += 1
+
+            selected_words = item.get("selected_words", None)
+            visible_grounded_words = item.get("visible_grounded_words", None)
+            has_word_payload = (
+                isinstance(selected_words, (list, tuple))
+                and len(selected_words) > 0
+            ) or (
+                isinstance(visible_grounded_words, (list, tuple))
+                and len(visible_grounded_words) > 0
+            )
+            if not has_word_payload:
+                continue
+
+            key = (sample_idx, frame_idx)
+            merged_entry = word_entries_by_key.setdefault(
+                key,
+                {
+                    "sample_idx": sample_idx,
+                    "frame_idx": frame_idx,
+                    "selected_words": [],
+                    "visible_grounded_words": [],
+                },
+            )
+            self._merge_socket_word_fields(merged_entry, item)
+
+        contract["word_entry_count"] = int(len(word_entries_by_key))
+        if len(word_entries_by_key) == 0:
+            contract["matching_status"] = "no_word_entries"
+            return candidates, contract, None, "no_word_entries"
+
+        word_keys = set(word_entries_by_key.keys())
+        untouched_candidates = [
+            cand
+            for cand in candidates
+            if (int(cand["sample_idx"]), int(cand["frame_idx"])) not in word_keys
+        ]
+        word_candidates = [
+            cand
+            for cand in candidates
+            if (int(cand["sample_idx"]), int(cand["frame_idx"])) in word_keys
+        ]
+
+        contract["untouched_candidate_count"] = int(len(untouched_candidates))
+        filtered_word_candidates, word_reason, word_note = self._apply_external_socket_words(
+            candidates=word_candidates,
+            word_entries_by_key=word_entries_by_key,
+            config=config,
+            contract=contract,
+        )
+
+        filtered = untouched_candidates + filtered_word_candidates
+        contract["matched_candidate_count"] = int(len(filtered))
+        if len(filtered) == 0 and word_reason is not None:
+            return [], contract, word_reason, word_note
+
+        return filtered, contract, None, word_note
+
     def select(
         self,
         pooled_outputs: Dict[str, Any],
@@ -535,21 +632,8 @@ class EoMTObjectTokenSelector:
             max_objects = int(getattr(config, "mm_eomt_object_block_max_objects", 8))
             max_per_frame = int(getattr(config, "mm_eomt_object_block_max_per_frame", 2))
 
-            if max_objects <= 0:
-                return self._empty_result(
-                    selector_mode=selector_mode,
-                    ordering_mode=ordering_mode,
-                    append_position=append_position,
-                    fallback_reason="max_objects_le_zero",
-                )
-
-            if max_per_frame <= 0:
-                return self._empty_result(
-                    selector_mode=selector_mode,
-                    ordering_mode=ordering_mode,
-                    append_position=append_position,
-                    fallback_reason="max_per_frame_le_zero",
-                )
+            unlimited_objects = max_objects <= 0
+            unlimited_per_frame = max_per_frame <= 0
 
             parsed_pairs = self._to_pairs(sample_frame_pairs, frame_count)
             stuff_class_ids = self._get_stuff_class_ids(pooled_outputs)
@@ -614,6 +698,23 @@ class EoMTObjectTokenSelector:
                     )
                     empty["external_selection_contract"] = external_selection_contract
                     return empty
+            elif bool(getattr(config, "mm_eomt_word_match_enable", False)):
+                candidates, external_selection_contract, word_reason, external_socket_note = self._apply_class_aware_word_filter(
+                    candidates=candidates,
+                    external_selection=external_selection,
+                    config=config,
+                )
+                if word_reason is not None and len(candidates) == 0:
+                    empty = self._empty_result(
+                        selector_mode=selector_mode,
+                        ordering_mode=ordering_mode,
+                        append_position=append_position,
+                        fallback_reason=word_reason,
+                        taxonomy_note=taxonomy_note,
+                        external_socket_note=external_socket_note,
+                    )
+                    empty["external_selection_contract"] = external_selection_contract
+                    return empty
 
             if len(candidates) == 0:
                 empty = self._empty_result(
@@ -652,7 +753,7 @@ class EoMTObjectTokenSelector:
             for cand in candidates:
                 frame_key = (cand["sample_idx"], cand["frame_idx"])
                 current = per_frame_counts.get(frame_key, 0)
-                if current >= max_per_frame:
+                if (not unlimited_per_frame) and current >= max_per_frame:
                     truncated_per_frame_count += 1
                     continue
                 per_frame_counts[frame_key] = current + 1
@@ -663,7 +764,7 @@ class EoMTObjectTokenSelector:
             truncated_global_count = 0
             for cand in after_per_frame:
                 current = per_sample_counts.get(cand["sample_idx"], 0)
-                if current >= max_objects:
+                if (not unlimited_objects) and current >= max_objects:
                     truncated_global_count += 1
                     continue
                 per_sample_counts[cand["sample_idx"]] = current + 1
