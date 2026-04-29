@@ -4,7 +4,7 @@
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
 #SBATCH --cpus-per-task=32
-#SBATCH --time=10:30:00
+#SBATCH --time=12:30:00
 #SBATCH --partition=boost_usr_prod  
 #SBATCH --qos=normal  # normal/boost_qos_dbg
 #SBATCH --output=logs/train/%x_%j.out
@@ -14,6 +14,8 @@
 #SBATCH --exclusive
 
 SUFFIX="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
+TRAIN_DATA_PERCENTAGE="${TRAIN_DATA_PERCENTAGE:-100}"  # percentage of loaded training samples to keep
+EOMT_EXPERIMENT_MODE="${EOMT_EXPERIMENT_MODE:-eomt_obj_text_phrase}"
 # ============================================================
 # User-defined variables: General
 # ============================================================
@@ -30,7 +32,7 @@ CONDA_ENV_NAME="vlm3rEOMT"
 # - eomt_obj_learnable
 # - eomt_obj_only_keep_stuff
 # - eomt_obj_only_word_filter
-EOMT_EXPERIMENT_MODE="${EOMT_EXPERIMENT_MODE:-eomt_obj_text_phrase}"
+
 
 EOMT_DEBUG_MODE="${EOMT_DEBUG_MODE:-False}"
 EOMT_DEBUG_MAX_SAMPLES="${EOMT_DEBUG_MAX_SAMPLES:-4}"
@@ -93,21 +95,8 @@ MODEL_SPATIAL_TOWER="cut3r"
 MODEL_SPATIAL_TOWER_SELECT_FEATURE="all_tokens"
 MODEL_SPATIAL_FEATURE_DIM="768"
 # Fusion options:
-# - cross_attention
-#     Original CUT3R fusion. Uses MODEL_SPATIAL_TOWER_SELECT_FEATURE to choose KV tokens.
-# - svf_patch_only
-#     Baseline: Q=2D visual tokens, KV=patch tokens only.
-# - svf_cat_feat
-#     Comparison-1: feature concat [camera||patch] as one KV stream.
-# - svf_pose_geometry_bridge
-#     Comparison-2: camera_tokens -> projected to d_features;
-#     cross(Q=camera_tokens, KV=3D features)=geometry-aware tokens;
-#     final=2D + crossattn(Q=2D, KV=geometry-aware tokens).
-# - svf_pose_prepend
-#     Comparison-3: prepend one pose token (12-dim camera pose -> projected to d_clip).
 
 # ============== Training percentage and shuffling (for ablation) ==============
-TRAIN_DATA_PERCENTAGE="${TRAIN_DATA_PERCENTAGE:-50}"  # percentage of loaded training samples to keep
 TRAIN_DATA_PERCENTAGE_SEED="$SEED"
 TRAIN_DATA_SHUFFLE="True"
 

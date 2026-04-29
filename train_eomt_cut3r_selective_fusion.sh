@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=selec_100%_baseline
+#SBATCH --job-name=selec_100%_soft
 #SBATCH --nodes=8
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
@@ -19,7 +19,7 @@ TRAIN_DATA_PERCENTAGE="${TRAIN_DATA_PERCENTAGE:-100}"  #使用多少百分比的
 # ============================================================
 # User-defined variables: General
 # ============================================================
-DEFAULT_NOTE="baseline: EoMT selective 3D gating, 100% data, 1 epoch"
+DEFAULT_NOTE="Selective Soft: EoMT selective 3D gating, 100% data, 1 epoch"
 NOTE="${NOTE:-$DEFAULT_NOTE}"
 CONDA_ENV_NAME="vlm3rEOMT"
 # ============================================================
@@ -30,7 +30,7 @@ CONDA_ENV_NAME="vlm3rEOMT"
 # - selective_soft
 # - selective_soft_with_floor
 # - selective_soft_with_floor_zero_fallback
-EOMT_EXPERIMENT_MODE="${EOMT_EXPERIMENT_MODE:-baseline}"
+EOMT_EXPERIMENT_MODE="${EOMT_EXPERIMENT_MODE:-selective_soft}"
 EOMT_DEBUG_MODE="${EOMT_DEBUG_MODE:-False}"
 EOMT_DEBUG_MAX_SAMPLES="${EOMT_DEBUG_MAX_SAMPLES:-4}"
 EOMT_DEBUG_TOP_K_MASKS="${EOMT_DEBUG_TOP_K_MASKS:-5}"

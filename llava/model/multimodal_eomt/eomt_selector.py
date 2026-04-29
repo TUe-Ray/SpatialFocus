@@ -20,7 +20,12 @@ class EoMTObjectTokenSelector:
     """Select pooled object tokens with deterministic ordering and budgets."""
 
     SUPPORTED_MODES = {"class_aware", "external_socket"}
-    SUPPORTED_ORDERS = {"score_desc", "frame_then_score"}
+    SUPPORTED_ORDERS = {
+        "score_desc",
+        "frame_then_score",
+        "word_match_then_frame_score",
+        "word_match_then_score",
+    }
 
     def _empty_result(
         self,
@@ -547,6 +552,127 @@ class EoMTObjectTokenSelector:
 
         return filtered, contract, None, word_note
 
+    def _annotate_word_match_priority(
+        self,
+        candidates: List[Dict[str, Any]],
+        external_selection: Optional[Dict[str, Any]],
+        config: Any,
+        contract: Dict[str, Any],
+    ) -> Optional[str]:
+        for cand in candidates:
+            cand["word_match_priority"] = 0
+
+        match_config = WordClassMatchConfig.from_config(config)
+        contract["word_priority_enabled"] = bool(match_config.enable)
+        contract["word_priority_source"] = match_config.source
+        contract["word_priority_mode"] = match_config.mode
+        contract["word_priority_candidate_count"] = int(len(candidates))
+        contract["word_priority_matched_candidate_count"] = 0
+        contract["word_priority_frame_result_count"] = 0
+
+        if not match_config.enable:
+            contract["word_priority_status"] = "word_match_disabled"
+            return "word_match_disabled"
+        if not isinstance(external_selection, dict):
+            contract["word_priority_status"] = "missing_external_selection"
+            return "missing_external_selection"
+
+        entries = external_selection.get("entries", None)
+        if not isinstance(entries, list) or len(entries) == 0:
+            contract["word_priority_status"] = "empty_external_selection"
+            return "empty_external_selection"
+
+        word_entries_by_key: Dict[Tuple[int, int], Dict[str, Any]] = {}
+        for item in entries:
+            if not isinstance(item, dict):
+                continue
+            sample_idx = int(item.get("sample_idx", -1))
+            frame_idx = int(item.get("frame_idx", -1))
+            if sample_idx < 0 or frame_idx < 0:
+                continue
+            selected_words = item.get("selected_words", None)
+            visible_grounded_words = item.get("visible_grounded_words", None)
+            has_word_payload = (
+                isinstance(selected_words, (list, tuple))
+                and len(selected_words) > 0
+            ) or (
+                isinstance(visible_grounded_words, (list, tuple))
+                and len(visible_grounded_words) > 0
+            )
+            if not has_word_payload:
+                continue
+
+            key = (sample_idx, frame_idx)
+            merged_entry = word_entries_by_key.setdefault(
+                key,
+                {
+                    "sample_idx": sample_idx,
+                    "frame_idx": frame_idx,
+                    "selected_words": [],
+                    "visible_grounded_words": [],
+                },
+            )
+            self._merge_socket_word_fields(merged_entry, item)
+
+        if len(word_entries_by_key) == 0:
+            contract["word_priority_status"] = "no_word_entries"
+            return "no_word_entries"
+
+        candidates_by_key: Dict[Tuple[int, int], List[Dict[str, Any]]] = {}
+        for cand in candidates:
+            key = (int(cand["sample_idx"]), int(cand["frame_idx"]))
+            candidates_by_key.setdefault(key, []).append(cand)
+
+        frame_results: List[Dict[str, Any]] = []
+        matched_candidate_count = 0
+        for key, entry in word_entries_by_key.items():
+            frame_candidates = candidates_by_key.get(key, [])
+            if len(frame_candidates) == 0:
+                frame_results.append(
+                    {
+                        "sample_idx": int(key[0]),
+                        "frame_idx": int(key[1]),
+                        "priority_applied": False,
+                        "priority_reason": "missing_candidate_frame",
+                    }
+                )
+                continue
+
+            candidate_class_names: List[str] = []
+            seen_class_names = set()
+            for cand in frame_candidates:
+                class_name = str(cand.get("class_name", ""))
+                if not class_name or class_name in seen_class_names:
+                    continue
+                seen_class_names.add(class_name)
+                candidate_class_names.append(class_name)
+
+            match_result = match_entry_words_to_class_names(
+                entry,
+                candidate_class_names=candidate_class_names,
+                match_config=match_config,
+            )
+            matched_class_names = set(match_result.matched_class_names)
+            for cand in frame_candidates:
+                if cand.get("class_name") in matched_class_names:
+                    cand["word_match_priority"] = 1
+                    matched_candidate_count += 1
+
+            frame_result = match_result.to_dict()
+            frame_result["sample_idx"] = int(key[0])
+            frame_result["frame_idx"] = int(key[1])
+            frame_result["priority_applied"] = bool(matched_class_names)
+            frame_results.append(frame_result)
+
+        contract["word_priority_frame_result_count"] = int(len(frame_results))
+        contract["word_priority_frame_results"] = frame_results
+        contract["word_priority_matched_candidate_count"] = int(matched_candidate_count)
+        if matched_candidate_count > 0:
+            contract["word_priority_status"] = "words_prioritized"
+            return "words_prioritized"
+        contract["word_priority_status"] = "words_no_priority_matches"
+        return "words_no_priority_matches"
+
     def select(
         self,
         pooled_outputs: Dict[str, Any],
@@ -567,6 +693,10 @@ class EoMTObjectTokenSelector:
 
         if ordering_mode not in self.SUPPORTED_ORDERS:
             ordering_mode = "frame_then_score"
+        priority_word_matches = ordering_mode in {
+            "word_match_then_frame_score",
+            "word_match_then_score",
+        }
 
         if not isinstance(pooled_outputs, dict):
             return self._empty_result(
@@ -698,7 +828,7 @@ class EoMTObjectTokenSelector:
                     )
                     empty["external_selection_contract"] = external_selection_contract
                     return empty
-            elif bool(getattr(config, "mm_eomt_word_match_enable", False)):
+            elif bool(getattr(config, "mm_eomt_word_match_enable", False)) and not priority_word_matches:
                 candidates, external_selection_contract, word_reason, external_socket_note = self._apply_class_aware_word_filter(
                     candidates=candidates,
                     external_selection=external_selection,
@@ -728,12 +858,40 @@ class EoMTObjectTokenSelector:
                 empty["external_selection_contract"] = external_selection_contract
                 return empty
 
+            if priority_word_matches:
+                external_socket_note = self._annotate_word_match_priority(
+                    candidates=candidates,
+                    external_selection=external_selection,
+                    config=config,
+                    contract=external_selection_contract,
+                )
+
             if ordering_mode == "score_desc":
                 candidates.sort(
                     key=lambda x: (
                         -x["score"],
                         x["sample_idx"],
                         x["frame_idx"],
+                        x["query_idx"],
+                    )
+                )
+            elif ordering_mode == "word_match_then_score":
+                candidates.sort(
+                    key=lambda x: (
+                        -int(x.get("word_match_priority", 0)),
+                        -x["score"],
+                        x["sample_idx"],
+                        x["frame_idx"],
+                        x["query_idx"],
+                    )
+                )
+            elif ordering_mode == "word_match_then_frame_score":
+                candidates.sort(
+                    key=lambda x: (
+                        -int(x.get("word_match_priority", 0)),
+                        x["sample_idx"],
+                        x["frame_idx"],
+                        -x["score"],
                         x["query_idx"],
                     )
                 )
