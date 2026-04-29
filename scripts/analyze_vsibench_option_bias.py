@@ -119,9 +119,52 @@ def load_hf_dataset(args):
     return list(dataset[args.split])
 
 
+def normalize_training_rows(rows):
+    """Convert VLM-3R training JSON conversation format to the options/ground_truth schema.
+
+    Training items look like:
+        {"question_type": "route_planning",
+         "conversations": [{"from": "human", "value": "...Options:\\nA. Turn Left\\n..."},
+                           {"from": "gpt",   "value": "B"}]}
+
+    We extract the options list from the question text and set ground_truth to the
+    letter in the gpt turn.
+    """
+    options_block_re = re.compile(
+        r"Options:\s*\n((?:[A-D][.):]\s*.+\n?)+)", re.IGNORECASE
+    )
+    option_line_re = re.compile(r"([A-D])[.):\-]\s*(.+)", re.IGNORECASE)
+
+    normalized = []
+    for row in rows:
+        convs = row.get("conversations")
+        if not convs or row.get("options") is not None:
+            normalized.append(row)
+            continue
+        human_text = next(
+            (c.get("value", "") for c in convs if c.get("from") == "human"), ""
+        )
+        gpt_text = next(
+            (c.get("value", "") for c in convs if c.get("from") == "gpt"), ""
+        )
+        options = []
+        m = options_block_re.search(human_text)
+        if m:
+            for line in m.group(1).splitlines():
+                lm = option_line_re.match(line.strip())
+                if lm:
+                    options.append(f"{lm.group(1).upper()}. {lm.group(2).strip()}")
+        new_row = dict(row)
+        new_row["options"] = options if options else None
+        new_row["ground_truth"] = gpt_text.strip()
+        normalized.append(new_row)
+    return normalized
+
+
 def load_rows(args):
     if args.local_dataset_path:
-        return load_local_dataset(args.local_dataset_path)
+        rows = load_local_dataset(args.local_dataset_path)
+        return normalize_training_rows(rows)
     if not args.dataset_name:
         raise ValueError("Provide either --local-dataset-path or --dataset-name.")
     return load_hf_dataset(args)
