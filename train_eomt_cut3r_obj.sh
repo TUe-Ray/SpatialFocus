@@ -1,10 +1,10 @@
 #!/bin/bash
-#SBATCH --job-name=eomt_cut3r_obj_only
+#SBATCH --job-name=eomt_cut3r_obj_eomt_obj_learnable_50p
 #SBATCH --nodes=4
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
 #SBATCH --cpus-per-task=32
-#SBATCH --time=8:30:00
+#SBATCH --time=9:30:00
 #SBATCH --partition=boost_usr_prod  
 #SBATCH --qos=normal  # normal/boost_qos_dbg
 #SBATCH --output=logs/train/%x_%j.out
@@ -17,7 +17,7 @@ SUFFIX="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
 # ============================================================
 # User-defined variables: General
 # ============================================================
-DEFAULT_NOTE="CUT3R + EoMT object tokens: eomt_obj_only, 50% data, 1 epoch"
+DEFAULT_NOTE="CUT3R + EoMT object tokens: eomt_obj_learnable, 50% data, 1 epoch"
 NOTE="${NOTE:-$DEFAULT_NOTE}"
 CONDA_ENV_NAME="vlm3rEOMT"
 # ============================================================
@@ -30,7 +30,8 @@ CONDA_ENV_NAME="vlm3rEOMT"
 # - eomt_obj_learnable
 # - eomt_obj_only_keep_stuff
 # - eomt_obj_only_word_filter
-EOMT_EXPERIMENT_MODE="${EOMT_EXPERIMENT_MODE:-eomt_obj_only}"
+EOMT_EXPERIMENT_MODE="${EOMT_EXPERIMENT_MODE:-eomt_obj_learnable}"
+
 EOMT_DEBUG_MODE="${EOMT_DEBUG_MODE:-False}"
 EOMT_DEBUG_MAX_SAMPLES="${EOMT_DEBUG_MAX_SAMPLES:-4}"
 EOMT_DEBUG_TOP_K_MASKS="${EOMT_DEBUG_TOP_K_MASKS:-5}"
@@ -350,6 +351,13 @@ echo "[BATCH] GRADIENT_ACCUMULATION_STEPS=$GRADIENT_ACCUMULATION_STEPS"
 echo "[ABLATION] ZERO_SPATIAL_FEATURES=$ZERO_SPATIAL_FEATURES"
 
 # Validate fusion option and print method summary for reproducibility.
+VALID_FUSION_BLOCKS=(
+    "cross_attention"
+    "svf_patch_only"
+    "svf_cat_feat"
+    "svf_pose_geometry_bridge"
+    "svf_pose_prepend"
+)
 
 IS_VALID_FUSION="False"
 for fusion_name in "${VALID_FUSION_BLOCKS[@]}"; do
