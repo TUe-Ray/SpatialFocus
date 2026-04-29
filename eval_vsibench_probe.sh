@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=eval_vsibench_probe_500
+#SBATCH --job-name=eval_vsibench_probe_200
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=4
 #SBATCH --ntasks-per-node=1
@@ -11,7 +11,7 @@
 #SBATCH --error=logs/eval/%x_%j.err
 #SBATCH --mem=0
 set -euo pipefail
-NUM_SAMPLES="${NUM_SAMPLES:-500}"
+NUM_SAMPLES="${NUM_SAMPLES:-200}"
 # Under sbatch, BASH_SOURCE can point to a slurmd spool copy (often not writable).
 # Prefer the submit directory so default outputs stay in user space.
 if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
@@ -24,8 +24,8 @@ LMMS_ROOT="${REPO_ROOT}/thinking-in-space"
 # Example:
 # MODEL_ARGS="pretrained=/leonardo_work/EUHPC_D32_006/Train_Model/VLM3R/Reproduction_2,model_base=/leonardo_work/EUHPC_D32_006/FAST/hf_models/VLM3R/LLaVA-NeXT-Video-7B-Qwen2,conv_template=qwen_1_5,max_frames_num=32" \
 # CHECKPOINT="/leonardo_work/EUHPC_D32_006/Train_Model/VLM3R/Reproduction_2" \
-# RUN_NAME="selective_fusion_option_shuffle_500" \
-# NUM_SAMPLES=500 \
+# RUN_NAME="selective_fusion_option_shuffle_200" \
+# NUM_SAMPLES=200 \
 # SAMPLE_SEED=42 \
 # PROMPT_VARIANT=option_shuffle \
 # OPTION_SHUFFLE_SEEDS=0,1,2 \
