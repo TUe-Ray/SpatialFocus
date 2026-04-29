@@ -184,6 +184,18 @@ sbatch eval_vsi_snellius.sh
 
 This runs the probe-only controlled comparison with zero-spatial as the baseline and Reproduction_2 as the new model. It keeps sample selection, prompt variant, option shuffle seeds, and generation config paired across both runs, then compares without `--allow-mismatch`.
 
+On Leonardo debug-QoS, prefer the manual three-step workflow so only one debug job runs at a time:
+
+```bash
+sbatch submit_vsibench_probe_zero_spatial_dbg.slurm
+# After Step 1 finishes:
+sbatch submit_vsibench_probe_reproduction2_dbg.slurm
+# After Step 2 finishes, on the login node:
+bash compare_vsibench_probe_zero_vs_repro_login.sh
+```
+
+The three-step workflow defaults to `NUM_SAMPLES=200`, `SAMPLE_SEED=42`, `PROMPT_VARIANT=option_shuffle`, and `OPTION_SHUFFLE_SEEDS=0,1,2`.
+
 ```bash
 NUM_SAMPLES=200 \
 SAMPLE_SEED=42 \

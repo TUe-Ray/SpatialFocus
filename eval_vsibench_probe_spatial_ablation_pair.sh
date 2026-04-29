@@ -1,6 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 
+# NOTE: On Leonardo debug-QoS, prefer the manual three-step workflow:
+#   1. sbatch submit_vsibench_probe_zero_spatial_dbg.slurm
+#   2. sbatch submit_vsibench_probe_reproduction2_dbg.slurm
+#   3. bash compare_vsibench_probe_zero_vs_repro_login.sh
+# This sequential runner is kept for local/non-SLURM convenience.
+
 if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
   REPO_ROOT="${SLURM_SUBMIT_DIR}"
 else
