@@ -1,10 +1,10 @@
 #!/bin/bash
-#SBATCH --job-name=eomt_cut3r_obj_eomt_obj_only_50p
-#SBATCH --nodes=4
+#SBATCH --job-name=eomt_obj_text_phrase_100p
+#SBATCH --nodes=8
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
 #SBATCH --cpus-per-task=32
-#SBATCH --time=9:30:00
+#SBATCH --time=10:30:00
 #SBATCH --partition=boost_usr_prod  
 #SBATCH --qos=normal  # normal/boost_qos_dbg
 #SBATCH --output=logs/train/%x_%j.out
@@ -17,7 +17,7 @@ SUFFIX="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
 # ============================================================
 # User-defined variables: General
 # ============================================================
-DEFAULT_NOTE="CUT3R + EoMT object tokens: eomt_obj_only, 50% data, 1 epoch"
+DEFAULT_NOTE="CUT3R + EoMT object tokens: eomt_obj_text_phrase, 100% data, 1 epoch"
 NOTE="${NOTE:-$DEFAULT_NOTE}"
 CONDA_ENV_NAME="vlm3rEOMT"
 # ============================================================
@@ -30,7 +30,7 @@ CONDA_ENV_NAME="vlm3rEOMT"
 # - eomt_obj_learnable
 # - eomt_obj_only_keep_stuff
 # - eomt_obj_only_word_filter
-EOMT_EXPERIMENT_MODE="${EOMT_EXPERIMENT_MODE:-eomt_obj_only}"
+EOMT_EXPERIMENT_MODE="${EOMT_EXPERIMENT_MODE:-eomt_obj_text_phrase}"
 
 EOMT_DEBUG_MODE="${EOMT_DEBUG_MODE:-False}"
 EOMT_DEBUG_MAX_SAMPLES="${EOMT_DEBUG_MAX_SAMPLES:-4}"

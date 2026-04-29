@@ -1,10 +1,10 @@
 #!/bin/bash
-#SBATCH --job-name=selec_baseline
-#SBATCH --nodes=4
+#SBATCH --job-name=selec_100%_baseline
+#SBATCH --nodes=8
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
 #SBATCH --cpus-per-task=32
-#SBATCH --time=8:30:00
+#SBATCH --time=10:30:00
 #SBATCH --partition=boost_usr_prod  
 #SBATCH --qos=normal  # normal/boost_qos_dbg
 #SBATCH --output=logs/train/%x_%j.out
@@ -14,10 +14,12 @@
 #SBATCH --exclusive
 
 SUFFIX="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
+TRAIN_DATA_PERCENTAGE="${TRAIN_DATA_PERCENTAGE:-100}"  #使用多少百分比的训练数据进行训练（0-100），例如 50 表示使用一半数据，100 表示使用全部数据
+
 # ============================================================
 # User-defined variables: General
 # ============================================================
-DEFAULT_NOTE="baseline: EoMT selective 3D gating, 50% data, 1 epoch"
+DEFAULT_NOTE="baseline: EoMT selective 3D gating, 100% data, 1 epoch"
 NOTE="${NOTE:-$DEFAULT_NOTE}"
 CONDA_ENV_NAME="vlm3rEOMT"
 # ============================================================
@@ -90,7 +92,6 @@ MODEL_SPATIAL_TOWER="cut3r"
 MODEL_SPATIAL_TOWER_SELECT_FEATURE="all_tokens"
 MODEL_SPATIAL_FEATURE_DIM="768"
 
-TRAIN_DATA_PERCENTAGE="${TRAIN_DATA_PERCENTAGE:-50}"  #使用多少百分比的训练数据进行训练（0-100），例如 50 表示使用一半数据，100 表示使用全部数据
 TRAIN_DATA_PERCENTAGE_SEED="$SEED"
 TRAIN_DATA_SHUFFLE="True"
 
