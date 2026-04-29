@@ -1,0 +1,19 @@
+include: ../vsibench/vsibench.yaml
+
+task: vsibench_probe
+process_docs: !function utils.process_docs
+doc_to_text: !function utils.vsibench_probe_doc_to_text
+doc_to_target: !function utils.vsibench_probe_doc_to_target
+generation_kwargs:
+  max_new_tokens: 16
+  temperature: 0
+  top_p: 1.0
+  num_beams: 1
+  do_sample: false
+process_results: !function utils.vsibench_probe_process_results
+metric_list:
+  - metric: vsibench_probe_score
+    aggregation: !function utils.vsibench_probe_aggregate_results
+    higher_is_better: true
+metadata:
+  version: 0.1

@@ -180,6 +180,42 @@ conda activate vsibench
 sbatch eval_vsi_snellius.sh
 ```
 
+### VSiBench probe spatial ablation pair
+
+This runs the probe-only controlled comparison with zero-spatial as the baseline and Reproduction_2 as the new model. It keeps sample selection, prompt variant, option shuffle seeds, and generation config paired across both runs, then compares without `--allow-mismatch`.
+
+On Leonardo debug-QoS, prefer the manual three-step workflow so only one debug job runs at a time:
+
+```bash
+sbatch submit_vsibench_probe_zero_spatial_dbg.slurm
+# After Step 1 finishes:
+sbatch submit_vsibench_probe_reproduction2_dbg.slurm
+# After Step 2 finishes, on the login node:
+bash compare_vsibench_probe_zero_vs_repro_login.sh
+```
+
+The three-step workflow defaults to `NUM_SAMPLES=200`, `SAMPLE_SEED=42`, `PROMPT_VARIANT=option_shuffle`, and `OPTION_SHUFFLE_SEEDS=0,1,2`.
+
+```bash
+NUM_SAMPLES=200 \
+SAMPLE_SEED=42 \
+PROMPT_VARIANT=option_shuffle \
+OPTION_SHUFFLE_SEEDS=0,1,2 \
+bash eval_vsibench_probe_spatial_ablation_pair.sh
+```
+
+Outputs default to `outputs/vsibench_probe/`, including `compare_zero_spatial_vs_reproduction2_200_seed42_3seeds/report.md`.
+
+### VSiBench training-data option bias
+
+```bash
+python scripts/analyze_vsibench_option_bias.py \
+  --split train \
+  --output outputs/vsibench_bias/train
+```
+
+Use `--local-dataset-path /path/to/file.jsonl` for local JSON, JSONL, CSV, or Parquet data, or `--dataset-name` and optional `--dataset-config` for a Hugging Face dataset.
+
 ## Pre-extracting Spatial Features ⚡
 
 Use the extraction pipeline to precompute spatial features before training:
