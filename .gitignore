@@ -95,3 +95,4 @@ prepare_offline_cache.sh
 .offline_runtime/
 .codex-work/
 .codex
+outputs/
