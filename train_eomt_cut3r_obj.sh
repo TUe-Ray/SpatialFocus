@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=eomt_cut3r_obj_eomt_obj_learnable_50p
+#SBATCH --job-name=eomt_cut3r_obj_eomt_obj_only_50p
 #SBATCH --nodes=4
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
@@ -17,7 +17,7 @@ SUFFIX="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
 # ============================================================
 # User-defined variables: General
 # ============================================================
-DEFAULT_NOTE="CUT3R + EoMT object tokens: eomt_obj_learnable, 50% data, 1 epoch"
+DEFAULT_NOTE="CUT3R + EoMT object tokens: eomt_obj_only, 50% data, 1 epoch"
 NOTE="${NOTE:-$DEFAULT_NOTE}"
 CONDA_ENV_NAME="vlm3rEOMT"
 # ============================================================
@@ -30,7 +30,7 @@ CONDA_ENV_NAME="vlm3rEOMT"
 # - eomt_obj_learnable
 # - eomt_obj_only_keep_stuff
 # - eomt_obj_only_word_filter
-EOMT_EXPERIMENT_MODE="${EOMT_EXPERIMENT_MODE:-eomt_obj_learnable}"
+EOMT_EXPERIMENT_MODE="${EOMT_EXPERIMENT_MODE:-eomt_obj_only}"
 
 EOMT_DEBUG_MODE="${EOMT_DEBUG_MODE:-False}"
 EOMT_DEBUG_MAX_SAMPLES="${EOMT_DEBUG_MAX_SAMPLES:-4}"
@@ -564,6 +564,7 @@ srun --export=ALL torchrun \
         --rdzv_endpoint="$MASTER_ADDR:$MASTER_PORT" \
         llava/train/train_mem.py \
         "${TORCHRUN_ARGS[@]}" \
-    2>&1 | tee "$LOG_DIR/${SUFFIX}.log"
+    1> >(tee "$LOG_DIR/${SUFFIX}.out") \
+    2> >(tee "$LOG_DIR/${SUFFIX}.err" >&2)
 
 exit 0
