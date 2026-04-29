@@ -180,6 +180,30 @@ conda activate vsibench
 sbatch eval_vsi_snellius.sh
 ```
 
+### VSiBench probe spatial ablation pair
+
+This runs the probe-only controlled comparison with zero-spatial as the baseline and Reproduction_2 as the new model. It keeps sample selection, prompt variant, option shuffle seeds, and generation config paired across both runs, then compares without `--allow-mismatch`.
+
+```bash
+NUM_SAMPLES=200 \
+SAMPLE_SEED=42 \
+PROMPT_VARIANT=option_shuffle \
+OPTION_SHUFFLE_SEEDS=0,1,2 \
+bash eval_vsibench_probe_spatial_ablation_pair.sh
+```
+
+Outputs default to `outputs/vsibench_probe/`, including `compare_zero_spatial_vs_reproduction2_200_seed42_3seeds/report.md`.
+
+### VSiBench training-data option bias
+
+```bash
+python scripts/analyze_vsibench_option_bias.py \
+  --split train \
+  --output outputs/vsibench_bias/train
+```
+
+Use `--local-dataset-path /path/to/file.jsonl` for local JSON, JSONL, CSV, or Parquet data, or `--dataset-name` and optional `--dataset-config` for a Hugging Face dataset.
+
 ## Pre-extracting Spatial Features ⚡
 
 Use the extraction pipeline to precompute spatial features before training:

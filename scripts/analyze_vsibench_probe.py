@@ -207,7 +207,7 @@ def validate_selected_samples(selected_samples, records, prompt_variant, option_
     return warnings
 
 
-def option_shuffle_stats(records):
+def option_shuffle_stats(records, expected_shuffle_seeds=None):
     total = len(records)
     parsed = [row for row in records if row.get("parse_ok")]
     parsed_count = len(parsed)
@@ -235,6 +235,10 @@ def option_shuffle_stats(records):
                 "correctness_flip": len(set(correctness_values)) > 1 if correctness_values else False,
             }
         )
+
+    if expected_shuffle_seeds is None:
+        expected_shuffle_seeds = sorted({int(row.get("option_shuffle_seed")) for row in records if row.get("option_shuffle_seed") is not None})
+    robustness_rows, robustness_by_type_rows, robustness_summary = build_sample_robustness(records, expected_shuffle_seeds)
 
     by_type_rows = []
     for question_type in sorted({row.get("question_type") for row in records}):
@@ -291,6 +295,8 @@ def option_shuffle_stats(records):
             },
         },
         "by_question_type": {row["question_type"]: row for row in by_type_rows},
+        "robustness_summary": robustness_summary,
+        "robustness_by_question_type": {row["question_type"]: row for row in robustness_by_type_rows},
     }
 
     letter_rows = []
@@ -308,7 +314,123 @@ def option_shuffle_stats(records):
             }
         )
     stats["letter_bias"] = {row["letter"]: row["bias"] for row in letter_rows}
-    return stats, by_type_rows, letter_rows
+    return stats, by_type_rows, letter_rows, robustness_rows, robustness_by_type_rows
+
+
+def build_sample_robustness(records, expected_shuffle_seeds):
+    expected_shuffle_seeds = [int(seed) for seed in expected_shuffle_seeds]
+    expected_set = set(expected_shuffle_seeds)
+    by_sample = defaultdict(list)
+    for row in records:
+        by_sample[row.get("sample_id")].append(row)
+
+    robustness_rows = []
+    for sample_id, rows in sorted(by_sample.items(), key=lambda item: min(row.get("probe_index", 0) for row in item[1])):
+        rows_by_seed = {}
+        observed_shuffle_seeds = []
+        for row in rows:
+            seed = row.get("option_shuffle_seed")
+            if seed is None:
+                continue
+            seed = int(seed)
+            observed_shuffle_seeds.append(seed)
+            rows_by_seed.setdefault(seed, row)
+        observed_unique = sorted(set(observed_shuffle_seeds))
+        parsed_rows = [row for row in rows if row.get("parse_ok")]
+        correctness_values = [row.get("correct_original_space") for row in parsed_rows if isinstance(row.get("correct_original_space"), bool)]
+        correct_count = sum(value is True for value in correctness_values)
+        wrong_count = sum(value is False for value in correctness_values)
+        semantic_answers = sorted({row.get("model_original_letter") for row in parsed_rows if row.get("model_original_letter")})
+        missing_expected = bool(expected_set - set(observed_unique))
+        expected_rows = [rows_by_seed.get(seed) for seed in expected_shuffle_seeds]
+        parse_failure = any(row is None or row.get("parse_ok") is not True for row in expected_rows)
+        complete_and_parsed = not missing_expected and not parse_failure
+
+        always_correct = complete_and_parsed and len(expected_shuffle_seeds) > 0 and correct_count == len(expected_shuffle_seeds)
+        always_wrong = complete_and_parsed and len(expected_shuffle_seeds) > 0 and wrong_count == len(expected_shuffle_seeds)
+        always_same_wrong_answer = always_wrong and len(semantic_answers) == 1
+        flip = correct_count > 0 and wrong_count > 0
+
+        if not complete_and_parsed:
+            primary = "parse_failure_or_incomplete"
+        elif always_correct:
+            primary = "always_correct"
+        elif flip:
+            primary = "flip"
+        elif always_same_wrong_answer:
+            primary = "always_same_wrong_answer"
+        elif always_wrong:
+            primary = "always_wrong_inconsistent"
+        else:
+            primary = "parse_failure_or_incomplete"
+
+        per_seed_answers = {}
+        for seed in expected_shuffle_seeds:
+            row = rows_by_seed.get(seed)
+            per_seed_answers[str(seed)] = {
+                "parse_ok": row.get("parse_ok") if row else False,
+                "model_presented_letter": row.get("model_presented_letter") if row else None,
+                "model_original_letter": row.get("model_original_letter") if row else None,
+                "correct_original_space": row.get("correct_original_space") if row else None,
+                "model_answer_text": row.get("model_answer_text") if row else None,
+                "raw": row.get("model_raw_prediction") if row else None,
+            }
+
+        first = rows[0]
+        robustness_rows.append(
+            {
+                "sample_id": sample_id,
+                "question_type": first.get("question_type"),
+                "question": first.get("question"),
+                "expected_shuffle_seeds": expected_shuffle_seeds,
+                "observed_shuffle_seeds": observed_unique,
+                "num_expected_seeds": len(expected_shuffle_seeds),
+                "num_observed_seeds": len(observed_unique),
+                "parse_success_count": len(parsed_rows),
+                "correct_count": correct_count,
+                "wrong_count": wrong_count,
+                "unique_semantic_answer_count": len(semantic_answers),
+                "semantic_answers": semantic_answers,
+                "semantic_consistent": len(semantic_answers) == 1 if semantic_answers else False,
+                "correctness_flip": flip,
+                "per_seed_answers": per_seed_answers,
+                "always_correct": always_correct,
+                "always_wrong": always_wrong,
+                "always_same_wrong_answer": always_same_wrong_answer,
+                "flip": flip,
+                "primary_robustness_category": primary,
+            }
+        )
+
+    category_order = ["always_correct", "flip", "always_same_wrong_answer", "always_wrong_inconsistent", "parse_failure_or_incomplete"]
+
+    def summarize(rows):
+        total = len(rows)
+        summary = {}
+        for category in category_order:
+            count = sum(row["primary_robustness_category"] == category for row in rows)
+            summary[f"{category}_count"] = count
+            summary[f"{category}_rate"] = safe_div(count, total)
+        return summary
+
+    robustness_summary = summarize(robustness_rows)
+    robustness_summary["base_samples"] = len(robustness_rows)
+
+    by_type_rows = []
+    for question_type in sorted({row.get("question_type") for row in robustness_rows}):
+        rows = [row for row in robustness_rows if row.get("question_type") == question_type]
+        row = {"question_type": question_type, "base_samples": len(rows)}
+        row.update(summarize(rows))
+        row.update(
+            {
+                "semantic_consistency_rate": bool_mean(rows, "semantic_consistent"),
+                "correctness_flip_rate": bool_mean(rows, "correctness_flip"),
+                "avg_unique_semantic_answers_per_sample": mean([item["unique_semantic_answer_count"] for item in rows]),
+            }
+        )
+        by_type_rows.append(row)
+
+    return robustness_rows, by_type_rows, robustness_summary
 
 
 def _is_mca_record(row):
@@ -510,7 +632,7 @@ def main():
     write_json(run_dir / "run_metadata.json", metadata)
 
     if args.prompt_variant == "option_shuffle":
-        stats, by_type_rows, letter_rows = option_shuffle_stats(records)
+        stats, by_type_rows, letter_rows, robustness_rows, robustness_by_type_rows = option_shuffle_stats(records, args.option_shuffle_seeds)
         write_csv(
             run_dir / "stats_by_question_type.csv",
             by_type_rows,
@@ -530,6 +652,54 @@ def main():
             ],
         )
         write_csv(run_dir / "letter_bias.csv", letter_rows, ["letter", "model_count", "model_frequency", "ground_truth_count", "ground_truth_frequency", "bias"])
+        write_jsonl(run_dir / "sample_robustness.jsonl", robustness_rows)
+        write_csv(
+            run_dir / "sample_robustness.csv",
+            robustness_rows,
+            [
+                "sample_id",
+                "question_type",
+                "question",
+                "expected_shuffle_seeds",
+                "observed_shuffle_seeds",
+                "num_expected_seeds",
+                "num_observed_seeds",
+                "parse_success_count",
+                "correct_count",
+                "wrong_count",
+                "unique_semantic_answer_count",
+                "semantic_answers",
+                "semantic_consistent",
+                "correctness_flip",
+                "per_seed_answers",
+                "always_correct",
+                "always_wrong",
+                "always_same_wrong_answer",
+                "flip",
+                "primary_robustness_category",
+            ],
+        )
+        write_csv(
+            run_dir / "robustness_by_question_type.csv",
+            robustness_by_type_rows,
+            [
+                "question_type",
+                "base_samples",
+                "always_correct_count",
+                "always_correct_rate",
+                "flip_count",
+                "flip_rate",
+                "always_same_wrong_answer_count",
+                "always_same_wrong_answer_rate",
+                "always_wrong_inconsistent_count",
+                "always_wrong_inconsistent_rate",
+                "parse_failure_or_incomplete_count",
+                "parse_failure_or_incomplete_rate",
+                "semantic_consistency_rate",
+                "correctness_flip_rate",
+                "avg_unique_semantic_answers_per_sample",
+            ],
+        )
     else:
         stats, by_type_rows = evidence_json_stats(records)
         write_csv(

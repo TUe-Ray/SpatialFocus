@@ -48,6 +48,15 @@ def write_jsonl(path, rows):
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def write_csv(path, rows, fieldnames):
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    with Path(path).open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: row.get(field) for field in fieldnames})
+
+
 def safe_float(value):
     if value in (None, ""):
         return None
@@ -106,6 +115,7 @@ def load_run(run_dir):
         "by_type": read_csv(run_dir / "stats_by_question_type.csv"),
         "letter_bias": read_csv(run_dir / "letter_bias.csv"),
         "predictions": read_jsonl(run_dir / "predictions.jsonl"),
+        "sample_robustness": read_jsonl(run_dir / "sample_robustness.jsonl"),
     }
 
 
@@ -203,6 +213,161 @@ def compare_samples(baseline, new):
     return wrong_to_correct, correct_to_wrong, consistency_improved, consistency_regressed
 
 
+def prediction_correct(row):
+    if row.get("prompt_variant") == "option_shuffle":
+        return row.get("correct_original_space") is True
+    if row.get("correct") is not None:
+        return row.get("correct") is True
+    if row.get("numeric_mra") is not None:
+        return safe_float(row.get("numeric_mra")) is not None and safe_float(row.get("numeric_mra")) >= 0.5
+    return row.get("open_ended_normalized_match") is True
+
+
+def row_outcome(baseline_correct, new_correct):
+    if baseline_correct and new_correct:
+        return "both_correct"
+    if baseline_correct and not new_correct:
+        return "baseline_correct_new_wrong"
+    if not baseline_correct and new_correct:
+        return "baseline_wrong_new_correct"
+    return "both_wrong"
+
+
+def summarize_paired_row_outcomes(rows):
+    total = len(rows)
+    counts = {
+        "both_correct": sum(row["outcome"] == "both_correct" for row in rows),
+        "both_wrong": sum(row["outcome"] == "both_wrong" for row in rows),
+        "baseline_wrong_new_correct": sum(row["outcome"] == "baseline_wrong_new_correct" for row in rows),
+        "baseline_correct_new_wrong": sum(row["outcome"] == "baseline_correct_new_wrong" for row in rows),
+    }
+    baseline_correct = sum(row["baseline_correct"] for row in rows)
+    new_correct = sum(row["new_correct"] for row in rows)
+    return {
+        "paired_rows": total,
+        **counts,
+        "net_gain": counts["baseline_wrong_new_correct"] - counts["baseline_correct_new_wrong"],
+        "baseline_accuracy": safe_div(baseline_correct, total),
+        "new_accuracy": safe_div(new_correct, total),
+        "accuracy_delta": None if total == 0 else safe_div(new_correct, total) - safe_div(baseline_correct, total),
+    }
+
+
+def paired_row_win_loss(baseline, new):
+    base_by_uid = {row.get("probe_uid"): row for row in baseline["predictions"] if row.get("probe_uid")}
+    new_by_uid = {row.get("probe_uid"): row for row in new["predictions"] if row.get("probe_uid")}
+    outcomes = []
+    for probe_uid in sorted(set(base_by_uid) & set(new_by_uid)):
+        base_row = base_by_uid[probe_uid]
+        new_row = new_by_uid[probe_uid]
+        baseline_correct = prediction_correct(base_row)
+        new_correct = prediction_correct(new_row)
+        outcomes.append(
+            {
+                "probe_uid": probe_uid,
+                "sample_id": base_row.get("sample_id"),
+                "question_type": base_row.get("question_type"),
+                "shuffle_seed": base_row.get("option_shuffle_seed"),
+                "baseline_correct": baseline_correct,
+                "new_correct": new_correct,
+                "outcome": row_outcome(baseline_correct, new_correct),
+            }
+        )
+
+    by_type_rows = []
+    overall = summarize_paired_row_outcomes(outcomes)
+    by_type_rows.append({"question_type": "ALL", **overall})
+    for question_type in sorted({row.get("question_type") for row in outcomes}):
+        rows = [row for row in outcomes if row.get("question_type") == question_type]
+        by_type_rows.append({"question_type": question_type, **summarize_paired_row_outcomes(rows)})
+    return outcomes, overall, by_type_rows
+
+
+def robustness_by_sample(run):
+    return {row.get("sample_id"): row for row in run.get("sample_robustness") or []}
+
+
+def prediction_sample_summaries(run):
+    grouped = {}
+    for row in run["predictions"]:
+        grouped.setdefault(row.get("sample_id"), []).append(row)
+    robust = robustness_by_sample(run)
+    summaries = {}
+    for sample_id, rows in grouped.items():
+        correct_values = [prediction_correct(row) for row in rows]
+        summaries[sample_id] = {
+            "sample_id": sample_id,
+            "question_type": rows[0].get("question_type"),
+            "question": rows[0].get("question"),
+            "correct_count": sum(correct_values),
+            "total_count": len(correct_values),
+            "correct_rate": safe_div(sum(correct_values), len(correct_values)),
+            "semantic_consistent": (robust.get(sample_id) or {}).get("semantic_consistent"),
+            "primary_robustness_category": (robust.get(sample_id) or {}).get("primary_robustness_category"),
+        }
+    return summaries
+
+
+def summarize_paired_sample_outcomes(rows):
+    total = len(rows)
+    improved = sum(row["outcome"] == "improved" for row in rows)
+    regressed = sum(row["outcome"] == "regressed" for row in rows)
+    unchanged = sum(row["outcome"] == "unchanged" for row in rows)
+    baseline_rates = [row["baseline_correct_rate"] for row in rows if row.get("baseline_correct_rate") is not None]
+    new_rates = [row["new_correct_rate"] for row in rows if row.get("new_correct_rate") is not None]
+    baseline_mean = safe_div(sum(baseline_rates), len(baseline_rates))
+    new_mean = safe_div(sum(new_rates), len(new_rates))
+    return {
+        "paired_base_samples": total,
+        "improved_samples": improved,
+        "regressed_samples": regressed,
+        "unchanged_samples": unchanged,
+        "net_improved_samples": improved - regressed,
+        "baseline_mean_correct_rate": baseline_mean,
+        "new_mean_correct_rate": new_mean,
+        "mean_correct_rate_delta": None if baseline_mean is None or new_mean is None else new_mean - baseline_mean,
+    }
+
+
+def paired_sample_win_loss(baseline, new):
+    base_samples = prediction_sample_summaries(baseline)
+    new_samples = prediction_sample_summaries(new)
+    outcomes = []
+    for sample_id in sorted(set(base_samples) & set(new_samples)):
+        base = base_samples[sample_id]
+        new_item = new_samples[sample_id]
+        base_rate = base["correct_rate"]
+        new_rate = new_item["correct_rate"]
+        if new_rate is not None and base_rate is not None and new_rate > base_rate:
+            outcome = "improved"
+        elif new_rate is not None and base_rate is not None and new_rate < base_rate:
+            outcome = "regressed"
+        else:
+            outcome = "unchanged"
+        outcomes.append(
+            {
+                "sample_id": sample_id,
+                "question_type": base.get("question_type"),
+                "baseline_correct_count": base.get("correct_count"),
+                "new_correct_count": new_item.get("correct_count"),
+                "baseline_correct_rate": base_rate,
+                "new_correct_rate": new_rate,
+                "outcome": outcome,
+                "baseline_semantic_consistent": base.get("semantic_consistent"),
+                "new_semantic_consistent": new_item.get("semantic_consistent"),
+                "baseline_primary_robustness_category": base.get("primary_robustness_category"),
+                "new_primary_robustness_category": new_item.get("primary_robustness_category"),
+            }
+        )
+
+    overall = summarize_paired_sample_outcomes(outcomes)
+    by_type_rows = [{"question_type": "ALL", **overall}]
+    for question_type in sorted({row.get("question_type") for row in outcomes}):
+        rows = [row for row in outcomes if row.get("question_type") == question_type]
+        by_type_rows.append({"question_type": question_type, **summarize_paired_sample_outcomes(rows)})
+    return outcomes, overall, by_type_rows
+
+
 def compare_letter_bias(baseline, new):
     base_map = {row.get("letter"): row for row in baseline["letter_bias"]}
     new_map = {row.get("letter"): row for row in new["letter_bias"]}
@@ -255,6 +420,14 @@ def compare_selected_samples_or_raise(baseline, new, allow_mismatch=False):
     return mismatches
 
 
+def comparison_labels(stats, comparison):
+    baseline = str(stats.get("baseline_run", "")).lower()
+    new = str(comparison.get("new_run", "")).lower()
+    if "zero_spatial" in baseline and ("reproduction" in new or "repro" in new):
+        return "Zero", "Repro", "Zero wrong -> Repro correct", "Zero correct -> Repro wrong"
+    return "Baseline", "New", "Baseline wrong -> New correct", "Baseline correct -> New wrong"
+
+
 def build_report(stats):
     lines = ["# VSiBench Probe Comparison", ""]
     lines.append(f"Baseline: {stats.get('baseline_run')}")
@@ -296,6 +469,37 @@ def build_report(stats):
                 "",
             ]
         )
+        baseline_label, new_label, wrong_correct_label, correct_wrong_label = comparison_labels(stats, comparison)
+        row_rows = comparison.get("paired_row_win_loss_by_question_type") or []
+        sample_rows = comparison.get("paired_sample_win_loss_by_question_type") or []
+        if row_rows:
+            lines.extend(
+                [
+                    "### Paired win/loss by question type",
+                    "",
+                    f"| Question type | Rows | {wrong_correct_label} | {correct_wrong_label} | Net gain | {baseline_label} acc | {new_label} acc | Delta |",
+                    "|---|---:|---:|---:|---:|---:|---:|---:|",
+                ]
+            )
+            for row in row_rows:
+                lines.append(
+                    f"| {row.get('question_type')} | {row.get('paired_rows')} | {row.get('baseline_wrong_new_correct')} | {row.get('baseline_correct_new_wrong')} | {row.get('net_gain'):+} | {fmt_value(row.get('baseline_accuracy'), percent=True)} | {fmt_value(row.get('new_accuracy'), percent=True)} | {fmt_delta(row.get('accuracy_delta'), percent=True)} |"
+                )
+            lines.append("")
+        if sample_rows:
+            lines.extend(
+                [
+                    "### Paired sample-level win/loss",
+                    "",
+                    f"| Question type | Base samples | Improved | Regressed | Net | {baseline_label} mean correct rate | {new_label} mean correct rate | Delta |",
+                    "|---|---:|---:|---:|---:|---:|---:|---:|",
+                ]
+            )
+            for row in sample_rows:
+                lines.append(
+                    f"| {row.get('question_type')} | {row.get('paired_base_samples')} | {row.get('improved_samples')} | {row.get('regressed_samples')} | {row.get('net_improved_samples'):+} | {fmt_value(row.get('baseline_mean_correct_rate'), percent=True)} | {fmt_value(row.get('new_mean_correct_rate'), percent=True)} | {fmt_delta(row.get('mean_correct_rate_delta'), percent=True)} |"
+                )
+            lines.append("")
     return "\n".join(lines)
 
 
@@ -324,11 +528,46 @@ def main():
         improved, regressed = compare_question_types(baseline, new)
         wrong_to_correct, correct_to_wrong, consistency_improved, consistency_regressed = compare_samples(baseline, new)
         letter_bias = compare_letter_bias(baseline, new)
+        paired_row_outcomes, paired_row_overall, paired_row_by_type = paired_row_win_loss(baseline, new)
+        paired_sample_outcomes, paired_sample_overall, paired_sample_by_type = paired_sample_win_loss(baseline, new)
 
         write_jsonl(output_dir / f"{new_slug}_baseline_wrong_new_correct.jsonl", wrong_to_correct)
         write_jsonl(output_dir / f"{new_slug}_baseline_correct_new_wrong.jsonl", correct_to_wrong)
         write_jsonl(output_dir / f"{new_slug}_consistency_improved.jsonl", consistency_improved)
         write_jsonl(output_dir / f"{new_slug}_consistency_regressed.jsonl", consistency_regressed)
+        write_jsonl(output_dir / "paired_row_outcomes.jsonl", paired_row_outcomes)
+        write_jsonl(output_dir / "paired_sample_outcomes.jsonl", paired_sample_outcomes)
+        write_csv(
+            output_dir / "paired_win_loss_by_question_type_rows.csv",
+            paired_row_by_type,
+            [
+                "question_type",
+                "paired_rows",
+                "both_correct",
+                "both_wrong",
+                "baseline_wrong_new_correct",
+                "baseline_correct_new_wrong",
+                "net_gain",
+                "baseline_accuracy",
+                "new_accuracy",
+                "accuracy_delta",
+            ],
+        )
+        write_csv(
+            output_dir / "paired_win_loss_by_question_type_samples.csv",
+            paired_sample_by_type,
+            [
+                "question_type",
+                "paired_base_samples",
+                "improved_samples",
+                "regressed_samples",
+                "unchanged_samples",
+                "net_improved_samples",
+                "baseline_mean_correct_rate",
+                "new_mean_correct_rate",
+                "mean_correct_rate_delta",
+            ],
+        )
 
         base_acc = overall_accuracy(baseline["stats"])
         new_acc = overall_accuracy(new["stats"])
@@ -352,16 +591,33 @@ def main():
                 "baseline_correct_new_wrong_count": len(correct_to_wrong),
                 "consistency_improved_count": len(consistency_improved),
                 "consistency_regressed_count": len(consistency_regressed),
+                "paired_row_win_loss_overall": paired_row_overall,
+                "paired_row_win_loss_by_question_type": paired_row_by_type,
+                "paired_sample_win_loss_overall": paired_sample_overall,
+                "paired_sample_win_loss_by_question_type": paired_sample_by_type,
                 "files": {
                     "baseline_wrong_new_correct": f"{new_slug}_baseline_wrong_new_correct.jsonl",
                     "baseline_correct_new_wrong": f"{new_slug}_baseline_correct_new_wrong.jsonl",
                     "consistency_improved": f"{new_slug}_consistency_improved.jsonl",
                     "consistency_regressed": f"{new_slug}_consistency_regressed.jsonl",
+                    "paired_row_outcomes": "paired_row_outcomes.jsonl",
+                    "paired_sample_outcomes": "paired_sample_outcomes.jsonl",
+                    "paired_win_loss_by_question_type_rows": "paired_win_loss_by_question_type_rows.csv",
+                    "paired_win_loss_by_question_type_samples": "paired_win_loss_by_question_type_samples.csv",
                 },
             }
         )
 
-    stats = {"baseline_run": run_name(baseline), "baseline_run_dir": str(baseline["run_dir"]), "comparisons": comparisons}
+    stats = {
+        "baseline_run": run_name(baseline),
+        "baseline_run_dir": str(baseline["run_dir"]),
+        "comparisons": comparisons,
+    }
+    if comparisons:
+        stats["paired_row_win_loss_overall"] = comparisons[0].get("paired_row_win_loss_overall")
+        stats["paired_row_win_loss_by_question_type"] = comparisons[0].get("paired_row_win_loss_by_question_type")
+        stats["paired_sample_win_loss_overall"] = comparisons[0].get("paired_sample_win_loss_overall")
+        stats["paired_sample_win_loss_by_question_type"] = comparisons[0].get("paired_sample_win_loss_by_question_type")
     write_json(output_dir / "stats.json", stats)
     (output_dir / "report.md").write_text(build_report(stats), encoding="utf-8")
     print(f"Wrote VSiBench probe comparison to {output_dir}")

@@ -21,6 +21,14 @@ def load_probe_utils():
 utils = load_probe_utils()
 
 
+def load_script_module(name, relative_path):
+    path = REPO_ROOT / relative_path
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def run_cmd(args, check=True):
     result = subprocess.run([sys.executable, *args], cwd=REPO_ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if check and result.returncode != 0:
@@ -62,6 +70,17 @@ def option_doc(sample_id, probe_index, seed, gt_letter="A", question_type="objec
         "gt_presented_letter": original_to_presented[gt_letter],
         "gt_answer_text": original[gt_letter],
     }
+
+
+def presented_for_original(doc, original_letter):
+    return doc["original_to_presented"][original_letter]
+
+
+def wrong_presented(doc, preferred_wrong_original="C"):
+    wrong_original = preferred_wrong_original
+    if wrong_original == doc["gt_original_letter"]:
+        wrong_original = next(letter for letter in ["A", "B", "C", "D"] if letter != doc["gt_original_letter"])
+    return presented_for_original(doc, wrong_original)
 
 
 def selected(sample_ids, seeds=None, prompt_variant="option_shuffle", sentinel=True):
@@ -161,6 +180,10 @@ def test_analyzer_report_and_compare():
         assert after["sentinel"] == "do_not_overwrite"
         stats = json.loads((base / "stats.json").read_text())
         assert stats["semantic_consistency_rate"] == 1.0
+        assert stats["robustness_summary"]["base_samples"] == 2
+        assert (base / "sample_robustness.jsonl").exists()
+        assert (base / "sample_robustness.csv").exists()
+        assert (base / "robustness_by_question_type.csv").exists()
         assert "probe_uid" in (base / "predictions.jsonl").read_text()
         run_cmd(["scripts/generate_vsibench_probe_report.py", "--run-dir", str(base)])
         base_report = (base / "report.md").read_text()
@@ -205,6 +228,10 @@ def test_analyzer_report_and_compare():
         assert "### Wrong examples with raw output" in option_report
         assert "### Parse failure examples" in option_report
         assert "### Option-shuffle inconsistent examples" in option_report
+        correct_section = option_report.split("### Correct examples", 1)[1].split("### Wrong examples with raw output", 1)[0]
+        wrong_section = option_report.split("### Wrong examples with raw output", 1)[1].split("### Parse failure examples", 1)[0]
+        assert correct_section.count("Question 1?") <= 1
+        assert wrong_section.count("Question 0?") <= 1
         assert "Raw presented answer:" in option_report
         assert "Mapped original answer:" in option_report
         assert "Ground-truth presented answer:" in option_report
@@ -291,11 +318,151 @@ def test_analyzer_report_and_compare():
         assert "object_counting" in improved_types
 
 
+def test_per_sample_robustness_categories():
+    with tempfile.TemporaryDirectory(prefix="vsibench_probe_robust_") as tmp:
+        root = Path(tmp)
+        run = root / "robust"
+        run.mkdir()
+        records = []
+        samples = [
+            ("always_correct", "A"),
+            ("flip", "A"),
+            ("same_wrong", "A"),
+            ("wrong_inconsistent", "A"),
+            ("parse_failure", "A"),
+        ]
+        for probe_index, (sample_id, gt_letter) in enumerate(samples):
+            for seed in [0, 1]:
+                doc = option_doc(sample_id, probe_index, seed, gt_letter)
+                if sample_id == "always_correct":
+                    prediction = doc["gt_presented_letter"]
+                elif sample_id == "flip":
+                    prediction = doc["gt_presented_letter"] if seed == 0 else wrong_presented(doc, "C")
+                elif sample_id == "same_wrong":
+                    prediction = wrong_presented(doc, "C")
+                elif sample_id == "wrong_inconsistent":
+                    prediction = wrong_presented(doc, "C" if seed == 0 else "D")
+                else:
+                    prediction = "A/B/C/D" if seed == 0 else doc["gt_presented_letter"]
+                records.append(utils._process_option_shuffle(doc, prediction))
+
+        write_raw_run(run, records, selected([item[0] for item in samples], [0, 1]))
+        run_cmd(["scripts/analyze_vsibench_probe.py", "--run-dir", str(run)])
+        robustness = [json.loads(line) for line in (run / "sample_robustness.jsonl").read_text().splitlines() if line.strip()]
+        by_sample = {row["sample_id"]: row for row in robustness}
+        assert by_sample["always_correct"]["primary_robustness_category"] == "always_correct"
+        assert by_sample["flip"]["primary_robustness_category"] == "flip"
+        assert by_sample["same_wrong"]["primary_robustness_category"] == "always_same_wrong_answer"
+        assert by_sample["wrong_inconsistent"]["primary_robustness_category"] == "always_wrong_inconsistent"
+        assert by_sample["parse_failure"]["primary_robustness_category"] == "parse_failure_or_incomplete"
+        assert by_sample["same_wrong"]["always_wrong"] is True
+        assert by_sample["same_wrong"]["always_same_wrong_answer"] is True
+        stats = json.loads((run / "stats.json").read_text())
+        summary = stats["robustness_summary"]
+        total = sum(summary[f"{category}_count"] for category in ["always_correct", "flip", "always_same_wrong_answer", "always_wrong_inconsistent", "parse_failure_or_incomplete"])
+        assert total == summary["base_samples"] == 5
+
+
+def test_paired_win_loss_helpers():
+    with tempfile.TemporaryDirectory(prefix="vsibench_probe_pair_") as tmp:
+        root = Path(tmp)
+        base = root / "zero_spatial"
+        new = root / "reproduction"
+        base.mkdir()
+        new.mkdir()
+        base_records = []
+        new_records = []
+        specs = [("p0", 0, "A"), ("p1", 1, "B"), ("p2", 2, "A")]
+        for sample_id, probe_index, gt_letter in specs:
+            for seed in [0, 1]:
+                doc = option_doc(sample_id, probe_index, seed, gt_letter)
+                if sample_id == "p0":
+                    base_pred = wrong_presented(doc, "C")
+                    new_pred = doc["gt_presented_letter"] if seed == 0 else wrong_presented(doc, "C")
+                elif sample_id == "p1":
+                    base_pred = doc["gt_presented_letter"]
+                    new_pred = wrong_presented(doc, "C") if seed == 0 else doc["gt_presented_letter"]
+                else:
+                    base_pred = doc["gt_presented_letter"] if seed == 0 else wrong_presented(doc, "C")
+                    new_pred = doc["gt_presented_letter"] if seed == 0 else wrong_presented(doc, "C")
+                base_records.append(utils._process_option_shuffle(doc, base_pred))
+                new_records.append(utils._process_option_shuffle(doc, new_pred))
+
+        same_selected = selected([item[0] for item in specs], [0, 1])
+        write_raw_run(base, base_records, same_selected)
+        write_raw_run(new, new_records, same_selected)
+        run_cmd(["scripts/analyze_vsibench_probe.py", "--run-dir", str(base), "--run-name", "zero_spatial"])
+        run_cmd(["scripts/analyze_vsibench_probe.py", "--run-dir", str(new), "--run-name", "reproduction"])
+        out = root / "compare"
+        run_cmd(["scripts/compare_vsibench_probe_runs.py", "--runs", str(base), str(new), "--output", str(out)])
+        stats = json.loads((out / "stats.json").read_text())
+        overall = stats["paired_row_win_loss_overall"]
+        assert overall["baseline_wrong_new_correct"] == 1
+        assert overall["baseline_correct_new_wrong"] == 1
+        assert overall["both_correct"] == 2
+        assert overall["both_wrong"] == 2
+        assert overall["net_gain"] == 0
+        sample_overall = stats["paired_sample_win_loss_overall"]
+        assert sample_overall["improved_samples"] == 1
+        assert sample_overall["regressed_samples"] == 1
+        assert sample_overall["unchanged_samples"] == 1
+        assert (out / "paired_win_loss_by_question_type_rows.csv").exists()
+        assert (out / "paired_win_loss_by_question_type_samples.csv").exists()
+        assert "Zero wrong -> Repro correct" in (out / "report.md").read_text()
+
+
+def test_bias_script_tiny_mocked_dataset():
+    with tempfile.TemporaryDirectory(prefix="vsibench_bias_") as tmp:
+        root = Path(tmp)
+        data_path = root / "mock.jsonl"
+        rows = [
+            {"id": "0", "dataset": "mock", "question_type": "object_rel_direction_hard", "question": "Where?", "options": ["A. left", "B. right", "C. front", "D. back"], "ground_truth": "A"},
+            {"id": "1", "dataset": "mock", "question_type": "object_rel_direction_hard", "question": "Where?", "options": ["A. right", "B. left", "C. front", "D. back"], "ground_truth": "left"},
+            {"id": "2", "dataset": "mock", "question_type": "object_rel_distance", "question": "Which?", "options": ["A. chair", "B. table", "C. sofa", "D. bed"], "ground_truth": "C"},
+            {"id": "3", "dataset": "mock", "question_type": "object_counting", "question": "How many?", "options": [], "ground_truth": "2"},
+        ]
+        data_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+        out = root / "out"
+        run_cmd(["scripts/analyze_vsibench_option_bias.py", "--local-dataset-path", str(data_path), "--split", "train", "--output", str(out)])
+        for name in [
+            "gt_letter_distribution.csv",
+            "gt_letter_by_question_type.csv",
+            "option_text_by_letter.csv",
+            "answer_text_distribution.csv",
+            "answer_text_by_question_type.csv",
+            "question_type_distribution.csv",
+            "spatial_answer_bias.csv",
+            "stats.json",
+            "report.md",
+        ]:
+            assert (out / name).exists()
+        stats = json.loads((out / "stats.json").read_text())
+        assert stats["mca_rows"] == 3
+
+
+def test_compare_selected_samples_allow_mismatch_gate():
+    compare = load_script_module("compare_vsibench_probe_runs_for_test", "scripts/compare_vsibench_probe_runs.py")
+    baseline = {"selected_samples": selected(["a"], [0]), "metadata": {}, "stats": {}}
+    new = {"selected_samples": selected(["b"], [0]), "metadata": {}, "stats": {}}
+    try:
+        compare.compare_selected_samples_or_raise(baseline, new)
+    except ValueError as exc:
+        assert "sample_order differs" in str(exc)
+    else:
+        raise AssertionError("Expected selected sample mismatch to fail")
+    mismatches = compare.compare_selected_samples_or_raise(baseline, new, allow_mismatch=True)
+    assert "sample_order differs" in mismatches
+
+
 def main():
     test_deterministic_selection()
     test_option_shuffle_mapping_and_parser()
     test_evidence_answer_and_numeric_parsing()
     test_analyzer_report_and_compare()
+    test_per_sample_robustness_categories()
+    test_paired_win_loss_helpers()
+    test_bias_script_tiny_mocked_dataset()
+    test_compare_selected_samples_allow_mismatch_gate()
     print("VSiBench probe helper tests passed")
 
 

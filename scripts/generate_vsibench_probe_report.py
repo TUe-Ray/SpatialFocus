@@ -117,6 +117,20 @@ def short_text(value, limit=500):
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
+def unique_by_sample(records, limit):
+    seen = set()
+    selected = []
+    for record in records:
+        sample_id = record.get("sample_id")
+        if sample_id in seen:
+            continue
+        seen.add(sample_id)
+        selected.append(record)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
 def sample_answer(record):
     if record.get("prompt_variant") == "option_shuffle":
         return record.get("model_original_letter") or record.get("model_presented_letter") or "n/a"
@@ -187,6 +201,7 @@ def build_report(run_dir):
     metadata = load_json(run_dir / "run_metadata.json", {})
     stats = load_json(run_dir / "stats.json", {})
     by_type = read_csv(run_dir / "stats_by_question_type.csv")
+    robustness_by_type = read_csv(run_dir / "robustness_by_question_type.csv")
     letter_bias = read_csv(run_dir / "letter_bias.csv")
     predictions = read_jsonl(run_dir / "predictions.jsonl")
     variant = metadata.get("prompt_variant") or stats.get("prompt_variant")
@@ -253,6 +268,34 @@ def build_report(run_dir):
             for row in letter_bias:
                 lines.append(f"| {row.get('letter')} | {fmt_value(row.get('model_frequency'), percent=True)} | {fmt_value(row.get('ground_truth_frequency'), percent=True)} | {fmt_value(row.get('bias'), percent=True)} |")
             lines.append("")
+
+        robustness_summary = stats.get("robustness_summary") or {}
+        if robustness_summary:
+            labels = [
+                ("Always correct", "always_correct"),
+                ("Flip", "flip"),
+                ("Always same wrong answer", "always_same_wrong_answer"),
+                ("Always wrong inconsistent", "always_wrong_inconsistent"),
+                ("Parse failure or incomplete", "parse_failure_or_incomplete"),
+            ]
+            lines.extend(["## Per-sample robustness categories", "", "| Category | Count | Rate |", "|---|---:|---:|"])
+            for label, key in labels:
+                lines.append(f"| {label} | {robustness_summary.get(f'{key}_count', 0)} | {fmt_value(robustness_summary.get(f'{key}_rate'), percent=True)} |")
+            lines.append("")
+            if robustness_by_type:
+                lines.extend(
+                    [
+                        "### Robustness by question type",
+                        "",
+                        "| Question type | Base samples | Always correct | Flip | Always same wrong | Always wrong inconsistent | Parse failure/incomplete | Semantic consistency | Correctness flip | Avg unique answers |",
+                        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+                    ]
+                )
+                for row in robustness_by_type:
+                    lines.append(
+                        f"| {row.get('question_type')} | {row.get('base_samples')} | {fmt_value(row.get('always_correct_rate'), percent=True)} | {fmt_value(row.get('flip_rate'), percent=True)} | {fmt_value(row.get('always_same_wrong_answer_rate'), percent=True)} | {fmt_value(row.get('always_wrong_inconsistent_rate'), percent=True)} | {fmt_value(row.get('parse_failure_or_incomplete_rate'), percent=True)} | {fmt_value(row.get('semantic_consistency_rate'), percent=True)} | {fmt_value(row.get('correctness_flip_rate'), percent=True)} | {fmt_value(row.get('avg_unique_semantic_answers_per_sample'))} |"
+                    )
+                lines.append("")
     else:
         lines.extend(
             [
@@ -297,7 +340,8 @@ def build_report(run_dir):
         parse_failures = [row for row in predictions if not row.get("parse_ok")]
 
     lines.extend(["### Correct examples", ""])
-    for record in correct[:3]:
+    correct_examples = unique_by_sample(correct, 3) if variant == "option_shuffle" else correct[:3]
+    for record in correct_examples:
         if variant == "option_shuffle":
             add_option_shuffle_example(lines, record)
         else:
@@ -307,7 +351,8 @@ def build_report(run_dir):
         lines.extend(["No parsed correct examples found.", ""])
 
     lines.extend(["### Wrong examples with raw output", ""])
-    for record in wrong[:5]:
+    wrong_examples = unique_by_sample(wrong, 5) if variant == "option_shuffle" else wrong[:5]
+    for record in wrong_examples:
         if variant == "option_shuffle":
             add_option_shuffle_example(lines, record, include_raw=True)
         else:
@@ -363,6 +408,8 @@ def build_report(run_dir):
     files = ["predictions.jsonl", "stats.json", "stats_by_question_type.csv", "selected_samples.json", "run_metadata.json"]
     if (run_dir / "letter_bias.csv").exists():
         files.append("letter_bias.csv")
+    if (run_dir / "sample_robustness.jsonl").exists():
+        files.extend(["sample_robustness.jsonl", "sample_robustness.csv", "robustness_by_question_type.csv"])
     lines.extend(["## Files generated", ""])
     lines.extend(f"- {name}" for name in files)
     lines.append("")
