@@ -77,9 +77,33 @@ for path in "$REPO_DIR" "$SUBMODULE_DIR" "$TASK_DIR" "$PRETRAINED_LOCAL" "$MODEL
   fi
 done
 
+# If PRETRAINED_LOCAL is a run directory without a top-level config.json, resolve to the
+# latest checkpoint-* subdirectory that does have one (e.g. after LoRA training).
+resolve_pretrained_dir() {
+  local dir="$1"
+  if [[ -f "$dir/config.json" ]]; then
+    echo "$dir"
+    return 0
+  fi
+  local -a ckpt_dirs=()
+  mapfile -t ckpt_dirs < <(find "$dir" -mindepth 1 -maxdepth 1 -type d -name 'checkpoint-*' | sort -V -r)
+  local d
+  for d in "${ckpt_dirs[@]}"; do
+    if [[ -f "$d/config.json" ]]; then
+      echo "$d"
+      return 0
+    fi
+  done
+  return 1
+}
+
 if [[ ! -f "$PRETRAINED_LOCAL/config.json" ]]; then
-  echo "[ERROR] Missing pretrained config: $PRETRAINED_LOCAL/config.json"
-  exit 1
+  echo "[INFO] No config.json at PRETRAINED_LOCAL=$PRETRAINED_LOCAL; searching for latest checkpoint ..."
+  if ! PRETRAINED_LOCAL="$(resolve_pretrained_dir "$PRETRAINED_LOCAL")"; then
+    echo "[ERROR] Cannot find a checkpoint with config.json under: $PRETRAINED_LOCAL"
+    exit 1
+  fi
+  echo "[INFO] Resolved checkpoint: $PRETRAINED_LOCAL"
 fi
 if [[ ! -f "$SIGLIP_LOCAL/config.json" ]]; then
   echo "[ERROR] Missing local SigLIP config: $SIGLIP_LOCAL/config.json"

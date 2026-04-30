@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=eomt_obj_text_phrase_100p
+#SBATCH --job-name=eomt_obj_only_word_filter_100p
 #SBATCH --nodes=8
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
@@ -15,11 +15,11 @@
 
 SUFFIX="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
 TRAIN_DATA_PERCENTAGE="${TRAIN_DATA_PERCENTAGE:-100}"  # percentage of loaded training samples to keep
-EOMT_EXPERIMENT_MODE="${EOMT_EXPERIMENT_MODE:-eomt_obj_text_phrase}"
+EOMT_EXPERIMENT_MODE="${EOMT_EXPERIMENT_MODE:-eomt_obj_only_word_filter}"
 # ============================================================
 # User-defined variables: General
 # ============================================================
-DEFAULT_NOTE="CUT3R + EoMT object tokens: eomt_obj_text_phrase, 100% data, 1 epoch"
+DEFAULT_NOTE="CUT3R + EoMT object tokens: eomt_obj_only_word_filter, 100% data, 1 epoch"
 NOTE="${NOTE:-$DEFAULT_NOTE}"
 CONDA_ENV_NAME="vlm3rEOMT"
 # ============================================================
