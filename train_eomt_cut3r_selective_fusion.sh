@@ -38,7 +38,7 @@ EOMT_DEBUG_TOP_K_MASKS="${EOMT_DEBUG_TOP_K_MASKS:-5}"
 MODEL_FUSION_BLOCK="cross_attention"
 
 PROJECT_ROOT="${PROJECT_ROOT:-$PWD}"
-EOMT_EXPERIMENT_CONFIG_PATH="/leonardo/home/userexternal/shuang00/VLM-3R/configs/eomt/eomt_selective_3d_round1.json"
+EOMT_EXPERIMENT_CONFIG_PATH="${EOMT_EXPERIMENT_CONFIG_PATH:-/leonardo/home/userexternal/shuang00/VLM-3R/configs/eomt/eomt_selective_3d_round2.json}"
 
 
 
@@ -380,6 +380,10 @@ VALID_EOMT_MODES=(
     "selective_soft"
     "selective_soft_with_floor"
     "selective_soft_with_floor_zero_fallback"
+    "soft_word_match_all3d"
+    "soft_word_match_zero3d"
+    "soft_no_word_match_all3d"
+    "soft_no_word_match_zero3d"
 )
 IS_VALID_EOMT_MODE="False"
 for mode_name in "${VALID_EOMT_MODES[@]}"; do

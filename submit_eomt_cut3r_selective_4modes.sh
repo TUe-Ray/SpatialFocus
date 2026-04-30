@@ -9,22 +9,23 @@ if [[ ! -f "$BASE_SCRIPT" ]]; then
     exit 1
 fi
 
-JOB_PREFIX="${JOB_PREFIX:-cut3r_eomt_sel3d}"
-TRAIN_DATA_PERCENTAGE="${TRAIN_DATA_PERCENTAGE:-50}"
+JOB_PREFIX="${JOB_PREFIX:-cut3r_eomt_sel3dr2}"
+TRAIN_DATA_PERCENTAGE="${TRAIN_DATA_PERCENTAGE:-100}"
+EOMT_EXPERIMENT_CONFIG_PATH="${EOMT_EXPERIMENT_CONFIG_PATH:-/leonardo/home/userexternal/shuang00/VLM-3R/configs/eomt/eomt_selective_3d_round2.json}"
 
 MODES=(
-    "baseline"
-    "selective_soft"
-    "selective_soft_with_floor"
-    "selective_soft_with_floor_zero_fallback"
+    "soft_word_match_all3d"
+    "soft_word_match_zero3d"
+    "soft_no_word_match_all3d"
+    "soft_no_word_match_zero3d"
 )
 
 short_mode_name() {
     case "$1" in
-        baseline) echo "base" ;;
-        selective_soft) echo "soft" ;;
-        selective_soft_with_floor) echo "softfloor" ;;
-        selective_soft_with_floor_zero_fallback) echo "softfloor0" ;;
+        soft_word_match_all3d) echo "wmall" ;;
+        soft_word_match_zero3d) echo "wmzero" ;;
+        soft_no_word_match_all3d) echo "nowmall" ;;
+        soft_no_word_match_zero3d) echo "nowmzero" ;;
         *) echo "unknown" ;;
     esac
 }
@@ -32,6 +33,7 @@ short_mode_name() {
 echo "[SUBMIT] base_script=$BASE_SCRIPT"
 echo "[SUBMIT] job_prefix=$JOB_PREFIX"
 echo "[SUBMIT] train_data_percentage=$TRAIN_DATA_PERCENTAGE"
+echo "[SUBMIT] eomt_experiment_config_path=$EOMT_EXPERIMENT_CONFIG_PATH"
 echo "[SUBMIT] modes=${MODES[*]}"
 
 for mode in "${MODES[@]}"; do
@@ -42,11 +44,12 @@ for mode in "${MODES[@]}"; do
     echo "[SUBMIT] mode=$mode job_name=$job_name"
     submit_output=$(
         EOMT_EXPERIMENT_MODE="$mode" \
+        EOMT_EXPERIMENT_CONFIG_PATH="$EOMT_EXPERIMENT_CONFIG_PATH" \
         NOTE="$note" \
         TRAIN_DATA_PERCENTAGE="$TRAIN_DATA_PERCENTAGE" \
         sbatch \
             --job-name="$job_name" \
-            --export=ALL,EOMT_EXPERIMENT_MODE,NOTE,TRAIN_DATA_PERCENTAGE \
+            --export=ALL,EOMT_EXPERIMENT_MODE,EOMT_EXPERIMENT_CONFIG_PATH,NOTE,TRAIN_DATA_PERCENTAGE \
             "$BASE_SCRIPT"
     )
     echo "[SUBMIT] $submit_output"
