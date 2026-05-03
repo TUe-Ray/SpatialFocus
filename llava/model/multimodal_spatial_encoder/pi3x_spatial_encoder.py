@@ -23,8 +23,15 @@ def _resolve_pi3_root():
 
 
 _PI3_ROOT = _resolve_pi3_root()
-if _PI3_ROOT not in sys.path:
-    sys.path.append(_PI3_ROOT)
+# Ensure the resolved Pi3 root wins import precedence over stale Pi3/Pi3X paths.
+for existing_path in list(sys.path):
+    norm_path = os.path.normpath(existing_path)
+    basename = os.path.basename(norm_path)
+    if basename in {"Pi3", "pi3x"} and norm_path != os.path.normpath(_PI3_ROOT):
+        sys.path.remove(existing_path)
+if _PI3_ROOT in sys.path:
+    sys.path.remove(_PI3_ROOT)
+sys.path.insert(0, _PI3_ROOT)
 
 try:
     from pi3.models.pi3 import Pi3

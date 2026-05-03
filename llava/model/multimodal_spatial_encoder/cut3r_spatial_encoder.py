@@ -24,8 +24,14 @@ def _resolve_cut3r_root():
 
 _CUT3R_ROOT = _resolve_cut3r_root()
 _DEFAULT_CUT3R_WEIGHTS_PATH = os.path.join(_CUT3R_ROOT, 'src', 'cut3r_512_dpt_4_64.pth')
-if _CUT3R_ROOT not in sys.path:
-    sys.path.append(_CUT3R_ROOT)
+# Ensure the resolved CUT3R root wins import precedence over stale CUT3R paths.
+for existing_path in list(sys.path):
+    norm_path = os.path.normpath(existing_path)
+    if os.path.basename(norm_path) == 'CUT3R' and norm_path != os.path.normpath(_CUT3R_ROOT):
+        sys.path.remove(existing_path)
+if _CUT3R_ROOT in sys.path:
+    sys.path.remove(_CUT3R_ROOT)
+sys.path.insert(0, _CUT3R_ROOT)
 
 from src.dust3r.model import ARCroco3DStereo
 import numpy as np
