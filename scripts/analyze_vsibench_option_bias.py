@@ -119,16 +119,32 @@ def load_hf_dataset(args):
     return list(dataset[args.split])
 
 
+def infer_question_type_from_text(question_text):
+    """Infer the VSIBench question_type from the question text for items that lack the field."""
+    q = question_text.lower()
+    if "front-left, front-right, back-left, or back-right" in q:
+        return "object_rel_direction_hard"
+    if "measuring from the closest point" in q and ("which of these" in q or "closest to" in q):
+        return "object_rel_distance"
+    if "fill in" in q and ("turn left" in q or "turn right" in q or "turn back" in q):
+        return "route_planning"
+    if "navigate" in q and ("go forward" in q or "destination" in q):
+        return "route_planning"
+    if "what order" in q or ("order" in q and ("appear" in q or "visited" in q)):
+        return "obj_appearance_order"
+    return None
+
+
 def normalize_training_rows(rows):
     """Convert VLM-3R training JSON conversation format to the options/ground_truth schema.
 
     Training items look like:
-        {"question_type": "route_planning",
+        {"question_type": "route_planning",          # sometimes absent
          "conversations": [{"from": "human", "value": "...Options:\\nA. Turn Left\\n..."},
                            {"from": "gpt",   "value": "B"}]}
 
-    We extract the options list from the question text and set ground_truth to the
-    letter in the gpt turn.
+    We extract the options list from the question text, set ground_truth to the
+    letter in the gpt turn, and infer question_type when the field is missing.
     """
     options_block_re = re.compile(
         r"Options:\s*\n((?:[A-D][.):]\s*.+\n?)+)", re.IGNORECASE
@@ -157,6 +173,8 @@ def normalize_training_rows(rows):
         new_row = dict(row)
         new_row["options"] = options if options else None
         new_row["ground_truth"] = gpt_text.strip()
+        if not new_row.get("question_type"):
+            new_row["question_type"] = infer_question_type_from_text(human_text)
         normalized.append(new_row)
     return normalized
 
