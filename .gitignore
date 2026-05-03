@@ -94,3 +94,5 @@ eval_offline.sh
 prepare_offline_cache.sh
 .offline_runtime/
 .codex
+.codex-work/
+outputs/
