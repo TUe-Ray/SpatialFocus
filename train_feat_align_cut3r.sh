@@ -22,7 +22,7 @@ SPATIAL_RANK_LOSS_ENABLE="${SPATIAL_RANK_LOSS_ENABLE:-True}"
 NOTE="feature alignment experiment: cut3r 50% training data | LoRA(r=128,alpha=256) | Fusion=cross_attention | Features=all_tokens(768dim) | LambdaSim=0.01 | RankMargin=0.2 | Anchors=128 | Top=10%/Bottom=30%"
 
 DATA_ROOT="/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r"
-SPATIAL_FEATURES_ROOT="/leonardo_work/EUHPC_D32_006/FAST/train_data/vlm3r"
+SPATIAL_FEATURES_ROOT="/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r"
 SPATIAL_FEATURES_SUBDIR="spatial_features"
 CONDA_ENV_NAME="vlm3r"
 
