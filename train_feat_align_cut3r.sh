@@ -101,9 +101,9 @@ MODEL_MM_PATCH_MERGE_TYPE="spatial_unpad"
 MODEL_BF16="True"
 MODEL_TF32="True"
 MODEL_MAX_LENGTH="32768"
-MODEL_GRADIENT_CHECKPOINTING="True"
+MODEL_GRADIENT_CHECKPOINTING="${MODEL_GRADIENT_CHECKPOINTING:-True}"
 MODEL_LAZY_PREPROCESS="True"
-MODEL_TORCH_COMPILE="True"
+MODEL_TORCH_COMPILE="${MODEL_TORCH_COMPILE:-True}"
 MODEL_TORCH_COMPILE_BACKEND="inductor"
 MODEL_FRAMES_UPBOUND="32"
 MODEL_MM_NEWLINE_POSITION="grid"
@@ -125,10 +125,11 @@ LEARNING_RATE="2e-5"
 WEIGHT_DECAY="0."
 WARMUP_RATIO="0.03"
 LR_SCHEDULER_TYPE="cosine"
-LOGGING_STEPS="5"
+LOGGING_STEPS="${LOGGING_STEPS:-5}"
 DATALOADER_NUM_WORKERS="6"
 REPORT_TO="wandb"
 DATALOADER_DROP_LAST="True"
+DDP_LAUNCH_MODE="${DDP_LAUNCH_MODE:-elastic}"  # choices: elastic / static
 
 
 # ========================================================================================
@@ -232,11 +233,17 @@ else
 fi
 WORLD_SIZE=$((NNODES * NUM_GPUS_PER_NODE))
 MASTER_PORT=$(shuf -i 20000-29999 -n 1)
+export MASTER_ADDR MASTER_PORT NNODES NUM_GPUS_PER_NODE
 export OMP_NUM_THREADS=2
+export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 echo "[DDP] MASTER_ADDR=$MASTER_ADDR"
 echo "[DDP] MASTER_PORT=$MASTER_PORT"
 echo "[DDP] NNODES=$NNODES"
 echo "[DDP] NUM_GPUS_PER_NODE=$NUM_GPUS_PER_NODE WORLD_SIZE=$WORLD_SIZE"
+echo "[DDP] DDP_LAUNCH_MODE=$DDP_LAUNCH_MODE NCCL_DEBUG=$NCCL_DEBUG"
+if [[ -v NCCL_SOCKET_IFNAME && -n "$NCCL_SOCKET_IFNAME" ]]; then
+    echo "[DDP] NCCL_SOCKET_IFNAME=$NCCL_SOCKET_IFNAME"
+fi
 
 
 
@@ -452,14 +459,36 @@ for key in "${!TRAINING_ARGS[@]}"; do
     TORCHRUN_ARGS+=("${TRAINING_ARGS[$key]}")
 done
 
-srun --export=ALL torchrun \
-        --nnodes="$NNODES" \
-        --nproc_per_node="$NUM_GPUS_PER_NODE" \
-        --rdzv_id="$SLURM_JOB_ID" \
-        --rdzv_backend=c10d \
-        --rdzv_endpoint="$MASTER_ADDR:$MASTER_PORT" \
-        llava/train/train_mem.py \
-        "${TORCHRUN_ARGS[@]}"
-    2>&1 | tee "$LOG_DIR/${SUFFIX}.log"
+case "$DDP_LAUNCH_MODE" in
+    elastic)
+        srun --export=ALL torchrun \
+            --nnodes="$NNODES" \
+            --nproc_per_node="$NUM_GPUS_PER_NODE" \
+            --rdzv_id="$SLURM_JOB_ID" \
+            --rdzv_backend=c10d \
+            --rdzv_endpoint="$MASTER_ADDR:$MASTER_PORT" \
+            llava/train/train_mem.py \
+            "${TORCHRUN_ARGS[@]}" \
+            | tee "$LOG_DIR/${SUFFIX}.log"
+        ;;
+    static)
+        srun --export=ALL bash -c '
+            echo "[DDP] host=$(hostname) SLURM_PROCID=${SLURM_PROCID:-NA} node_rank=${SLURM_NODEID:-NA} local_id=${SLURM_LOCALID:-NA}" >&2
+            exec torchrun \
+                --nnodes="$NNODES" \
+                --nproc_per_node="$NUM_GPUS_PER_NODE" \
+                --node_rank="$SLURM_NODEID" \
+                --master_addr="$MASTER_ADDR" \
+                --master_port="$MASTER_PORT" \
+                llava/train/train_mem.py \
+                "$@"
+        ' bash "${TORCHRUN_ARGS[@]}" \
+            | tee "$LOG_DIR/${SUFFIX}.log"
+        ;;
+    *)
+        echo "[ERROR] Unsupported DDP_LAUNCH_MODE=$DDP_LAUNCH_MODE (expected elastic or static)"
+        exit 1
+        ;;
+esac
 
 exit 0

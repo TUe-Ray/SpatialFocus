@@ -341,6 +341,18 @@ class LLaVATrainer(Trainer):
                 return metrics
         return None
 
+    def _maybe_log_save_evaluate(self, *args, **kwargs):
+        if (
+            torch.cuda.is_available()
+            and (
+                getattr(self.control, "should_log", False)
+                or getattr(self.control, "should_evaluate", False)
+                or getattr(self.control, "should_save", False)
+            )
+        ):
+            torch.cuda.empty_cache()
+        return super()._maybe_log_save_evaluate(*args, **kwargs)
+
     def log(self, logs, *args, **kwargs):
         metrics = self._spatial_rank_metrics()
         if metrics:

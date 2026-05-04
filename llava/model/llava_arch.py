@@ -590,6 +590,18 @@ class LlavaMetaForCausalLM(ABC):
         if not check_params:
             return
 
+        checkpointing_enabled = any(
+            bool(getattr(module, "gradient_checkpointing", False))
+            for module in self.modules()
+        )
+        if checkpointing_enabled:
+            rank0_print(
+                "[SPATIAL_RANK] Debug gradient probes skipped because "
+                "gradient checkpointing is enabled; normal backward still "
+                "propagates L_rank."
+            )
+            return
+
         grads = torch.autograd.grad(rank_loss, check_params, retain_graph=True, allow_unused=True)
         by_group = {key: [] for key in groups}
         for (key, name), grad in zip(check_names, grads):
