@@ -38,6 +38,62 @@ import numpy as np
 import cv2  # OpenCV for resizing and writing images
 import matplotlib.cm as cm # For colormaps
 import os
+
+
+def pool_point_map_to_tokens(point_maps, target_num_tokens):
+    """
+    Pool dense point maps to a square token grid.
+
+    Args:
+        point_maps: [B, H, W, 3] or [B, 3, H, W]
+        target_num_tokens: square token count N
+    Returns:
+        pos_tokens: [B, N, 3]
+    """
+    if not isinstance(point_maps, torch.Tensor):
+        raise TypeError(f"point_maps must be a torch.Tensor, got {type(point_maps)}")
+    if point_maps.dim() != 4:
+        raise ValueError(f"point_maps must be rank 4, got shape {tuple(point_maps.shape)}")
+
+    side = int(math.isqrt(int(target_num_tokens)))
+    if side * side != int(target_num_tokens):
+        raise ValueError(f"target_num_tokens must be square, got {target_num_tokens}")
+
+    if point_maps.shape[-1] == 3:
+        pm = point_maps.permute(0, 3, 1, 2)
+    elif point_maps.shape[1] == 3:
+        pm = point_maps
+    else:
+        raise ValueError(f"point_maps must be [B,H,W,3] or [B,3,H,W], got {tuple(point_maps.shape)}")
+
+    pm = pm.float()
+    pm = F.interpolate(pm, size=(side, side), mode="bilinear", align_corners=False)
+    return pm.permute(0, 2, 3, 1).reshape(pm.shape[0], side * side, 3)
+
+
+def _coalesce_point_maps(point_maps):
+    if point_maps is None:
+        return None
+    if isinstance(point_maps, torch.Tensor):
+        return point_maps
+    if isinstance(point_maps, (list, tuple)):
+        if len(point_maps) == 0:
+            return None
+        tensors = []
+        for item in point_maps:
+            if item is None:
+                continue
+            if not isinstance(item, torch.Tensor):
+                raise TypeError(f"point_maps entries must be torch.Tensor, got {type(item)}")
+            tensors.append(item)
+        if not tensors:
+            return None
+        if len(tensors) == 1:
+            return tensors[0]
+        return torch.cat(tensors, dim=0)
+    raise TypeError(f"point_maps must be a tensor or list/tuple of tensors, got {type(point_maps)}")
+
+
 class LlavaMetaModel:
 
     def __init__(self, config):
@@ -129,6 +185,8 @@ class LlavaMetaModel:
                 return "CrossAttentionFusion"
             if fusion_block_type == "svf_patch_only":
                 return "CrossAttentionFusion"
+            if fusion_block_type in ["svf_3d_rope", "svf_depth_rope", "svf_xyz_rope", "svf_spherical_rope"]:
+                return "CrossAttentionFusion3DRoPE"
             if fusion_block_type == "svf_patch_cam_concat":
                 return "PatchCrossAttentionCameraConcatFusion"
             if fusion_block_type == "svf_geometry_bridge":
@@ -617,6 +675,33 @@ class LlavaMetaForCausalLM(ABC):
                     image_features, attn_weights = self.get_model().get_fusion_block()(
                         image_features,
                         patch_tokens.to(self.dtype),
+                    )
+                    image_features = self.get_model().mm_projector(image_features)
+
+                elif fusion_block_type in ['svf_3d_rope', 'svf_depth_rope', 'svf_xyz_rope', 'svf_spherical_rope']:
+                    geometry_point_maps = _coalesce_point_maps(point_maps)
+                    if geometry_point_maps is None and isinstance(loaded_spatial_features, dict):
+                        for point_key in ("point_maps", "point_map", "points", "pts3d"):
+                            if point_key in loaded_spatial_features:
+                                geometry_point_maps = _coalesce_point_maps(loaded_spatial_features[point_key])
+                                break
+                    if geometry_point_maps is None:
+                        raise RuntimeError("svf_3d_rope requires point_maps from CUT3R/Pi3X.")
+
+                    if geometry_point_maps.shape[0] != image_features.shape[0]:
+                        raise RuntimeError(
+                            "svf_3d_rope point_maps batch/frame count must match image_features, "
+                            f"got point_maps={tuple(geometry_point_maps.shape)} and "
+                            f"image_features={tuple(image_features.shape)}"
+                        )
+
+                    pos_clip = pool_point_map_to_tokens(geometry_point_maps, image_features.shape[1])
+                    pos_spatial = pool_point_map_to_tokens(geometry_point_maps, patch_tokens.shape[1])
+                    image_features, attn_weights = self.get_model().get_fusion_block()(
+                        image_features,
+                        patch_tokens.to(self.dtype),
+                        pos_clip.to(device=image_features.device, dtype=image_features.dtype),
+                        pos_spatial.to(device=image_features.device, dtype=image_features.dtype),
                     )
                     image_features = self.get_model().mm_projector(image_features)
 
