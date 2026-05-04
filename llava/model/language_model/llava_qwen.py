@@ -56,6 +56,8 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         # Initialize weights and apply final processing
         self.post_init()
+        if getattr(config, "spatial_rank_projection_dim", None) is not None:
+            self.initialize_spatial_rank_head(output_dim=int(config.spatial_rank_projection_dim))
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
@@ -98,10 +100,42 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
         modalities: Optional[List[str]] = ["image"],
         dpo_forward: Optional[bool] = False,
         cache_position=None,
+        return_visual_metadata: Optional[bool] = False,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
 
+        metadata_requested = bool(return_visual_metadata)
+        spatial_rank_enabled = bool(
+            self.training
+            and getattr(self.config, "spatial_rank_loss_enable", False)
+            and labels is not None
+            and inputs_embeds is None
+        )
+        original_output_hidden_states = output_hidden_states
+        if spatial_rank_enabled:
+            return_dict = True
+        elif metadata_requested:
+            output_hidden_states = True
+            return_dict = True
+
+        visual_metadata = None
         if inputs_embeds is None:
-            (input_ids, position_ids, attention_mask, past_key_values, inputs_embeds, labels) = self.prepare_inputs_labels_for_multimodal(input_ids, position_ids, attention_mask, past_key_values, labels, images, spatial_features, point_maps, modalities, image_sizes)
+            prepared = self.prepare_inputs_labels_for_multimodal(
+                input_ids,
+                position_ids,
+                attention_mask,
+                past_key_values,
+                labels,
+                images,
+                spatial_features,
+                point_maps,
+                modalities,
+                image_sizes,
+                return_visual_metadata=spatial_rank_enabled or metadata_requested,
+            )
+            if spatial_rank_enabled or metadata_requested:
+                (input_ids, position_ids, attention_mask, past_key_values, inputs_embeds, labels, visual_metadata) = prepared
+            else:
+                (input_ids, position_ids, attention_mask, past_key_values, inputs_embeds, labels) = prepared
 
         if dpo_forward:
             outputs = self.model(
@@ -121,17 +155,61 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
             return logits, labels
 
         else:
-            return super().forward(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                past_key_values=past_key_values,
-                inputs_embeds=inputs_embeds,
-                labels=labels,
-                use_cache=use_cache,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=return_dict,
+            h1_holder = {}
+            hook_handle = None
+            if spatial_rank_enabled:
+                first_block = self.model.layers[0]
+
+                def capture_h1(_module, _inputs, output):
+                    h1_holder["h1"] = output[0] if isinstance(output, (tuple, list)) else output
+
+                hook_handle = first_block.register_forward_hook(capture_h1)
+            try:
+                outputs = super().forward(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    past_key_values=past_key_values,
+                    inputs_embeds=inputs_embeds,
+                    labels=labels,
+                    use_cache=use_cache,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=return_dict,
+                )
+            finally:
+                if hook_handle is not None:
+                    hook_handle.remove()
+            if metadata_requested:
+                self._last_visual_metadata = visual_metadata
+            if not spatial_rank_enabled:
+                return outputs
+
+            ce_loss = outputs.loss
+            h1 = h1_holder.get("h1", None)
+            if h1 is None:
+                raise RuntimeError("Spatial ranking loss could not capture H1 from self.model.layers[0].")
+            rank_loss, rank_metrics = self.compute_spatial_ranking_loss(
+                h1,
+                visual_metadata,
+                spatial_features,
+                debug_checks=bool(getattr(self.config, "spatial_rank_debug_checks", False)),
+            )
+            lambda_sim = float(getattr(self.config, "lambda_sim", 0.01))
+            total_loss = ce_loss + lambda_sim * rank_loss
+            self._spatial_rank_last_metrics = dict(rank_metrics)
+            self._spatial_rank_last_metrics.update({
+                "spatial_rank_ce_loss": float(ce_loss.detach().float().item()),
+                "spatial_rank_total_loss": float(total_loss.detach().float().item()),
+                "spatial_rank_lambda": lambda_sim,
+            })
+
+            return CausalLMOutputWithPast(
+                loss=total_loss,
+                logits=outputs.logits,
+                past_key_values=outputs.past_key_values,
+                hidden_states=outputs.hidden_states if original_output_hidden_states else None,
+                attentions=outputs.attentions,
             )
 
     @torch.no_grad()

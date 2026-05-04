@@ -291,6 +291,13 @@ class TrainingArguments(transformers.TrainingArguments):
     mm_vision_tower_lr: Optional[float] = None
     # fusion block lr
     fusion_block_lr: Optional[float] = None
+    spatial_rank_loss_enable: bool = field(default=False, metadata={"help": "Enable train-only H1 visual-token spatial ranking loss."})
+    lambda_sim: float = field(default=0.01, metadata={"help": "Weight for the auxiliary spatial ranking loss."})
+    spatial_rank_margin: float = field(default=0.2, metadata={"help": "Hinge margin for the spatial ranking loss."})
+    anchors_per_frame: int = field(default=128, metadata={"help": "Number of anchor visual tokens sampled per frame."})
+    positive_top_percent: float = field(default=10.0, metadata={"help": "Teacher-similarity top percent used as positive pool."})
+    negative_bottom_percent: float = field(default=30.0, metadata={"help": "Teacher-similarity bottom percent used as negative pool."})
+    spatial_rank_debug_checks: bool = field(default=False, metadata={"help": "Run one-time expensive spatial-rank assertions and gradient checks."})
     
     group_by_varlen: bool = field(default=False)
     group_by_modality_length: bool = field(default=False)
@@ -387,6 +394,19 @@ def find_all_linear_names(model):
     if 'lm_head' in lora_module_names: # needed for 16-bit
         lora_module_names.remove('lm_head')
     return list(lora_module_names)
+
+
+def find_spatial_rank_model(model):
+    for module in model.modules():
+        if (
+            hasattr(module, "initialize_spatial_rank_head")
+            and hasattr(module, "prepare_inputs_labels_for_multimodal")
+            and module.__class__.__name__.startswith("Llava")
+        ):
+            return module
+    if hasattr(model, "initialize_spatial_rank_head"):
+        return model
+    raise RuntimeError("Could not find a VLM-3R module that can initialize spatial_rank_head/P_geo.")
 
 
 def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: str):
@@ -2536,6 +2556,29 @@ def train(attn_implementation=None):
                 if hasattr(module, "weight"):
                     if training_args.bf16 and module.weight.dtype == torch.float32:
                         module = module.to(torch.bfloat16)
+
+    model.config.spatial_rank_loss_enable = bool(training_args.spatial_rank_loss_enable)
+    model.config.lambda_sim = float(training_args.lambda_sim)
+    model.config.spatial_rank_margin = float(training_args.spatial_rank_margin)
+    model.config.anchors_per_frame = int(training_args.anchors_per_frame)
+    model.config.positive_top_percent = float(training_args.positive_top_percent)
+    model.config.negative_bottom_percent = float(training_args.negative_bottom_percent)
+    model.config.spatial_rank_debug_checks = bool(training_args.spatial_rank_debug_checks)
+    if training_args.spatial_rank_loss_enable:
+        rank_model = find_spatial_rank_model(model)
+        rank_model.initialize_spatial_rank_head(
+            output_dim=256,
+            device=training_args.device,
+            dtype=compute_dtype,
+        )
+        rank0_print(
+            "[SPATIAL_RANK] enabled "
+            f"lambda_sim={training_args.lambda_sim}, margin={training_args.spatial_rank_margin}, "
+            f"anchors_per_frame={training_args.anchors_per_frame}, "
+            f"positive_top_percent={training_args.positive_top_percent}, "
+            f"negative_bottom_percent={training_args.negative_bottom_percent}"
+        )
+        rank0_print("[SPATIAL_RANK] P_geo initialized as LayerNorm(hidden_size)+Linear(hidden_size, 256).")
 
     data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
     trainer = LLaVATrainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)

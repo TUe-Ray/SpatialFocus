@@ -38,6 +38,18 @@ import numpy as np
 import cv2  # OpenCV for resizing and writing images
 import matplotlib.cm as cm # For colormaps
 import os
+
+
+def _as_long_tensor(values, device):
+    if isinstance(values, torch.Tensor):
+        return values.to(device=device, dtype=torch.long)
+    return torch.tensor(values, device=device, dtype=torch.long)
+
+
+def _empty_long(device):
+    return torch.empty(0, device=device, dtype=torch.long)
+
+
 class LlavaMetaModel:
 
     def __init__(self, config):
@@ -309,6 +321,435 @@ class LlavaMetaForCausalLM(ABC):
 
     def get_fusion_block(self):
         return self.get_model().get_fusion_block()
+
+    def initialize_spatial_rank_head(self, output_dim=256, device=None, dtype=None):
+        hidden_size = int(getattr(self.config, "hidden_size"))
+        if getattr(self, "spatial_rank_head", None) is None:
+            self.spatial_rank_head = nn.Sequential(
+                nn.LayerNorm(hidden_size),
+                nn.Linear(hidden_size, int(output_dim), bias=True),
+            )
+        if device is not None or dtype is not None:
+            self.spatial_rank_head.to(device=device, dtype=dtype)
+        for param in self.spatial_rank_head.parameters():
+            param.requires_grad = True
+        self.config.spatial_rank_projection_dim = int(output_dim)
+        self._spatial_rank_last_metrics = {}
+        self._spatial_rank_debug_printed = False
+        self._spatial_rank_grad_checked = False
+        return self.spatial_rank_head
+
+    def _build_grid_metadata(
+        self,
+        num_frames,
+        grid_side,
+        device,
+        raw_grid_side=None,
+        prefix_len=0,
+        frame_indices=None,
+    ):
+        frame_indices = list(range(num_frames)) if frame_indices is None else list(frame_indices)
+        per_frame_len = int(prefix_len) + int(grid_side) * (int(grid_side) + 1)
+        visual_positions = []
+        frame_ids = []
+        newline_positions = []
+        prefix_positions = []
+
+        for local_frame_idx, frame_id in enumerate(frame_indices):
+            frame_offset = local_frame_idx * per_frame_len
+            for prefix_pos in range(int(prefix_len)):
+                prefix_positions.append(frame_offset + prefix_pos)
+            grid_offset = frame_offset + int(prefix_len)
+            for row in range(int(grid_side)):
+                row_offset = grid_offset + row * (int(grid_side) + 1)
+                for col in range(int(grid_side)):
+                    visual_positions.append(row_offset + col)
+                    frame_ids.append(int(frame_id))
+                newline_positions.append(row_offset + int(grid_side))
+
+        return {
+            "visual_token_indices": _as_long_tensor(visual_positions, device),
+            "visual_frame_ids": _as_long_tensor(frame_ids, device),
+            "frame_order": [int(x) for x in frame_indices],
+            "visual_grid_shapes": [(int(grid_side), int(grid_side)) for _ in frame_indices],
+            "raw_visual_grid_shapes": [
+                (int(raw_grid_side or grid_side), int(raw_grid_side or grid_side))
+                for _ in frame_indices
+            ],
+            "newline_token_indices": _as_long_tensor(newline_positions, device),
+            "camera_prefix_token_indices": _as_long_tensor(prefix_positions, device),
+            "tokens_per_frame": [int(grid_side) * int(grid_side) for _ in frame_indices],
+            "sequence_length": int(num_frames) * per_frame_len,
+            "layout": "grid_with_newline",
+        }
+
+    def _build_flat_frame_metadata(
+        self,
+        num_frames,
+        tokens_per_frame,
+        device,
+        grid_side=None,
+        raw_grid_side=None,
+        prefix_len=0,
+        frame_indices=None,
+    ):
+        frame_indices = list(range(num_frames)) if frame_indices is None else list(frame_indices)
+        real_tokens_per_frame = int(tokens_per_frame) - int(prefix_len)
+        if real_tokens_per_frame <= 0:
+            raise ValueError(f"Invalid flat visual layout: tokens_per_frame={tokens_per_frame}, prefix_len={prefix_len}")
+        visual_positions = []
+        frame_ids = []
+        prefix_positions = []
+        for local_frame_idx, frame_id in enumerate(frame_indices):
+            frame_offset = local_frame_idx * int(tokens_per_frame)
+            for prefix_pos in range(int(prefix_len)):
+                prefix_positions.append(frame_offset + prefix_pos)
+            for token_pos in range(real_tokens_per_frame):
+                visual_positions.append(frame_offset + int(prefix_len) + token_pos)
+                frame_ids.append(int(frame_id))
+        grid_side = grid_side or int(math.isqrt(real_tokens_per_frame))
+        return {
+            "visual_token_indices": _as_long_tensor(visual_positions, device),
+            "visual_frame_ids": _as_long_tensor(frame_ids, device),
+            "frame_order": [int(x) for x in frame_indices],
+            "visual_grid_shapes": [(int(grid_side), int(grid_side)) for _ in frame_indices],
+            "raw_visual_grid_shapes": [
+                (int(raw_grid_side or grid_side), int(raw_grid_side or grid_side))
+                for _ in frame_indices
+            ],
+            "newline_token_indices": _empty_long(device),
+            "camera_prefix_token_indices": _as_long_tensor(prefix_positions, device),
+            "tokens_per_frame": [int(real_tokens_per_frame) for _ in frame_indices],
+            "sequence_length": int(num_frames) * int(tokens_per_frame),
+            "layout": "flat_frames",
+        }
+
+    def _shift_metadata(self, metadata, offset, max_len=None, padding_positions=None, answer_positions=None, text_positions=None):
+        if metadata is None:
+            metadata = {}
+        shifted = {}
+        visual_keep_mask = None
+        tensor_keys = {
+            "visual_token_indices",
+            "visual_frame_ids",
+            "newline_token_indices",
+            "camera_prefix_token_indices",
+            "padding_token_indices",
+            "answer_token_indices",
+            "text_token_indices",
+            "special_token_indices",
+        }
+        for key, value in metadata.items():
+            if key in tensor_keys and isinstance(value, torch.Tensor):
+                if key == "visual_frame_ids":
+                    continue
+                else:
+                    cur = value + int(offset)
+                    if max_len is not None:
+                        keep = cur < int(max_len)
+                        if key == "visual_token_indices":
+                            visual_keep_mask = keep
+                        cur = cur[keep]
+                    shifted[key] = cur
+            else:
+                shifted[key] = value
+        if "visual_frame_ids" in metadata and isinstance(metadata["visual_frame_ids"], torch.Tensor):
+            frame_ids = metadata["visual_frame_ids"].clone()
+            if visual_keep_mask is not None:
+                frame_ids = frame_ids[visual_keep_mask]
+            shifted["visual_frame_ids"] = frame_ids
+        device = None
+        for value in shifted.values():
+            if isinstance(value, torch.Tensor):
+                device = value.device
+                break
+        if device is None:
+            device = self.device
+        shifted.setdefault("visual_token_indices", _empty_long(device))
+        shifted.setdefault("visual_frame_ids", _empty_long(device))
+        shifted["padding_token_indices"] = _as_long_tensor(padding_positions or [], device)
+        shifted["answer_token_indices"] = _as_long_tensor(answer_positions or [], device)
+        shifted["text_token_indices"] = _as_long_tensor(text_positions or [], device)
+        shifted.setdefault("special_token_indices", _empty_long(device))
+        shifted.setdefault("newline_token_indices", _empty_long(device))
+        shifted.setdefault("camera_prefix_token_indices", _empty_long(device))
+        return shifted
+
+    def _pool_cut3r_teacher_to_student_grid(self, teacher_tokens, target_tokens, pool_mode):
+        token_count = int(teacher_tokens.shape[0])
+        if token_count != 729:
+            raise ValueError(f"CUT3R teacher must have 729 tokens before pooling, got {token_count}")
+        teacher_grid = teacher_tokens.view(27, 27, -1)
+        valid_grid = torch.ones(27, 27, dtype=torch.bool, device=teacher_tokens.device)
+
+        if target_tokens == 729:
+            return teacher_tokens, torch.ones(729, dtype=torch.bool, device=teacher_tokens.device)
+        if target_tokens != 196:
+            raise ValueError(
+                f"Unsupported H_1 visual token count per frame: {target_tokens}. "
+                f"CUT3R teacher raw tokens={token_count}"
+            )
+
+        pool_mode = str(pool_mode or "bilinear").lower()
+        if pool_mode == "bilinear":
+            pooled = F.interpolate(
+                teacher_grid.permute(2, 0, 1).unsqueeze(0).float(),
+                size=(14, 14),
+                mode="bilinear",
+                align_corners=False,
+            )[0].permute(1, 2, 0).to(dtype=teacher_tokens.dtype)
+            return pooled.reshape(196, -1), torch.ones(196, dtype=torch.bool, device=teacher_tokens.device)
+
+        pad_grid = F.pad(teacher_grid.permute(2, 0, 1), (0, 1, 0, 1), value=0.0)
+        pad_valid = F.pad(valid_grid[None].float(), (0, 1, 0, 1), value=0.0)
+        if pool_mode == "average":
+            valid_counts = F.avg_pool2d(pad_valid, kernel_size=2, stride=2) * 4.0
+            summed = F.avg_pool2d(pad_grid.float(), kernel_size=2, stride=2) * 4.0
+            pooled = summed / valid_counts.clamp_min(1.0)
+            valid = valid_counts[0] > 0
+        elif pool_mode == "max":
+            masked = pad_grid.float().masked_fill(pad_valid.bool().expand_as(pad_grid) == 0, -torch.finfo(torch.float32).max)
+            pooled = F.max_pool2d(masked, kernel_size=2, stride=2)
+            valid = F.max_pool2d(pad_valid, kernel_size=2, stride=2)[0] > 0
+        else:
+            raise ValueError(f"Unsupported mm_spatial_pool_mode for CUT3R target matching: {pool_mode}")
+        return pooled.permute(1, 2, 0).reshape(196, -1).to(dtype=teacher_tokens.dtype), valid.reshape(-1)
+
+    def _get_spatial_feature_for_batch(self, spatial_features, batch_idx):
+        if spatial_features is None:
+            raise ValueError("spatial_rank_loss_enable=True requires CUT3R spatial_features with patch_tokens.")
+        if isinstance(spatial_features, (list, tuple)):
+            if len(spatial_features) == 1:
+                return spatial_features[0]
+            return spatial_features[batch_idx]
+        if isinstance(spatial_features, dict):
+            return spatial_features
+        raise ValueError(f"Unsupported spatial_features type for ranking loss: {type(spatial_features)}")
+
+    def _sample_spatial_rank_triplets(self, teacher_features, anchors_per_frame, positive_top_percent, negative_bottom_percent):
+        num_tokens = int(teacher_features.shape[0])
+        if num_tokens < 3:
+            raise ValueError(f"Need at least 3 visual tokens for ranking loss, got {num_tokens}")
+        teacher_norm = F.normalize(teacher_features.float(), dim=-1)
+        teacher_sim = teacher_norm @ teacher_norm.T
+        anchor_count = min(int(anchors_per_frame), num_tokens)
+        anchors = torch.randperm(num_tokens, device=teacher_features.device)[:anchor_count]
+        pos_k = max(1, int(math.ceil(num_tokens * float(positive_top_percent) / 100.0)))
+        neg_k = max(1, int(math.ceil(num_tokens * float(negative_bottom_percent) / 100.0)))
+        positives = []
+        negatives = []
+        teacher_pos = []
+        teacher_neg = []
+
+        for anchor in anchors:
+            row = teacher_sim[anchor].clone()
+            row[anchor] = -float("inf")
+            pos_pool = torch.topk(row, k=min(pos_k, num_tokens - 1), largest=True).indices
+            row_for_neg = teacher_sim[anchor].clone()
+            row_for_neg[anchor] = float("inf")
+            neg_pool = torch.topk(row_for_neg, k=min(neg_k, num_tokens - 1), largest=False).indices
+            pos = pos_pool[torch.randint(pos_pool.numel(), (1,), device=teacher_features.device)]
+            neg = neg_pool[torch.randint(neg_pool.numel(), (1,), device=teacher_features.device)]
+            positives.append(pos)
+            negatives.append(neg)
+            teacher_pos.append(teacher_sim[anchor, pos])
+            teacher_neg.append(teacher_sim[anchor, neg])
+
+        positives = torch.cat(positives)
+        negatives = torch.cat(negatives)
+        teacher_pos = torch.cat(teacher_pos)
+        teacher_neg = torch.cat(teacher_neg)
+        return anchors, positives, negatives, teacher_pos, teacher_neg
+
+    def _run_spatial_rank_grad_checks(self, rank_loss):
+        if getattr(self, "_spatial_rank_grad_checked", False):
+            return
+        self._spatial_rank_grad_checked = True
+
+        groups = {"p_geo": [], "block0_lora": [], "block1plus_lora": [], "upstream": []}
+        for name, param in self.named_parameters():
+            if not param.requires_grad:
+                continue
+            if "spatial_rank_head" in name:
+                groups["p_geo"].append((name, param))
+            elif "lora_" in name and re.search(r"\.layers\.0\.", name):
+                groups["block0_lora"].append((name, param))
+            elif "lora_" in name and re.search(r"\.layers\.(\d+)\.", name):
+                layer_idx = int(re.search(r"\.layers\.(\d+)\.", name).group(1))
+                if layer_idx >= 1:
+                    groups["block1plus_lora"].append((name, param))
+            elif any(key in name for key in ("mm_projector", "fusion_block")):
+                groups["upstream"].append((name, param))
+
+        check_params = []
+        check_names = []
+        for key in ("p_geo", "block0_lora", "upstream", "block1plus_lora"):
+            for name, param in groups[key][:4]:
+                check_names.append((key, name))
+                check_params.append(param)
+        if not check_params:
+            return
+
+        grads = torch.autograd.grad(rank_loss, check_params, retain_graph=True, allow_unused=True)
+        by_group = {key: [] for key in groups}
+        for (key, name), grad in zip(check_names, grads):
+            by_group[key].append((name, grad))
+
+        for key in ("p_geo", "block0_lora", "upstream"):
+            if groups[key]:
+                assert any(grad is not None and torch.isfinite(grad).all() and grad.abs().sum() > 0 for _, grad in by_group[key]), (
+                    f"Expected rank-loss gradient for {key}, but none was found."
+                )
+        if groups["block1plus_lora"]:
+            assert all(grad is None for _, grad in by_group["block1plus_lora"]), (
+                "L_rank should not directly produce gradients for block1+ LoRA parameters."
+            )
+
+    def compute_spatial_ranking_loss(
+        self,
+        h1,
+        visual_metadata,
+        spatial_features,
+        debug_checks=False,
+    ):
+        if getattr(self, "spatial_rank_head", None) is None:
+            raise RuntimeError("spatial_rank_loss_enable=True but spatial_rank_head/P_geo is not initialized.")
+        if h1 is None:
+            raise RuntimeError("H1 is required for spatial ranking loss.")
+        assert h1.requires_grad, "Captured H1 must require gradients for spatial ranking loss."
+
+        device = h1.device
+        dtype = h1.dtype
+        margin = float(getattr(self.config, "spatial_rank_margin", 0.2))
+        lambda_sim = float(getattr(self.config, "lambda_sim", 0.01))
+        anchors_per_frame = int(getattr(self.config, "anchors_per_frame", 128))
+        positive_top_percent = float(getattr(self.config, "positive_top_percent", 10.0))
+        negative_bottom_percent = float(getattr(self.config, "negative_bottom_percent", 30.0))
+        pool_mode = getattr(self.config, "mm_spatial_pool_mode", "bilinear")
+
+        rank_losses = []
+        metrics = {
+            "spatial_rank_anchors": 0,
+            "spatial_rank_valid_visual_tokens": 0,
+            "spatial_rank_h1_token_count": 0,
+            "spatial_rank_cut3r_token_count": 0,
+        }
+        teacher_pos_values = []
+        teacher_neg_values = []
+        student_pos_values = []
+        student_neg_values = []
+        accuracies = []
+
+        for batch_idx, metadata in enumerate(visual_metadata or []):
+            visual_indices = metadata["visual_token_indices"].to(device=device)
+            frame_ids = metadata["visual_frame_ids"].to(device=device)
+            if visual_indices.numel() == 0:
+                continue
+
+            excluded = torch.cat([
+                metadata.get("newline_token_indices", _empty_long(device)).to(device=device),
+                metadata.get("padding_token_indices", _empty_long(device)).to(device=device),
+                metadata.get("answer_token_indices", _empty_long(device)).to(device=device),
+                metadata.get("text_token_indices", _empty_long(device)).to(device=device),
+                metadata.get("special_token_indices", _empty_long(device)).to(device=device),
+                metadata.get("camera_prefix_token_indices", _empty_long(device)).to(device=device),
+            ])
+            if excluded.numel() > 0:
+                overlap = torch.isin(visual_indices, excluded)
+                assert not overlap.any(), "H_1^vis metadata includes text/newline/padding/special/prefix tokens."
+
+            sf = self._get_spatial_feature_for_batch(spatial_features, batch_idx)
+            if not isinstance(sf, dict) or "patch_tokens" not in sf:
+                raise ValueError("CUT3R teacher target must come from spatial_features['patch_tokens'].")
+            patch_tokens = sf["patch_tokens"].to(device=device)
+            assert not patch_tokens.requires_grad, "CUT3R teacher tokens must be detached/frozen."
+            if patch_tokens.dim() == 4 and patch_tokens.shape[0] == 1:
+                patch_tokens = patch_tokens[0]
+            if patch_tokens.dim() != 3:
+                raise ValueError(f"Expected CUT3R patch_tokens shape (frames, tokens, dim), got {tuple(patch_tokens.shape)}")
+
+            frame_order = list(metadata.get("frame_order", []))
+            assert len(frame_order) == int(patch_tokens.shape[0]), (
+                f"Sampled visual frame count {len(frame_order)} != CUT3R teacher frame count {patch_tokens.shape[0]}"
+            )
+            if "frame_indices" in sf:
+                sf_frame_indices = [int(x) for x in sf["frame_indices"]]
+                assert sf_frame_indices == frame_order, f"Frame index mismatch: visual={frame_order}, CUT3R={sf_frame_indices}"
+            else:
+                assert frame_order == list(range(len(frame_order))), f"Unexpected visual frame order without teacher indices: {frame_order}"
+
+            if debug_checks and not getattr(self, "_spatial_rank_debug_printed", False):
+                rank0_print(
+                    "[SPATIAL_RANK] first batch shapes: "
+                    f"H_1^vis={tuple(h1[batch_idx, visual_indices].shape)}, "
+                    f"CUT3R_patch_tokens={tuple(patch_tokens.shape)}, "
+                    f"tokens_per_frame={metadata.get('tokens_per_frame')}, "
+                    f"visual_grid_shape={metadata.get('visual_grid_shapes')}, "
+                    f"num_frames={len(frame_order)}"
+                )
+
+            for local_frame_idx, frame_id in enumerate(frame_order):
+                frame_mask = frame_ids == int(frame_id)
+                frame_indices = visual_indices[frame_mask]
+                h1_frame = h1[batch_idx, frame_indices]
+                teacher_frame, teacher_valid = self._pool_cut3r_teacher_to_student_grid(
+                    patch_tokens[local_frame_idx].detach(),
+                    int(h1_frame.shape[0]),
+                    pool_mode,
+                )
+                teacher_valid = teacher_valid.to(device=device)
+                assert int(teacher_valid.sum().item()) == int(h1_frame.shape[0]), (
+                    f"CUT3R valid mask count {teacher_valid.sum().item()} != H1_vis token count {h1_frame.shape[0]}"
+                )
+                teacher_frame = teacher_frame[teacher_valid]
+                assert int(h1_frame.shape[0]) == int(teacher_frame.shape[0]), (
+                    f"H1_vis token count {h1_frame.shape[0]} != CUT3R target token count {teacher_frame.shape[0]}"
+                )
+
+                anchors, positives, negatives, teacher_pos, teacher_neg = self._sample_spatial_rank_triplets(
+                    teacher_frame,
+                    anchors_per_frame,
+                    positive_top_percent,
+                    negative_bottom_percent,
+                )
+                assert teacher_pos.mean() > teacher_neg.mean(), (
+                    "Teacher positive similarity must be greater than teacher negative similarity."
+                )
+                z = F.normalize(self.spatial_rank_head(h1_frame.to(dtype=dtype)), dim=-1)
+                sim_pos = (z[anchors] * z[positives]).sum(dim=-1)
+                sim_neg = (z[anchors] * z[negatives]).sum(dim=-1)
+                rank_loss = F.relu(margin - sim_pos + sim_neg).mean()
+                assert torch.isfinite(rank_loss), "L_rank is not finite."
+                rank_losses.append(rank_loss)
+
+                metrics["spatial_rank_anchors"] += int(anchors.numel())
+                metrics["spatial_rank_valid_visual_tokens"] += int(h1_frame.shape[0])
+                metrics["spatial_rank_h1_token_count"] += int(h1_frame.shape[0])
+                metrics["spatial_rank_cut3r_token_count"] += int(teacher_frame.shape[0])
+                teacher_pos_values.append(teacher_pos.mean())
+                teacher_neg_values.append(teacher_neg.mean())
+                student_pos_values.append(sim_pos.mean())
+                student_neg_values.append(sim_neg.mean())
+                accuracies.append((sim_pos > sim_neg).float().mean())
+
+        if not rank_losses:
+            zero = h1.sum() * 0.0
+            return zero, {"spatial_rank_loss": 0.0, "spatial_rank_weighted_loss": 0.0}
+
+        rank_loss = torch.stack(rank_losses).mean()
+        if debug_checks:
+            self._run_spatial_rank_grad_checks(rank_loss)
+        metrics.update({
+            "spatial_rank_loss": float(rank_loss.detach().float().item()),
+            "spatial_rank_weighted_loss": float((rank_loss.detach().float() * lambda_sim).item()),
+            "spatial_rank_teacher_sim_pos": float(torch.stack(teacher_pos_values).mean().detach().float().item()),
+            "spatial_rank_teacher_sim_neg": float(torch.stack(teacher_neg_values).mean().detach().float().item()),
+            "spatial_rank_student_sim_pos": float(torch.stack(student_pos_values).mean().detach().float().item()),
+            "spatial_rank_student_sim_neg": float(torch.stack(student_neg_values).mean().detach().float().item()),
+            "spatial_rank_accuracy": float(torch.stack(accuracies).mean().detach().float().item()),
+        })
+        self._spatial_rank_debug_printed = True
+        return rank_loss, metrics
 
     def _split_prefix_tokens_for_square_grid(self, image_feature):
         num_tokens = image_feature.shape[1]
@@ -744,11 +1185,14 @@ class LlavaMetaForCausalLM(ABC):
         image_feature = image_feature.permute(1, 2, 0).contiguous()
         return image_feature
 
-    def prepare_inputs_labels_for_multimodal(self, input_ids, position_ids, attention_mask, past_key_values, labels, images, spatial_features=None, point_maps=None, modalities=["image"], image_sizes=None):
+    def prepare_inputs_labels_for_multimodal(self, input_ids, position_ids, attention_mask, past_key_values, labels, images, spatial_features=None, point_maps=None, modalities=["image"], image_sizes=None, return_visual_metadata=False):
         vision_tower = self.get_vision_tower()
         # rank_print(modalities)
         if vision_tower is None or images is None or input_ids.shape[1] == 1:
-            return input_ids, position_ids, attention_mask, past_key_values, None, labels
+            result = (input_ids, position_ids, attention_mask, past_key_values, None, labels)
+            if return_visual_metadata:
+                return result + (None,)
+            return result
 
         if isinstance(modalities, str):
             modalities = [modalities]
@@ -795,11 +1239,24 @@ class LlavaMetaForCausalLM(ABC):
             # rank_print(f"Concat images : {concat_images.shape}")
             encoded_image_features = torch.split(encoded_image_features, split_sizes)
             image_features = []
+            image_feature_layouts = []
             for idx, image_feat in enumerate(encoded_image_features):
                 if idx in video_idx_in_batch:
-                    image_features.append(self.get_2dPool(image_feat))
+                    raw_prefix, raw_grid_tokens, raw_side = self._split_prefix_tokens_for_square_grid(image_feat)
+                    prefix_len = 0 if raw_prefix is None else int(raw_prefix.shape[1])
+                    pooled_feat = self.get_2dPool(image_feat)
+                    _, pooled_grid_tokens, pooled_side = self._split_prefix_tokens_for_square_grid(pooled_feat)
+                    image_features.append(pooled_feat)
+                    image_feature_layouts.append({
+                        "modality": "video",
+                        "num_frames": int(pooled_feat.shape[0]),
+                        "raw_grid_side": int(raw_side),
+                        "grid_side": int(pooled_side),
+                        "prefix_len": int(prefix_len),
+                    })
                 else:
                     image_features.append(image_feat)
+                    image_feature_layouts.append({"modality": "image"})
             
             # if self.get_model().get_spatial_tower() is not None:
             #     if spatial_features is not None:
@@ -832,6 +1289,7 @@ class LlavaMetaForCausalLM(ABC):
 
             elif mm_patch_merge_type.startswith("spatial"):
                 new_image_features = []
+                new_image_feature_metadata = []
                 for image_idx, image_feature in enumerate(image_features):
                     # FIXME: now assume the image is square, and split to 2x2 patches
                     # num_patches = h * w, where h = w = sqrt(num_patches)
@@ -843,6 +1301,16 @@ class LlavaMetaForCausalLM(ABC):
                         # rank0_print("Video")
                         if mm_newline_position == "grid":
                             # Grid-wise
+                            layout = image_feature_layouts[image_idx]
+                            prefix_tokens, _, resize_h = self._split_prefix_tokens_for_square_grid(image_feature)
+                            prefix_len = 0 if prefix_tokens is None else int(prefix_tokens.shape[1])
+                            metadata = self._build_grid_metadata(
+                                num_frames=int(image_feature.shape[0]),
+                                grid_side=int(resize_h),
+                                raw_grid_side=int(layout.get("raw_grid_side", resize_h)),
+                                prefix_len=prefix_len,
+                                device=image_feature.device,
+                            )
                             image_feature = self.add_token_per_grid(image_feature)
                             if getattr(self.config, "add_faster_video", False):
                                 faster_video_feature = self.add_token_per_grid(all_faster_video_features[image_idx])
@@ -860,23 +1328,75 @@ class LlavaMetaForCausalLM(ABC):
                                 # print("!!!!!!!!!!!!")
                         
                             new_image_features.append(image_feature)
+                            new_image_feature_metadata.append(metadata)
                         elif mm_newline_position == "frame":
                             # Frame-wise
+                            layout = image_feature_layouts[image_idx]
+                            prefix_tokens, _, resize_h = self._split_prefix_tokens_for_square_grid(image_feature)
+                            prefix_len = 0 if prefix_tokens is None else int(prefix_tokens.shape[1])
+                            metadata = self._build_flat_frame_metadata(
+                                num_frames=int(image_feature.shape[0]),
+                                tokens_per_frame=int(image_feature.shape[1]) + 1,
+                                grid_side=int(resize_h),
+                                raw_grid_side=int(layout.get("raw_grid_side", resize_h)),
+                                prefix_len=prefix_len,
+                                device=image_feature.device,
+                            )
+                            frame_len = int(image_feature.shape[1]) + 1
+                            newline_positions = torch.tensor(
+                                [frame_idx * frame_len + frame_len - 1 for frame_idx in range(int(image_feature.shape[0]))],
+                                device=image_feature.device,
+                                dtype=torch.long,
+                            )
+                            keep_visual = ~torch.isin(metadata["visual_token_indices"], newline_positions)
+                            metadata["visual_token_indices"] = metadata["visual_token_indices"][keep_visual]
+                            metadata["visual_frame_ids"] = metadata["visual_frame_ids"][keep_visual]
+                            metadata["newline_token_indices"] = newline_positions
+                            metadata["tokens_per_frame"] = [int(image_feature.shape[1]) - prefix_len for _ in range(int(image_feature.shape[0]))]
                             image_feature = self.add_token_per_frame(image_feature)
 
                             new_image_features.append(image_feature.flatten(0, 1))
+                            new_image_feature_metadata.append(metadata)
                             
                         elif mm_newline_position == "one_token":
                             # one-token
+                            layout = image_feature_layouts[image_idx]
+                            prefix_tokens, _, resize_h = self._split_prefix_tokens_for_square_grid(image_feature)
+                            prefix_len = 0 if prefix_tokens is None else int(prefix_tokens.shape[1])
+                            metadata = self._build_flat_frame_metadata(
+                                num_frames=int(image_feature.shape[0]),
+                                tokens_per_frame=int(image_feature.shape[1]),
+                                grid_side=int(resize_h),
+                                raw_grid_side=int(layout.get("raw_grid_side", resize_h)),
+                                prefix_len=prefix_len,
+                                device=image_feature.device,
+                            )
                             image_feature = image_feature.flatten(0, 1)
                             if 'unpad' in mm_patch_merge_type:
                                 image_feature = torch.cat((
                                     image_feature,
                                     self.model.image_newline[None].to(image_feature.device)
                                 ), dim=0)
+                                metadata["newline_token_indices"] = torch.cat((
+                                    metadata["newline_token_indices"],
+                                    torch.tensor([image_feature.shape[0] - 1], device=image_feature.device, dtype=torch.long),
+                                ))
                             new_image_features.append(image_feature)      
+                            new_image_feature_metadata.append(metadata)
                         elif mm_newline_position == "no_token":
+                            layout = image_feature_layouts[image_idx]
+                            prefix_tokens, _, resize_h = self._split_prefix_tokens_for_square_grid(image_feature)
+                            prefix_len = 0 if prefix_tokens is None else int(prefix_tokens.shape[1])
+                            metadata = self._build_flat_frame_metadata(
+                                num_frames=int(image_feature.shape[0]),
+                                tokens_per_frame=int(image_feature.shape[1]),
+                                grid_side=int(resize_h),
+                                raw_grid_side=int(layout.get("raw_grid_side", resize_h)),
+                                prefix_len=prefix_len,
+                                device=image_feature.device,
+                            )
                             new_image_features.append(image_feature.flatten(0, 1))
+                            new_image_feature_metadata.append(metadata)
                         else:
                             raise ValueError(f"Unexpected mm_newline_position: {mm_newline_position}")
                     elif image_feature.shape[0] > 1:  # multi patches and multi images operations
@@ -936,16 +1456,34 @@ class LlavaMetaForCausalLM(ABC):
                         else:
                             image_feature = torch.cat((base_image_feature, image_feature), dim=0)
                         new_image_features.append(image_feature)
+                        new_image_feature_metadata.append({"visual_token_indices": _empty_long(image_feature.device)})
                     else:  # single image operations
                         # For single images, apply the same grid-wise newline logic
                         # as used for video frames to maintain consistency.
+                        prefix_tokens, _, resize_h = self._split_prefix_tokens_for_square_grid(image_feature)
+                        prefix_len = 0 if prefix_tokens is None else int(prefix_tokens.shape[1])
+                        metadata = self._build_grid_metadata(
+                            num_frames=int(image_feature.shape[0]),
+                            grid_side=int(resize_h),
+                            raw_grid_side=int(resize_h),
+                            prefix_len=prefix_len,
+                            device=image_feature.device,
+                        )
                         image_feature = self.add_token_per_grid(image_feature)
                         new_image_features.append(image_feature)
+                        new_image_feature_metadata.append(metadata)
                 image_features = new_image_features
+                image_feature_metadata = new_image_feature_metadata
             else:
                 raise ValueError(f"Unexpected mm_patch_merge_type: {self.config.mm_patch_merge_type}")
         else:
             image_features = self.encode_images(images)
+            image_feature_metadata = [{"visual_token_indices": _empty_long(image_features.device)}]
+
+        if "image_feature_metadata" not in locals():
+            image_feature_metadata = []
+            for image_feature in image_features:
+                image_feature_metadata.append({"visual_token_indices": _empty_long(image_feature.device)})
 
         # TODO: image start / end is not implemented here to support pretraining.
         if getattr(self.config, "tune_mm_mlp_adapter", False) and getattr(self.config, "mm_use_im_start_end", False):
@@ -975,6 +1513,7 @@ class LlavaMetaForCausalLM(ABC):
 
         new_input_embeds = []
         new_labels = []
+        unpadded_visual_metadata = []
         cur_image_idx = 0
         # rank_print("Inserting Images embedding")
         for batch_idx, cur_input_ids in enumerate(input_ids):
@@ -1002,6 +1541,10 @@ class LlavaMetaForCausalLM(ABC):
 
                 new_input_embeds.append(cur_input_embeds)
                 new_labels.append(labels[batch_idx])
+                unpadded_visual_metadata.append({
+                    "visual_token_indices": _empty_long(cur_input_embeds.device),
+                    "visual_frame_ids": _empty_long(cur_input_embeds.device),
+                })
                 cur_image_idx += 1 # Increment even if no image token? Check original logic intent.
                 continue
 
@@ -1017,6 +1560,7 @@ class LlavaMetaForCausalLM(ABC):
             cur_input_embeds_no_im = torch.split(cur_input_embeds, split_sizes, dim=0)
             cur_new_input_embeds = []
             cur_new_labels = []
+            cur_visual_metadata = None
 
             for i in range(num_images + 1):
                 # Append text embeddings and labels
@@ -1056,6 +1600,12 @@ class LlavaMetaForCausalLM(ABC):
 
                     if features_to_insert:
                         combined_features = torch.cat(features_to_insert, dim=0)
+                        insert_start = sum(x.shape[0] for x in cur_new_input_embeds)
+                        if cur_visual_metadata is None:
+                            cur_visual_metadata = self._shift_metadata(
+                                image_feature_metadata[cur_image_idx - 1],
+                                offset=insert_start,
+                            )
                         cur_new_input_embeds.append(combined_features)
                         # Add IGNORE_INDEX labels for the entire combined feature length
                         cur_new_labels.append(torch.full((combined_features.shape[0],), IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype))
@@ -1067,6 +1617,12 @@ class LlavaMetaForCausalLM(ABC):
 
             new_input_embeds.append(cur_new_input_embeds)
             new_labels.append(cur_new_labels)
+            if cur_visual_metadata is None:
+                cur_visual_metadata = {
+                    "visual_token_indices": _empty_long(cur_new_input_embeds.device),
+                    "visual_frame_ids": _empty_long(cur_new_input_embeds.device),
+                }
+            unpadded_visual_metadata.append(cur_visual_metadata)
 
         # Truncate sequences to max length as image embeddings can make the sequence longer
         tokenizer_model_max_length = getattr(self.config, "tokenizer_model_max_length", None)
@@ -1084,6 +1640,7 @@ class LlavaMetaForCausalLM(ABC):
         batch_size = len(new_input_embeds)
 
         new_input_embeds_padded = []
+        visual_metadata_padded = []
         new_labels_padded = torch.full((batch_size, max_len), IGNORE_INDEX, dtype=new_labels[0].dtype, device=new_labels[0].device)
         attention_mask = torch.zeros((batch_size, max_len), dtype=attention_mask.dtype, device=attention_mask.device)
         position_ids = torch.zeros((batch_size, max_len), dtype=position_ids.dtype, device=position_ids.device)
@@ -1097,12 +1654,46 @@ class LlavaMetaForCausalLM(ABC):
                     new_labels_padded[i, -cur_len:] = cur_new_labels
                     attention_mask[i, -cur_len:] = True
                     position_ids[i, -cur_len:] = torch.arange(0, cur_len, dtype=position_ids.dtype, device=position_ids.device)
+                pad_positions = list(range(max_len - cur_len))
+                answer_positions = (torch.where(cur_new_labels != IGNORE_INDEX)[0] + (max_len - cur_len)).tolist()
+                visual_base = unpadded_visual_metadata[i]
+                text_mask = torch.ones(cur_len, dtype=torch.bool, device=cur_new_embed.device)
+                if "visual_token_indices" in visual_base and visual_base["visual_token_indices"].numel() > 0:
+                    valid_visual = visual_base["visual_token_indices"].to(cur_new_embed.device)
+                    valid_visual = valid_visual[valid_visual < cur_len]
+                    text_mask[valid_visual] = False
+                text_positions = (torch.where(text_mask)[0] + (max_len - cur_len)).tolist()
+                visual_metadata_padded.append(self._shift_metadata(
+                    visual_base,
+                    offset=max_len - cur_len,
+                    max_len=max_len,
+                    padding_positions=pad_positions,
+                    answer_positions=answer_positions,
+                    text_positions=text_positions,
+                ))
             else:
                 new_input_embeds_padded.append(torch.cat((cur_new_embed, torch.zeros((max_len - cur_len, cur_new_embed.shape[1]), dtype=cur_new_embed.dtype, device=cur_new_embed.device)), dim=0))
                 if cur_len > 0:
                     new_labels_padded[i, :cur_len] = cur_new_labels
                     attention_mask[i, :cur_len] = True
                     position_ids[i, :cur_len] = torch.arange(0, cur_len, dtype=position_ids.dtype, device=position_ids.device)
+                pad_positions = list(range(cur_len, max_len))
+                answer_positions = torch.where(cur_new_labels != IGNORE_INDEX)[0].tolist()
+                visual_base = unpadded_visual_metadata[i]
+                text_mask = torch.ones(cur_len, dtype=torch.bool, device=cur_new_embed.device)
+                if "visual_token_indices" in visual_base and visual_base["visual_token_indices"].numel() > 0:
+                    valid_visual = visual_base["visual_token_indices"].to(cur_new_embed.device)
+                    valid_visual = valid_visual[valid_visual < cur_len]
+                    text_mask[valid_visual] = False
+                text_positions = torch.where(text_mask)[0].tolist()
+                visual_metadata_padded.append(self._shift_metadata(
+                    visual_base,
+                    offset=0,
+                    max_len=max_len,
+                    padding_positions=pad_positions,
+                    answer_positions=answer_positions,
+                    text_positions=text_positions,
+                ))
 
         new_input_embeds = torch.stack(new_input_embeds_padded, dim=0)
         # rank0_print("tokenizer padding")
@@ -1128,7 +1719,10 @@ class LlavaMetaForCausalLM(ABC):
             position_ids[:, split_position:] += right_add
         # import pdb; pdb.set_trace()
         # rank0_print("Finish preparing")
-        return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels
+        result = (None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels)
+        if return_visual_metadata:
+            return result + (visual_metadata_padded,)
+        return result
 
     def initialize_vision_tokenizer(self, model_args, tokenizer):
         if model_args.mm_use_im_patch_token:
