@@ -19,8 +19,8 @@ SUFFIX="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
 # ============================================================
 NOTE="CUT3R Geometry-RoPE fusion: svf_3d_rope with point-map-derived spherical positions, 25% training data"
 DATA_ROOT="/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r"
-SPATIAL_FEATURES_ROOT="/leonardo_work/EUHPC_D32_006/FAST/train_data/vlm3r"
-SPATIAL_FEATURES_SUBDIR="spatial_features"
+SPATIAL_FEATURES_ROOT="/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r"
+SPATIAL_FEATURES_SUBDIR="spatial_features_points"
 CONDA_ENV_NAME="vlm3r"
 
 MODEL_LORA_ENABLE="True"
