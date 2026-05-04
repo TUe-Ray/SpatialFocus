@@ -192,8 +192,31 @@ class ModelArguments:
     fusion_block: Optional[str] = field(
         default=None,
         metadata={
-            "help": "Fusion strategy. New ablations: svf_baseline, svf_patch_cam_concat, svf_geometry_bridge"
+            "help": "Fusion strategy. New ablations: svf_baseline, svf_patch_cam_concat, svf_geometry_bridge, svf_3d_rope"
         },
+    )
+    geometry_rope_mode: Optional[str] = field(
+        default=None,
+        metadata={"help": "Geometry-RoPE mode for svf_3d_rope: depth, xyz, or spherical."},
+    )
+    geometry_rope_max_depth: Optional[float] = field(
+        default=None,
+        metadata={"help": "Maximum depth/radius used to normalize Geometry-RoPE positions."},
+    )
+    geometry_rope_group_split: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Comma-separated Geometry-RoPE group split. "
+                "For xyz: x,y,z. For spherical: theta,phi,log_r. "
+                "Examples: '1,1,1', '2,1,2', '3,1,3'. "
+                "For depth mode, use '1' or leave unset."
+            )
+        },
+    )
+    geometry_rope_log_stats: bool = field(
+        default=False,
+        metadata={"help": "If True, record Geometry-RoPE tensor mean/std stats during each forward pass."},
     )
     tune_fusion_block: bool = field(default=False)
 
@@ -260,6 +283,15 @@ class DataArguments:
     train_data_percentage: float = field(default=100.0, metadata={"help": "Percentage of loaded training samples to keep (0 < value <= 100)."})
     train_data_percentage_seed: int = field(default=42, metadata={"help": "Seed used for deterministic subset selection and dataset-level shuffle."})
     train_data_shuffle: bool = field(default=True, metadata={"help": "If True, shuffle loaded training samples before training."})
+    deterministic_data_order: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "If True, stable-sort loaded samples before train_data_percentage "
+                "sampling and train_data_shuffle. This makes fixed-seed ablations reproducible."
+            )
+        },
+    )
     zero_spatial_features: Optional[bool] = field(default=False, metadata={"help": "If True, zero out all loaded spatial feature tensors from .pt files for ablation."})
     spatial_tower_type: Optional[str] = field(default=None, metadata={"help": "Spatial tower type (e.g. cut3r, vggt, pi3x). Set automatically from model_args. Controls whether .pt files are loaded."})
     spatial_features_root: Optional[str] = field(default=None, metadata={"help": "Root directory used to locate pre-extracted spatial features. If unset, video_folder is used."})
@@ -1297,6 +1329,32 @@ class LazySupervisedDataset(Dataset):
                 cur_data_dict = json.load(file)
                 rank0_print(f"Loaded {len(cur_data_dict)} samples from {data_path}")
                 self.list_data_dict.extend(cur_data_dict)
+
+        def _stable_sample_key(item):
+            conv0 = ""
+            try:
+                conversations = item.get("conversations", [])
+                if conversations:
+                    conv0 = conversations[0].get("value", "")
+            except Exception:
+                conv0 = ""
+
+            return (
+                str(item.get("_annotation_path", "")),
+                str(item.get("id", "")),
+                str(item.get("question_id", "")),
+                str(item.get("video", "")),
+                str(item.get("image", "")),
+                str(item.get("data_source", "")),
+                conv0[:128],
+            )
+
+        if getattr(data_args, "deterministic_data_order", True):
+            self.list_data_dict.sort(key=_stable_sample_key)
+            rank0_print("[DATA ORDER] Stable deterministic sort enabled before subset/shuffle.")
+        else:
+            rank0_print("[DATA ORDER] Stable deterministic sort disabled.")
+
         total_loaded = len(self.list_data_dict)
         if data_args.train_data_percentage <= 0 or data_args.train_data_percentage > 100:
             raise ValueError(
@@ -2114,6 +2172,13 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
 
     if model_args.fusion_block is not None:
         overwrite_config["fusion_block"] = model_args.fusion_block
+    if model_args.geometry_rope_mode is not None:
+        overwrite_config["geometry_rope_mode"] = model_args.geometry_rope_mode
+    if model_args.geometry_rope_max_depth is not None:
+        overwrite_config["geometry_rope_max_depth"] = model_args.geometry_rope_max_depth
+    if model_args.geometry_rope_group_split is not None:
+        overwrite_config["geometry_rope_group_split"] = model_args.geometry_rope_group_split
+    overwrite_config["geometry_rope_log_stats"] = model_args.geometry_rope_log_stats
 
     if overwrite_config:
         assert cfg_pretrained is not None, "cfg_pretrained is None"
@@ -2384,11 +2449,25 @@ def train(attn_implementation=None):
 
     if model_args.fusion_block is not None:
         model.config.fusion_block = model_args.fusion_block
+        if model_args.geometry_rope_mode is not None:
+            model.config.geometry_rope_mode = model_args.geometry_rope_mode
+        if model_args.geometry_rope_max_depth is not None:
+            model.config.geometry_rope_max_depth = model_args.geometry_rope_max_depth
+        if model_args.geometry_rope_group_split is not None:
+            model.config.geometry_rope_group_split = model_args.geometry_rope_group_split
+        model.config.geometry_rope_log_stats = model_args.geometry_rope_log_stats
         model.get_model().initialize_fusion_block(model_args=model_args, fsdp=training_args.fsdp)
         fusion_block = model.get_fusion_block()
         fusion_block.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
 
         model.config.fusion_block = model_args.fusion_block
+        if model_args.geometry_rope_mode is not None:
+            model.config.geometry_rope_mode = model_args.geometry_rope_mode
+        if model_args.geometry_rope_max_depth is not None:
+            model.config.geometry_rope_max_depth = model_args.geometry_rope_max_depth
+        if model_args.geometry_rope_group_split is not None:
+            model.config.geometry_rope_group_split = model_args.geometry_rope_group_split
+        model.config.geometry_rope_log_stats = model_args.geometry_rope_log_stats
         model.config.fusion_block_lr = training_args.fusion_block_lr
 
 
