@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=DBG_rope_cut3r_spherical_25p
+#SBATCH --job-name=rope_cut3r_spherical_100p
 #SBATCH --nodes=4
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
@@ -14,10 +14,34 @@
 #SBATCH --exclusive
 
 SUFFIX="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
+NOTE="CUT3R Geometry-RoPE fusion: svf_3d_rope with point-map-derived spherical positions, 100% training data"
+
+TRAIN_DATA_PERCENTAGE="100"
+
+MODEL_FUSION_BLOCK="svf_3d_rope"
+# Fusion options for this Geometry-RoPE experiment:
+# - svf_patch_only
+# - svf_3d_rope
+# - svf_depth_rope / svf_xyz_rope / svf_spherical_rope
+MODEL_GEOMETRY_ROPE_MODE="spherical"
+MODEL_GEOMETRY_ROPE_MAX_DEPTH="10.0"
+MODEL_GEOMETRY_ROPE_GROUP_SPLIT="2,1,2"
+MODEL_GEOMETRY_ROPE_LOG_STATS="False"
+# Group split rules:
+# - svf_depth_rope requires MODEL_GEOMETRY_ROPE_GROUP_SPLIT="1"
+# - svf_xyz_rope uses x,y,z split, e.g. "1,1,1" or "2,1,2"
+# - svf_spherical_rope uses theta,phi,log_r split, e.g. "1,1,1", "2,1,2", or "3,1,3"
+# - svf_3d_rope uses MODEL_GEOMETRY_ROPE_MODE to decide depth/xyz/spherical
+# Run matrix:
+#   baseline:  MODEL_FUSION_BLOCK="svf_patch_only"
+#   depth:     MODEL_FUSION_BLOCK="svf_depth_rope"     MODEL_GEOMETRY_ROPE_GROUP_SPLIT="1"
+#   xyz:       MODEL_FUSION_BLOCK="svf_xyz_rope"       MODEL_GEOMETRY_ROPE_GROUP_SPLIT="1,1,1" or "2,1,2"
+#   spherical: MODEL_FUSION_BLOCK="svf_spherical_rope" MODEL_GEOMETRY_ROPE_GROUP_SPLIT="1,1,1" or "2,1,2" or "3,1,3"
+# ============== Training percentage and shuffling (for ablation) ==============
+
 # ============================================================
 # User-defined variables: General
 # ============================================================
-NOTE="CUT3R Geometry-RoPE fusion: svf_3d_rope with point-map-derived spherical positions, 25% training data"
 DATA_ROOT="/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r"
 SPATIAL_FEATURES_ROOT="/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r"
 SPATIAL_FEATURES_SUBDIR="spatial_features_points"
@@ -38,7 +62,7 @@ LOCAL_SIGLIP="/leonardo_work/EUHPC_D32_006/FAST/hf_models/VLM3R/siglip-so400m-pa
 
 TRAIN_SAVE_ROOT="/leonardo_work/EUHPC_D32_006/Train_Model/VLM3R"
 LOG_DIR="/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/train_log"
-MODEL_FUSION_BLOCK="svf_3d_rope"
+
 
 
 WANDB_DIR="$WORK/wandb"
@@ -62,26 +86,6 @@ SEED=42
 # ============================================================
 
 
-# Fusion options for this Geometry-RoPE experiment:
-# - svf_patch_only
-# - svf_3d_rope
-# - svf_depth_rope / svf_xyz_rope / svf_spherical_rope
-MODEL_GEOMETRY_ROPE_MODE="spherical"
-MODEL_GEOMETRY_ROPE_MAX_DEPTH="10.0"
-MODEL_GEOMETRY_ROPE_GROUP_SPLIT="2,1,2"
-MODEL_GEOMETRY_ROPE_LOG_STATS="False"
-# Group split rules:
-# - svf_depth_rope requires MODEL_GEOMETRY_ROPE_GROUP_SPLIT="1"
-# - svf_xyz_rope uses x,y,z split, e.g. "1,1,1" or "2,1,2"
-# - svf_spherical_rope uses theta,phi,log_r split, e.g. "1,1,1", "2,1,2", or "3,1,3"
-# - svf_3d_rope uses MODEL_GEOMETRY_ROPE_MODE to decide depth/xyz/spherical
-# Run matrix:
-#   baseline:  MODEL_FUSION_BLOCK="svf_patch_only"
-#   depth:     MODEL_FUSION_BLOCK="svf_depth_rope"     MODEL_GEOMETRY_ROPE_GROUP_SPLIT="1"
-#   xyz:       MODEL_FUSION_BLOCK="svf_xyz_rope"       MODEL_GEOMETRY_ROPE_GROUP_SPLIT="1,1,1" or "2,1,2"
-#   spherical: MODEL_FUSION_BLOCK="svf_spherical_rope" MODEL_GEOMETRY_ROPE_GROUP_SPLIT="1,1,1" or "2,1,2" or "3,1,3"
-# ============== Training percentage and shuffling (for ablation) ==============
-TRAIN_DATA_PERCENTAGE="25"
 TRAIN_DATA_PERCENTAGE_SEED="$SEED"
 TRAIN_DATA_SHUFFLE="True"
 DETERMINISTIC_DATA_ORDER="True"
