@@ -681,12 +681,26 @@ class LlavaMetaForCausalLM(ABC):
                 elif fusion_block_type in ['svf_3d_rope', 'svf_depth_rope', 'svf_xyz_rope', 'svf_spherical_rope']:
                     geometry_point_maps = _coalesce_point_maps(point_maps)
                     if geometry_point_maps is None and isinstance(loaded_spatial_features, dict):
-                        for point_key in ("point_maps", "point_map", "points", "pts3d"):
+                        point_map_keys = (
+                            "point_maps",
+                            "point_map",
+                            "points",
+                            "pts3d",
+                            "point_maps_ref",
+                            "pts3d_in_other_view",
+                            "point_maps_cam",
+                            "pts3d_in_self_view",
+                        )
+                        for point_key in point_map_keys:
                             if point_key in loaded_spatial_features:
                                 geometry_point_maps = _coalesce_point_maps(loaded_spatial_features[point_key])
                                 break
                     if geometry_point_maps is None:
-                        raise RuntimeError("svf_3d_rope requires point_maps from CUT3R/Pi3X.")
+                        raise RuntimeError(
+                            "svf_3d_rope requires point_maps from CUT3R/Pi3X. "
+                            "Expected one of: point_maps, point_maps_ref, point_maps_cam, "
+                            "pts3d_in_other_view, pts3d_in_self_view."
+                        )
 
                     if geometry_point_maps.shape[0] != image_features.shape[0]:
                         raise RuntimeError(
