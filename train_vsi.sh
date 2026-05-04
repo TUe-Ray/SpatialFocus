@@ -47,6 +47,13 @@ RESUME_MODE="fresh"                 # choices: fresh / continue
 RESUME_CHECKPOINT_PATH="none"       # e.g. /path/to/checkpoint-1000
 ZERO_SPATIAL_FEATURES="False"       # choices: False / True
 SEED=42
+SPATIAL_RANK_LOSS_ENABLE="${SPATIAL_RANK_LOSS_ENABLE:-False}"
+LAMBDA_SIM="${LAMBDA_SIM:-0.01}"
+SPATIAL_RANK_MARGIN="${SPATIAL_RANK_MARGIN:-0.2}"
+ANCHORS_PER_FRAME="${ANCHORS_PER_FRAME:-128}"
+POSITIVE_TOP_PERCENT="${POSITIVE_TOP_PERCENT:-10}"
+NEGATIVE_BOTTOM_PERCENT="${NEGATIVE_BOTTOM_PERCENT:-30}"
+SPATIAL_RANK_DEBUG_CHECKS="${SPATIAL_RANK_DEBUG_CHECKS:-False}"
 
 # ============================================================
 # User-defined variables: Model/Data/Training presets
@@ -261,6 +268,7 @@ echo "[BATCH] GRADIENT_ACCUMULATION_STEPS=$GRADIENT_ACCUMULATION_STEPS"
 #   False -> use normal spatial_features (.pt)
 #   True  -> load .pt and zero all tensor values
 echo "[ABLATION] ZERO_SPATIAL_FEATURES=$ZERO_SPATIAL_FEATURES"
+echo "[SPATIAL_RANK] ENABLE=$SPATIAL_RANK_LOSS_ENABLE LAMBDA_SIM=$LAMBDA_SIM MARGIN=$SPATIAL_RANK_MARGIN"
 
 declare -A MODEL_ARGS=(
     [model_name_or_path]="$LOCAL_MODEL_BASE"
@@ -331,6 +339,13 @@ declare -A TRAINING_ARGS=(
     [dataloader_drop_last]="$DATALOADER_DROP_LAST"
     [seed]="$SEED"
     [data_seed]="$SEED"
+    [spatial_rank_loss_enable]="$SPATIAL_RANK_LOSS_ENABLE"
+    [lambda_sim]="$LAMBDA_SIM"
+    [spatial_rank_margin]="$SPATIAL_RANK_MARGIN"
+    [anchors_per_frame]="$ANCHORS_PER_FRAME"
+    [positive_top_percent]="$POSITIVE_TOP_PERCENT"
+    [negative_bottom_percent]="$NEGATIVE_BOTTOM_PERCENT"
+    [spatial_rank_debug_checks]="$SPATIAL_RANK_DEBUG_CHECKS"
 )
 
 echo "========================================"
