@@ -1,23 +1,26 @@
 #!/bin/bash
-#SBATCH --job-name=DBG_feat_align_cut3r
-#SBATCH --nodes=4
+#SBATCH --job-name=feat_align_cut3r_50p
+#SBATCH --nodes=8
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
 #SBATCH --cpus-per-task=32
-#SBATCH --time=0:30:00
+#SBATCH --time=10:30:00
 #SBATCH --partition=boost_usr_prod  
-#SBATCH --qos=boost_qos_dbg # normal/boost_qos_dbg
+#SBATCH --qos=normal # normal/boost_qos_dbg
 #SBATCH --output=logs/train/%x_%j.out
 #SBATCH --error=logs/train/%x_%j.err
 #SBATCH --mem=0
 #SBATCH --exclude=lrdn0249,lrdn0612,lrdn0568,lrdn2400,lrdn0288,lrdn0418,lrdn0119,lrdn0159,lrdn0080,lrdn0843
 #SBATCH --exclusive
-
+TRAIN_DATA_PERCENTAGE="50"
 SUFFIX="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
+MODEL_TORCH_COMPILE="${MODEL_TORCH_COMPILE:-False}" #TRUE later
+SPATIAL_RANK_LOSS_ENABLE="${SPATIAL_RANK_LOSS_ENABLE:-True}"
 # ============================================================
 # User-defined variables: General
 # ============================================================
-NOTE="ablation study: cut3r 25% training data"
+NOTE="feature alignment experiment: cut3r 50% training data | LoRA(r=128,alpha=256) | Fusion=cross_attention | Features=all_tokens(768dim) | LambdaSim=0.01 | RankMargin=0.2 | Anchors=128 | Top=10%/Bottom=30%"
+
 DATA_ROOT="/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r"
 SPATIAL_FEATURES_ROOT="/leonardo_work/EUHPC_D32_006/FAST/train_data/vlm3r"
 SPATIAL_FEATURES_SUBDIR="spatial_features"
@@ -56,7 +59,8 @@ RESUME_MODE="fresh"                 # choices: fresh / continue
 RESUME_CHECKPOINT_PATH="none"       # e.g. /path/to/checkpoint-1000
 ZERO_SPATIAL_FEATURES="False"       # choices: False / True
 SEED=42
-SPATIAL_RANK_LOSS_ENABLE="${SPATIAL_RANK_LOSS_ENABLE:-False}"
+
+
 LAMBDA_SIM="${LAMBDA_SIM:-0.01}"
 SPATIAL_RANK_MARGIN="${SPATIAL_RANK_MARGIN:-0.2}"
 ANCHORS_PER_FRAME="${ANCHORS_PER_FRAME:-128}"
@@ -70,19 +74,11 @@ SPATIAL_RANK_DEBUG_CHECKS="${SPATIAL_RANK_DEBUG_CHECKS:-False}"
 
 
 # Fusion options for ablation:
-# 1) svf_baseline
-#    Q=2D visual tokens, K/V=[camera tokens, patch tokens]
-#    output = 2D + cross_attn residual, then mm_projector
-# 2) svf_patch_cam_concat
-#    Q=2D visual tokens, K/V=patch tokens only
-#    output = [projected camera tokens, fused 2D tokens] concat, then mm_projector
-# 3) svf_geometry_bridge
-#    stage-1: Q=camera tokens, K/V=patch tokens -> geometry-aware 3D tokens
-#    stage-2: Q=2D visual tokens, K/V=geometry-aware 3D tokens, then mm_projector
+
 # Legacy option kept for compatibility:
 # - cross_attention (uses spatial_tower_select_feature to choose camera/patch/all)
 # ============== Training percentage and shuffling (for ablation) ==============
-TRAIN_DATA_PERCENTAGE="25"
+
 TRAIN_DATA_PERCENTAGE_SEED="$SEED"
 TRAIN_DATA_SHUFFLE="True"
 
@@ -103,7 +99,7 @@ MODEL_TF32="True"
 MODEL_MAX_LENGTH="32768"
 MODEL_GRADIENT_CHECKPOINTING="${MODEL_GRADIENT_CHECKPOINTING:-True}"
 MODEL_LAZY_PREPROCESS="True"
-MODEL_TORCH_COMPILE="${MODEL_TORCH_COMPILE:-True}"
+
 MODEL_TORCH_COMPILE_BACKEND="inductor"
 MODEL_FRAMES_UPBOUND="32"
 MODEL_MM_NEWLINE_POSITION="grid"
