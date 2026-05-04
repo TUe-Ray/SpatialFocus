@@ -79,8 +79,15 @@ class ProgressLoggerCallback(TrainerCallback):
 
         loss_str = f" | loss={loss:.4f}" if isinstance(loss, float) else ""
         lr_str = f" | lr={lr:.2e}" if isinstance(lr, float) else ""
+        rank_loss = logs.get("spatial_rank_loss")
+        rank_acc = logs.get("spatial_rank_accuracy")
+        rank_str = ""
+        if isinstance(rank_loss, float):
+            rank_str += f" | L_rank={rank_loss:.4f}"
+        if isinstance(rank_acc, float):
+            rank_str += f" | rank_acc={rank_acc:.3f}"
 
-        print(f"[{bar}] {step}/{max_steps} ({pct:.1f}%) [{elapsed_str}<{eta_str}, {speed_str}] | epoch={epoch:.3f}{loss_str}{lr_str}", flush=True)
+        print(f"[{bar}] {step}/{max_steps} ({pct:.1f}%) [{elapsed_str}<{eta_str}, {speed_str}] | epoch={epoch:.3f}{loss_str}{lr_str}{rank_str}", flush=True)
 
 
 # Borrowed from peft.utils.get_peft_model_state_dict
@@ -326,6 +333,20 @@ class LengthGroupedSampler(Sampler):
 
 
 class LLaVATrainer(Trainer):
+
+    def _spatial_rank_metrics(self):
+        for module in self.model.modules():
+            metrics = getattr(module, "_spatial_rank_last_metrics", None)
+            if metrics:
+                return metrics
+        return None
+
+    def log(self, logs, *args, **kwargs):
+        metrics = self._spatial_rank_metrics()
+        if metrics:
+            logs = dict(logs)
+            logs.update(metrics)
+        return super().log(logs, *args, **kwargs)
 
     def _build_sampler_generator(self):
         seed = getattr(self.args, "data_seed", None)
