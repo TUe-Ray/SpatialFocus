@@ -34,8 +34,7 @@ H1_OUTPUT="${H1_OUTPUT:-$OUT_ROOT/$RUN_NAME/samples}"
 
 SAMPLE_INDEX="${SAMPLE_INDEX:-0}"
 SAMPLE_COUNT="${SAMPLE_COUNT:-3}"
-MAX_SAMPLE_TRIES="${MAX_SAMPLE_TRIES:-200}"
-MAX_SAVED_FRAMES="${MAX_SAVED_FRAMES:-32}"
+MAX_SAMPLE_TRIES="${MAX_SAMPLE_TRIES:-2000}"
 FRAME="${FRAME:-0}"
 ROI_INDEX="${ROI_INDEX:-105}"
 PROBE_STEPS="${PROBE_STEPS:-300}"
@@ -84,6 +83,7 @@ echo "OURS_CHECKPOINT=$OURS_CHECKPOINT"
 echo "H1_OUTPUT=$H1_OUTPUT"
 echo "SAMPLE_INDEX=$SAMPLE_INDEX"
 echo "SAMPLE_COUNT=$SAMPLE_COUNT"
+echo "FRAME=$FRAME"
 
 python scripts/dump_h1_diagnostic.py \
   --baseline-checkpoint "$BASELINE_CHECKPOINT" \
@@ -100,7 +100,7 @@ python scripts/dump_h1_diagnostic.py \
   --num-samples "$SAMPLE_COUNT" \
   --max-sample-tries "$MAX_SAMPLE_TRIES" \
   --save-input-frames \
-  --max-saved-frames "$MAX_SAVED_FRAMES" \
+  --saved-frame-index "$FRAME" \
   --output "$H1_OUTPUT"
 
 for sample_dir in "$H1_OUTPUT"/sample_*; do

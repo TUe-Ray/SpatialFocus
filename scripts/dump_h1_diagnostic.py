@@ -260,6 +260,7 @@ def find_valid_samples(dataset: LazySupervisedDataset, collator: DataCollatorFor
     end = min(len(dataset), args.sample_index + max(1, args.max_sample_tries))
     last_error = None
     samples = []
+    seen_media = set()
     for idx in range(args.sample_index, end):
         try:
             item = dataset[idx]
@@ -268,9 +269,13 @@ def find_valid_samples(dataset: LazySupervisedDataset, collator: DataCollatorFor
             sf = item["spatial_features"]
             if not isinstance(sf, dict) or "patch_tokens" not in sf:
                 continue
-            batch = collator([item])
             raw_item = dataset.list_data_dict[idx]
+            media_key = tuple(source_media_paths(raw_item, args)) or (str(raw_item.get("id", idx)),)
+            if not args.allow_duplicate_media and media_key in seen_media:
+                continue
+            batch = collator([item])
             samples.append((idx, item, batch, raw_item))
+            seen_media.add(media_key)
             if len(samples) >= args.num_samples:
                 return samples
         except Exception as exc:
@@ -308,7 +313,12 @@ def tensor_to_uint8_image(frame: torch.Tensor, image_processor: Any) -> np.ndarr
     return (frame.permute(1, 2, 0).numpy() * 255.0).round().astype(np.uint8)
 
 
-def save_input_frames(batch: dict[str, Any], image_processor: Any, output_dir: Path, max_frames: int) -> list[str]:
+def save_input_frames(
+    batch: dict[str, Any],
+    image_processor: Any,
+    output_dir: Path,
+    frame_indices: list[int],
+) -> list[str]:
     images = batch.get("images")
     if images is None:
         return []
@@ -329,8 +339,10 @@ def save_input_frames(batch: dict[str, Any], image_processor: Any, output_dir: P
 
     output_dir.mkdir(parents=True, exist_ok=True)
     saved = []
-    frame_count = min(int(tensor.shape[0]), int(max_frames))
-    for frame_idx in range(frame_count):
+    frame_count = int(tensor.shape[0])
+    for frame_idx in frame_indices:
+        if frame_idx < 0 or frame_idx >= frame_count:
+            continue
         frame_path = output_dir / f"frame_{frame_idx:03d}.png"
         Image.fromarray(tensor_to_uint8_image(tensor[frame_idx], image_processor)).save(frame_path)
         saved.append(str(frame_path))
@@ -350,9 +362,10 @@ def write_sample_metadata(
         "sample_id": payload.get("sample_id"),
         "source_media_paths": source_media_paths(raw_item, args),
         "saved_input_frames": saved_frames,
+        "diagnostic_frame_index": args.saved_frame_index,
         "saved_input_frames_note": (
-            "These PNGs are denormalized model input frames after dataset decoding/preprocessing, "
-            "not byte-for-byte copies of the original source media."
+            "These PNGs are the denormalized model input frame(s) used for diagnostics after "
+            "dataset decoding/preprocessing, not byte-for-byte copies of the original source media."
         ),
         "data_keys": sorted(str(key) for key in raw_item.keys()),
         "video": raw_item.get("video"),
@@ -381,6 +394,7 @@ def main() -> None:
     parser.add_argument("--runtime-root", default=str(REPO_ROOT / ".offline_runtime"))
     parser.add_argument("--sample-index", type=int, default=0)
     parser.add_argument("--num-samples", type=int, default=1)
+    parser.add_argument("--allow-duplicate-media", action="store_true")
     parser.add_argument("--max-sample-tries", type=int, default=200)
     parser.add_argument("--data-percentage", type=float, default=100.0)
     parser.add_argument("--frames-upbound", type=int, default=32)
@@ -390,7 +404,7 @@ def main() -> None:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--dtype", default="float16", choices=["float16", "bfloat16"])
     parser.add_argument("--save-input-frames", action="store_true")
-    parser.add_argument("--max-saved-frames", type=int, default=32)
+    parser.add_argument("--saved-frame-index", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -447,7 +461,12 @@ def main() -> None:
         output.parent.mkdir(parents=True, exist_ok=True)
         saved_frames = []
         if args.save_input_frames:
-            saved_frames = save_input_frames(batch, image_processor, output.parent / "input_frames", args.max_saved_frames)
+            saved_frames = save_input_frames(
+                batch,
+                image_processor,
+                output.parent / "input_frames",
+                [args.saved_frame_index],
+            )
         write_sample_metadata(output.parent / "sample_metadata.json", sample_idx, raw_item, payload, saved_frames, args)
         torch.save(payload, output)
         print(f"[DONE] wrote {output}")
