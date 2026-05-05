@@ -12,8 +12,9 @@
 #SBATCH --mem=0
 
 set -euo pipefail
-
-NOTE="Leonardo offline VSI-Bench eval for trained feat_align_cut3r 50p checkpoint."
+PRETRAINED_LOCAL="${PRETRAINED_LOCAL:-/leonardo_work/EUHPC_D32_006/Train_Model/VLM3R/feat_align_cut3r_100p_40723512}"
+RUN_NAME="${RUN_NAME:-feat_align_cut3r_100p_40723512}"
+NOTE="Leonardo offline VSI-Bench eval for trained feat_align_cut3r 100p checkpoint."
 echo "-------- Note --------"
 echo "  note: $NOTE"
 
@@ -27,7 +28,6 @@ HF_HOME="${HF_HOME:-$FAST_ROOT/hf_cache}"
 VSI_ROOT="${VSI_ROOT:-$FAST_ROOT/vsibench}"
 
 MODEL_ROOT="${MODEL_ROOT:-/leonardo_work/EUHPC_D32_006/FAST/hf_models/VLM3R}"
-PRETRAINED_LOCAL="${PRETRAINED_LOCAL:-/leonardo_work/EUHPC_D32_006/Train_Model/VLM3R/feat_align_cut3r_50p_40724606}"
 MODEL_BASE_LOCAL="${MODEL_BASE_LOCAL:-$MODEL_ROOT/LLaVA-NeXT-Video-7B-Qwen2}"
 SIGLIP_LOCAL="${SIGLIP_LOCAL:-$MODEL_ROOT/siglip-so400m-patch14-384}"
 RUNTIME_ROOT="${RUNTIME_ROOT:-$REPO_DIR/.offline_runtime}"
@@ -41,7 +41,7 @@ BATCH_SIZE="${BATCH_SIZE:-1}"
 MAX_FRAMES_NUM="${MAX_FRAMES_NUM:-32}"
 CONV_TEMPLATE="${CONV_TEMPLATE:-qwen_1_5}"
 MODEL_NAME="${MODEL_NAME:-vlm-3r-llava-qwen2-lora}"
-RUN_NAME="${RUN_NAME:-feat_align_cut3r_50p_40724606}"
+
 LIMIT="${LIMIT:-0}"
 
 cd "$REPO_DIR"
