@@ -1,36 +1,69 @@
 #!/bin/bash
-#SBATCH --job-name=cut3r_svf_baseline
+#SBATCH --job-name=rope_cut3r_spherical_100p
 #SBATCH --nodes=4
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
 #SBATCH --cpus-per-task=32
-#SBATCH --time=16:00:00
-#SBATCH --partition=boost_usr_prod  
-#SBATCH --qos=normal # normal/boost_qos_dbg/boost_qos_bprod/boost_qos_Iprod
+#SBATCH --time=00:30:00
+#SBATCH --partition=boost_usr_prod
+#SBATCH --qos=boost_qos_dbg # normal/boost_qos_dbg
 #SBATCH --output=logs/train/%x_%j.out
 #SBATCH --error=logs/train/%x_%j.err
 #SBATCH --mem=0
 #SBATCH --exclude=lrdn0249,lrdn0612,lrdn0568,lrdn2400,lrdn0288,lrdn0418,lrdn0119,lrdn0159,lrdn0080,lrdn0843
 #SBATCH --exclusive
 
+SUFFIX="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
+NOTE="CUT3R Geometry-RoPE fusion: svf_3d_rope with point-map-derived spherical positions, 100% training data"
+
+TRAIN_DATA_PERCENTAGE="100"
+
+MODEL_FUSION_BLOCK="${MODEL_FUSION_BLOCK:-svf_3d_rope}"
+# Fusion options for this Geometry-RoPE experiment:
+# - svf_patch_only
+# - svf_3d_rope
+# - svf_depth_rope / svf_xyz_rope / svf_spherical_rope
+MODEL_GEOMETRY_ROPE_MODE="${MODEL_GEOMETRY_ROPE_MODE:-spherical}"
+MODEL_GEOMETRY_ROPE_MAX_DEPTH="${MODEL_GEOMETRY_ROPE_MAX_DEPTH:-10.0}"
+MODEL_GEOMETRY_ROPE_GROUP_SPLIT="${MODEL_GEOMETRY_ROPE_GROUP_SPLIT:-2,1,2}"
+MODEL_GEOMETRY_ROPE_LOG_STATS="${MODEL_GEOMETRY_ROPE_LOG_STATS:-False}"
+# Group split rules:
+# - svf_depth_rope requires MODEL_GEOMETRY_ROPE_GROUP_SPLIT="1"
+# - svf_xyz_rope uses x,y,z split, e.g. "1,1,1" or "2,1,2"
+# - svf_spherical_rope uses theta,phi,log_r split, e.g. "1,1,1", "2,1,2", or "3,1,3"
+# - svf_3d_rope uses MODEL_GEOMETRY_ROPE_MODE to decide depth/xyz/spherical
+# Run matrix:
+#   baseline:  MODEL_FUSION_BLOCK="svf_patch_only"
+#   depth:     MODEL_FUSION_BLOCK="svf_depth_rope"     MODEL_GEOMETRY_ROPE_GROUP_SPLIT="1"
+#   xyz:       MODEL_FUSION_BLOCK="svf_xyz_rope"       MODEL_GEOMETRY_ROPE_GROUP_SPLIT="1,1,1" or "2,1,2"
+#   spherical: MODEL_FUSION_BLOCK="svf_spherical_rope" MODEL_GEOMETRY_ROPE_GROUP_SPLIT="1,1,1" or "2,1,2" or "3,1,3"
+# ============== Training percentage and shuffling (for ablation) ==============
 
 # ============================================================
 # User-defined variables: General
 # ============================================================
-NOTE="Train VLM3R on VSI-Bench with CUT3R pre-extracted spatial features and svf_baseline fusion (paper-style KV concatenation)."
+DATA_ROOT="/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r"
+SPATIAL_FEATURES_ROOT="/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r"
+SPATIAL_FEATURES_SUBDIR="spatial_features_points"
 CONDA_ENV_NAME="vlm3r"
+
+MODEL_LORA_ENABLE="True"
+MODEL_LORA_R="128"
+MODEL_LORA_ALPHA="256"
+MODEL_SPATIAL_TOWER="cut3r"
+MODEL_SPATIAL_TOWER_SELECT_FEATURE="all_tokens"
+MODEL_SPATIAL_FEATURE_DIM="768"
 
 # ============================================================
 # User-defined variables: Paths
 # ============================================================
-LOCAL_MODEL_BASE="/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/LLaVA-NeXT-Video-7B-Qwen2"
-LOCAL_SIGLIP="/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/siglip-so400m-patch14-384"
-DATA_ROOT="/leonardo_work/EUHPC_D32_006/FAST/train_data/vlm3r"
+LOCAL_MODEL_BASE="/leonardo_work/EUHPC_D32_006/FAST/hf_models/VLM3R/LLaVA-NeXT-Video-7B-Qwen2"
+LOCAL_SIGLIP="/leonardo_work/EUHPC_D32_006/FAST/hf_models/VLM3R/siglip-so400m-patch14-384"
 
 TRAIN_SAVE_ROOT="/leonardo_work/EUHPC_D32_006/Train_Model/VLM3R"
-TRAIN_RUN_NAME="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
-TRAIN_LOG_ROOT="/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/train_log"
-TRAIN_LOG_FILE="$TRAIN_LOG_ROOT/ablation_svf_geometry_bridge_25percent_${SLURM_JOB_ID}.log"
+LOG_DIR="/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/train_log"
+
+
 
 WANDB_DIR="$WORK/wandb"
 WANDB_CACHE_DIR="$WORK/wandb_cache"
@@ -47,38 +80,25 @@ RESUME_MODE="fresh"                 # choices: fresh / continue
 RESUME_CHECKPOINT_PATH="none"       # e.g. /path/to/checkpoint-1000
 ZERO_SPATIAL_FEATURES="False"       # choices: False / True
 SEED=42
-SPATIAL_RANK_LOSS_ENABLE="${SPATIAL_RANK_LOSS_ENABLE:-False}"
-LAMBDA_SIM="${LAMBDA_SIM:-0.01}"
-SPATIAL_RANK_MARGIN="${SPATIAL_RANK_MARGIN:-0.2}"
-ANCHORS_PER_FRAME="${ANCHORS_PER_FRAME:-128}"
-POSITIVE_TOP_PERCENT="${POSITIVE_TOP_PERCENT:-10}"
-NEGATIVE_BOTTOM_PERCENT="${NEGATIVE_BOTTOM_PERCENT:-30}"
-SPATIAL_RANK_DEBUG_CHECKS="${SPATIAL_RANK_DEBUG_CHECKS:-False}"
 
 # ============================================================
 # User-defined variables: Model/Data/Training presets
 # ============================================================
-SUFFIX="vlm_3r_vsibench_cut3r_svf_baseline_lora"
 
-MODEL_LORA_ENABLE="True"
-MODEL_LORA_R="128"
-MODEL_LORA_ALPHA="256"
-MODEL_SPATIAL_TOWER="cut3r"
-MODEL_SPATIAL_TOWER_SELECT_FEATURE="all_tokens"
-MODEL_SPATIAL_FEATURE_DIM="768"
-MODEL_FUSION_BLOCK="svf_baseline"
-MODEL_GEOMETRY_ROPE_MODE="spherical"
-MODEL_GEOMETRY_ROPE_MAX_DEPTH="10.0"
-MODEL_GEOMETRY_ROPE_GROUP_SPLIT="2,1,2"
-MODEL_GEOMETRY_ROPE_LOG_STATS="False"
+
+TRAIN_DATA_PERCENTAGE_SEED="$SEED"
+TRAIN_DATA_SHUFFLE="True"
+DETERMINISTIC_DATA_ORDER="True"
+
+
 MODEL_TUNE_SPATIAL_TOWER="False"
 MODEL_TUNE_FUSION_BLOCK="True"
 MODEL_TUNE_MM_MLP_ADAPTER="True"
 MODEL_VERSION="qwen_1_5"
 MODEL_MM_PROJECTOR_TYPE="mlp2x_gelu"
-MODEL_MM_VISION_SELECT_LAYER="-2"
-MODEL_MM_USE_IM_START_END="False"
-MODEL_MM_USE_IM_PATCH_TOKEN="False"
+MODEL_MM_VISION_SELECT_LAYER="-1"   #  从视觉编码器选择第几层特征
+MODEL_MM_USE_IM_START_END="False"   #是否添加特殊的图像起止标记 <image>...</image>
+MODEL_MM_USE_IM_PATCH_TOKEN="False" #是否使用图像补丁标记（如 <im_patch_0>）来保留空间位置信息，通常配合融合模块的空间池化使用
 MODEL_IMAGE_ASPECT_RATIO="anyres_max_9"
 MODEL_IMAGE_GRID_PINPOINTS="(1x1),...,(6x6)"
 MODEL_MM_PATCH_MERGE_TYPE="spatial_unpad"
@@ -98,6 +118,7 @@ MODEL_MM_SPATIAL_POOL_STRIDE="2"
 DATA_PATH_YAML="scripts/VLM_3R/vsibench_data.yaml"
 DATA_GROUP_BY_MODALITY_LENGTH="True"
 
+
 PER_DEVICE_TRAIN_BATCH_SIZE=1
 TARGET_GLOBAL_BATCH_SIZE=128
 NUM_TRAIN_EPOCHS="1"
@@ -109,7 +130,7 @@ WEIGHT_DECAY="0."
 WARMUP_RATIO="0.03"
 LR_SCHEDULER_TYPE="cosine"
 LOGGING_STEPS="5"
-DATALOADER_NUM_WORKERS="8"
+DATALOADER_NUM_WORKERS="6"
 REPORT_TO="wandb"
 DATALOADER_DROP_LAST="True"
 
@@ -119,7 +140,7 @@ DATALOADER_DROP_LAST="True"
 echo "-------- Note --------"
 echo "  note: $NOTE"
 mkdir -p logs/train
-mkdir -p "$TRAIN_LOG_ROOT"
+mkdir -p "$LOG_DIR"
 
 JOB_TIME_LIMIT=$(squeue -j "$SLURM_JOB_ID" -h -o "%l")
 
@@ -226,12 +247,7 @@ echo "[DDP] NUM_GPUS_PER_NODE=$NUM_GPUS_PER_NODE WORLD_SIZE=$WORLD_SIZE"
 # ============================================================
 # Save/Resume Configuration
 # ============================================================
-DEFAULT_RUN_NAME="llava_video_7b_qwen2_${SUFFIX}"
-if [[ -n "$TRAIN_RUN_NAME" ]]; then
-    MID_RUN_NAME="$TRAIN_RUN_NAME"
-else
-    MID_RUN_NAME="$DEFAULT_RUN_NAME"
-fi
+MID_RUN_NAME="$SUFFIX"
 OUTPUT_DIR="$TRAIN_SAVE_ROOT/$MID_RUN_NAME"
 mkdir -p "$OUTPUT_DIR"
 
@@ -272,7 +288,77 @@ echo "[BATCH] GRADIENT_ACCUMULATION_STEPS=$GRADIENT_ACCUMULATION_STEPS"
 #   False -> use normal spatial_features (.pt)
 #   True  -> load .pt and zero all tensor values
 echo "[ABLATION] ZERO_SPATIAL_FEATURES=$ZERO_SPATIAL_FEATURES"
-echo "[SPATIAL_RANK] ENABLE=$SPATIAL_RANK_LOSS_ENABLE LAMBDA_SIM=$LAMBDA_SIM MARGIN=$SPATIAL_RANK_MARGIN"
+
+# Alias fusion blocks define their own Geometry-RoPE coordinate mode.
+# This keeps Slurm submissions robust even when MODEL_GEOMETRY_ROPE_MODE
+# is not explicitly exported for depth/xyz/spherical aliases.
+case "$MODEL_FUSION_BLOCK" in
+    svf_depth_rope)
+        MODEL_GEOMETRY_ROPE_MODE="depth"
+        ;;
+    svf_xyz_rope)
+        MODEL_GEOMETRY_ROPE_MODE="xyz"
+        ;;
+    svf_spherical_rope)
+        MODEL_GEOMETRY_ROPE_MODE="spherical"
+        ;;
+esac
+
+# Validate fusion option and print method summary for reproducibility.
+VALID_FUSION_BLOCKS=(
+    "svf_patch_only"
+    "svf_3d_rope"
+    "svf_depth_rope"
+    "svf_xyz_rope"
+    "svf_spherical_rope"
+)
+VALID_GEOMETRY_ROPE_MODES=("depth" "xyz" "spherical")
+IS_VALID_FUSION="False"
+for fusion_name in "${VALID_FUSION_BLOCKS[@]}"; do
+    if [[ "$MODEL_FUSION_BLOCK" == "$fusion_name" ]]; then
+        IS_VALID_FUSION="True"
+        break
+    fi
+done
+
+if [[ "$IS_VALID_FUSION" != "True" ]]; then
+    echo "[ERROR] Unsupported MODEL_FUSION_BLOCK: $MODEL_FUSION_BLOCK"
+    echo "[ERROR] Supported values: ${VALID_FUSION_BLOCKS[*]}"
+    exit 1
+fi
+
+IS_VALID_GEOMETRY_ROPE_MODE="False"
+for rope_mode in "${VALID_GEOMETRY_ROPE_MODES[@]}"; do
+    if [[ "$MODEL_GEOMETRY_ROPE_MODE" == "$rope_mode" ]]; then
+        IS_VALID_GEOMETRY_ROPE_MODE="True"
+        break
+    fi
+done
+
+if [[ "$IS_VALID_GEOMETRY_ROPE_MODE" != "True" ]]; then
+    echo "[ERROR] Unsupported MODEL_GEOMETRY_ROPE_MODE: $MODEL_GEOMETRY_ROPE_MODE"
+    echo "[ERROR] Supported values: ${VALID_GEOMETRY_ROPE_MODES[*]}"
+    exit 1
+fi
+
+echo "[FUSION] MODEL_FUSION_BLOCK=$MODEL_FUSION_BLOCK"
+case "$MODEL_FUSION_BLOCK" in
+    svf_patch_only)
+        echo "[FUSION] svf_patch_only: baseline patch-only cross-attention, Q=2D, KV=patch_tokens"
+        ;;
+    svf_3d_rope)
+        echo "[FUSION] svf_3d_rope: Geometry-RoPE cross-attention, mode=$MODEL_GEOMETRY_ROPE_MODE, split=$MODEL_GEOMETRY_ROPE_GROUP_SPLIT"
+        ;;
+    svf_depth_rope)
+        echo "[FUSION] svf_depth_rope: Geometry-RoPE cross-attention, mode=depth, split=$MODEL_GEOMETRY_ROPE_GROUP_SPLIT"
+        ;;
+    svf_xyz_rope)
+        echo "[FUSION] svf_xyz_rope: Geometry-RoPE cross-attention, mode=xyz, split=$MODEL_GEOMETRY_ROPE_GROUP_SPLIT"
+        ;;
+    svf_spherical_rope)
+        echo "[FUSION] svf_spherical_rope: Geometry-RoPE cross-attention, mode=spherical, split=$MODEL_GEOMETRY_ROPE_GROUP_SPLIT"
+        ;;
+esac
 
 declare -A MODEL_ARGS=(
     [model_name_or_path]="$LOCAL_MODEL_BASE"
@@ -317,8 +403,13 @@ declare -A DATA_ARGS=(
     [data_path]="$DATA_PATH_YAML"
     [image_folder]="$DATA_ROOT"
     [video_folder]="$DATA_ROOT"
-    [spatial_features_subdir]="spatial_features"
     [zero_spatial_features]="$ZERO_SPATIAL_FEATURES"
+    [spatial_features_root]="$SPATIAL_FEATURES_ROOT"
+    [spatial_features_subdir]="$SPATIAL_FEATURES_SUBDIR"
+    [train_data_percentage]="$TRAIN_DATA_PERCENTAGE"
+    [train_data_percentage_seed]="$TRAIN_DATA_PERCENTAGE_SEED"
+    [train_data_shuffle]="$TRAIN_DATA_SHUFFLE"
+    [deterministic_data_order]="$DETERMINISTIC_DATA_ORDER"
     [group_by_modality_length]="$DATA_GROUP_BY_MODALITY_LENGTH"   #控制 dataloader sampler 是否按模態長度分組（
                                         #通常可減少 padding、讓 batch 更穩定）
 )
@@ -347,13 +438,6 @@ declare -A TRAINING_ARGS=(
     [dataloader_drop_last]="$DATALOADER_DROP_LAST"
     [seed]="$SEED"
     [data_seed]="$SEED"
-    [spatial_rank_loss_enable]="$SPATIAL_RANK_LOSS_ENABLE"
-    [lambda_sim]="$LAMBDA_SIM"
-    [spatial_rank_margin]="$SPATIAL_RANK_MARGIN"
-    [anchors_per_frame]="$ANCHORS_PER_FRAME"
-    [positive_top_percent]="$POSITIVE_TOP_PERCENT"
-    [negative_bottom_percent]="$NEGATIVE_BOTTOM_PERCENT"
-    [spatial_rank_debug_checks]="$SPATIAL_RANK_DEBUG_CHECKS"
 )
 
 echo "========================================"
@@ -362,7 +446,7 @@ echo "========================================"
 
 echo "--- Resume ---"
 echo "  TRAIN_SAVE_ROOT:                     $TRAIN_SAVE_ROOT"
-echo "  TRAIN_RUN_NAME:                      $MID_RUN_NAME"
+echo "  OUTPUT_RUN_NAME (job+id):            $MID_RUN_NAME"
 echo "  OUTPUT_DIR:                          $OUTPUT_DIR"
 echo "  RESUME_MODE:                         $RESUME_MODE"
 echo "  RESUME_CHECKPOINT_PATH:             $RESUME_CHECKPOINT_PATH"
@@ -416,6 +500,6 @@ srun --export=ALL torchrun \
         --rdzv_endpoint="$MASTER_ADDR:$MASTER_PORT" \
         llava/train/train_mem.py \
         "${TORCHRUN_ARGS[@]}"
-    2>&1 | tee "$TRAIN_LOG_FILE"
+    2>&1 | tee "$LOG_DIR/${SUFFIX}.log"
 
 exit 0

@@ -55,6 +55,12 @@ from llava.model.language_model.llava_llama import LlavaConfig
 AutoConfig.register("llava_llama", LlavaConfig)
 
 
+def _str_to_bool(value):
+    if isinstance(value, str):
+        return value.lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
 @register_model("vlm_3r")
 class Vlm3r(lmms):
     """
@@ -88,6 +94,16 @@ class Vlm3r(lmms):
         model_name: str = None,
         model_base: str = None,
         zero_spatial_features: Union[bool, str] = False,
+        spatial_tower: str = None,
+        spatial_feature_dim: Optional[Union[int, str]] = None,
+        spatial_tower_select_feature: str = None,
+        fusion_block: str = None,
+        geometry_rope_mode: str = None,
+        geometry_rope_max_depth: Optional[Union[float, str]] = None,
+        geometry_rope_group_split: str = None,
+        geometry_rope_log_stats: Union[bool, str] = False,
+        spatial_features_root: str = None,
+        spatial_features_subdir: str = "spatial_features_points",
         **kwargs,
     ) -> None:
         super().__init__()
@@ -122,10 +138,17 @@ class Vlm3r(lmms):
         self.mm_newline_position = mm_newline_position
         self.delay_load = delay_load
         self.attn_implementation = attn_implementation
-        if isinstance(zero_spatial_features, str):
-            self.zero_spatial_features = zero_spatial_features.lower() in {"1", "true", "yes", "y", "on"}
-        else:
-            self.zero_spatial_features = bool(zero_spatial_features)
+        self.zero_spatial_features = _str_to_bool(zero_spatial_features)
+        self.spatial_tower = spatial_tower or None
+        self.spatial_feature_dim = int(spatial_feature_dim) if spatial_feature_dim not in (None, "") else None
+        self.spatial_tower_select_feature = spatial_tower_select_feature or None
+        self.fusion_block = fusion_block or None
+        self.geometry_rope_mode = geometry_rope_mode or None
+        self.geometry_rope_max_depth = float(geometry_rope_max_depth) if geometry_rope_max_depth not in (None, "") else None
+        self.geometry_rope_group_split = geometry_rope_group_split or None
+        self.geometry_rope_log_stats = _str_to_bool(geometry_rope_log_stats)
+        self.spatial_features_root = Path(spatial_features_root) if spatial_features_root not in (None, "") else None
+        self.spatial_features_subdir = spatial_features_subdir or "spatial_features_points"
 
         if self.overwrite == True:
             overwrite_config = {}
@@ -138,6 +161,21 @@ class Vlm3r(lmms):
             overwrite_config["add_faster_video"] = False
             overwrite_config["delay_load"] = self.delay_load
             overwrite_config["zero_spatial_features"] = self.zero_spatial_features
+            if self.spatial_tower is not None:
+                overwrite_config["spatial_tower"] = self.spatial_tower
+            if self.spatial_feature_dim is not None:
+                overwrite_config["spatial_feature_dim"] = self.spatial_feature_dim
+            if self.spatial_tower_select_feature is not None:
+                overwrite_config["spatial_tower_select_feature"] = self.spatial_tower_select_feature
+            if self.fusion_block is not None:
+                overwrite_config["fusion_block"] = self.fusion_block
+            if self.geometry_rope_mode is not None:
+                overwrite_config["geometry_rope_mode"] = self.geometry_rope_mode
+            if self.geometry_rope_max_depth is not None:
+                overwrite_config["geometry_rope_max_depth"] = self.geometry_rope_max_depth
+            if self.geometry_rope_group_split is not None:
+                overwrite_config["geometry_rope_group_split"] = self.geometry_rope_group_split
+            overwrite_config["geometry_rope_log_stats"] = self.geometry_rope_log_stats
             # overwrite_config["attn_implementation"] = attn_implementation
 
             cfg_pretrained = AutoConfig.from_pretrained(self.pretrained)
@@ -226,6 +264,20 @@ class Vlm3r(lmms):
             resolved_attn_implementation,
         )
         eval_logger.info("[ABLATION][EVAL] zero_spatial_features={}", self.zero_spatial_features)
+        eval_logger.info(
+            "[ROPE][EVAL] fusion_block={}, geometry_rope_mode={}, group_split={}, max_depth={}, log_stats={}",
+            getattr(self._config, "fusion_block", None),
+            getattr(self._config, "geometry_rope_mode", None),
+            getattr(self._config, "geometry_rope_group_split", None),
+            getattr(self._config, "geometry_rope_max_depth", None),
+            getattr(self._config, "geometry_rope_log_stats", None),
+        )
+        eval_logger.info(
+            "[SPATIAL][EVAL] spatial_tower={}, spatial_features_root={}, spatial_features_subdir={}",
+            getattr(self._config, "spatial_tower", None),
+            self.spatial_features_root,
+            self.spatial_features_subdir,
+        )
         self.model.eval()
         if tie_weights:
             self.model.tie_weights()
@@ -351,10 +403,15 @@ class Vlm3r(lmms):
             visuals = [doc_to_visual(self.task_dict[task][split][doc_id])]
             visuals = self.flatten(visuals)
             videos = []
+            spatial_features = []
             for visual in visuals:
                 video = self.load_video(visual, self.max_frames_num)
                 video = self._image_processor.preprocess(video, return_tensors="pt")["pixel_values"].half().cuda()
                 videos.append(video)
+                sidecar = self._load_spatial_sidecar(visual)
+                if sidecar is not None:
+                    spatial_features.append(sidecar)
+            spatial_features = spatial_features if len(spatial_features) > 0 else None
 
             qs = contexts
             if self.model.config.mm_use_im_start_end:
@@ -382,7 +439,7 @@ class Vlm3r(lmms):
             labels[0, : contxt_id.shape[1]] = -100
 
             with torch.inference_mode():
-                outputs = self.model(input_ids=input_ids, labels=labels, images=videos, modalities="video")
+                outputs = self.model(input_ids=input_ids, labels=labels, images=videos, spatial_features=spatial_features, modalities="video")
 
             loss = outputs["loss"]
             # loss = torch.exp(loss)
@@ -403,6 +460,57 @@ class Vlm3r(lmms):
                 new_list.append(j)
         return new_list
 
+    def _requires_geometry_rope_sidecar(self):
+        fusion_block = self.fusion_block or getattr(self._config, "fusion_block", None)
+        return fusion_block in {"svf_3d_rope", "svf_depth_rope", "svf_xyz_rope", "svf_spherical_rope"}
+
+    def _spatial_sidecar_candidates(self, video_path):
+        if self.spatial_features_root is None:
+            return []
+
+        video_path = Path(video_path)
+        candidates = []
+        datasets = ("scannetpp", "scannet", "arkitscenes")
+
+        for dataset in datasets:
+            if dataset not in video_path.parts:
+                continue
+
+            dataset_idx = video_path.parts.index(dataset)
+            tail_parts = video_path.parts[dataset_idx + 1 :]
+            if len(tail_parts) > 0 and tail_parts[0] == "videos":
+                tail_parts = tail_parts[1:]
+
+            if len(tail_parts) == 0:
+                continue
+
+            rel_path = Path(dataset) / self.spatial_features_subdir / Path(*tail_parts)
+            candidates.append((self.spatial_features_root / rel_path).with_suffix(".pt"))
+
+        return candidates
+
+    def _load_spatial_sidecar(self, video_path):
+        if self.spatial_features_root is None:
+            if self._requires_geometry_rope_sidecar():
+                raise RuntimeError("Geometry-RoPE eval requires spatial_features_root for CUT3R point-map sidecars.")
+            return None
+
+        candidates = self._spatial_sidecar_candidates(video_path)
+        for candidate in candidates:
+            if not candidate.is_file():
+                continue
+
+            sidecar = torch.load(str(candidate), map_location="cpu")
+            if isinstance(sidecar, dict) and "point_maps_cam" in sidecar and "point_maps" not in sidecar:
+                sidecar = dict(sidecar)
+                sidecar["point_maps"] = sidecar["point_maps_cam"]
+            return sidecar
+
+        if self._requires_geometry_rope_sidecar():
+            pretty = ", ".join(str(path) for path in candidates) or "<no candidates>"
+            raise FileNotFoundError(f"Missing CUT3R point-map sidecar for {video_path}. Tried: {pretty}")
+        return None
+
     def generate_until(self, requests) -> List[str]:
         res = []
         pbar = tqdm(total=len(requests), disable=(self.rank != 0), desc="Model Responding")
@@ -413,6 +521,7 @@ class Vlm3r(lmms):
             if visuals != [None]:
                 visuals = self.flatten(visuals)
                 videos = []
+                spatial_features = []
                 try:
                     for visual in visuals:
                         if self.video_decode_backend == "decord":
@@ -422,6 +531,9 @@ class Vlm3r(lmms):
                         # video = self.load_video(visual, self.max_frames_num)
                         video = self._image_processor.preprocess(video, return_tensors="pt")["pixel_values"].half().cuda()
                         videos.append(video)
+                        sidecar = self._load_spatial_sidecar(visual)
+                        if sidecar is not None:
+                            spatial_features.append(sidecar)
                 except Exception as e:
                     eval_logger.info(f"{e}")
                     eval_logger.info(f"Video {visuals} can not load, check the source")
@@ -429,6 +541,7 @@ class Vlm3r(lmms):
                     res.append(f"Video {video_path} can not load, check the source")
                     pbar.update(1)
                     continue
+                spatial_features = spatial_features if len(spatial_features) > 0 else None
 
                 qs = contexts
                 if self.model.config.mm_use_im_start_end:
@@ -437,6 +550,7 @@ class Vlm3r(lmms):
                     qs = DEFAULT_IMAGE_TOKEN * len(videos) + "\n" + qs
             else:
                 videos = None
+                spatial_features = None
                 qs = contexts
 
             # This is much safer for llama3, as we now have some object type in it
@@ -473,6 +587,7 @@ class Vlm3r(lmms):
                 output_ids = self.model.generate(
                     inputs=input_ids,
                     images=videos,
+                    spatial_features=spatial_features,
                     attention_mask=attention_masks,
                     modalities=["video" for _ in videos] if videos is not None else None,
                     use_cache=self.use_cache,

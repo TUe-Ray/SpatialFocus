@@ -1,5 +1,7 @@
+import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import re
 from .cross_attention_transformers import MultiLayerCrossAttentionFusion
 from .cross_attention_mlp import CrossAttentionFusionWithMLP
@@ -65,6 +67,276 @@ class CrossAttentionFusion(nn.Module):
         fused_features = self.dropout(fused_features)
         
         return fused_features, attn_weights
+
+
+class GeometryRoPE(nn.Module):
+    def __init__(self, head_dim, mode="spherical", theta=10000, max_depth=10.0, group_split=None):
+        super().__init__()
+        if mode not in {"depth", "xyz", "spherical"}:
+            raise ValueError(f"Unexpected geometry_rope_mode: {mode}")
+
+        self.head_dim = int(head_dim)
+        self.mode = mode
+        self.theta = theta
+        self.max_depth = float(max_depth)
+        if self.max_depth <= 0:
+            raise ValueError(f"geometry_rope_max_depth must be positive, got {max_depth}")
+
+        weights, self.group_split = self._parse_group_split(group_split, mode)
+        group_dims = self._split_even_dims(self.head_dim, weights=weights)
+        self.group_dims = group_dims
+
+        for idx, group_dim in enumerate(group_dims):
+            inv_freq = self._build_inv_freq(group_dim)
+            self.register_buffer(f"inv_freq_{idx}", inv_freq, persistent=False)
+
+    @staticmethod
+    def _parse_group_split(group_split, mode):
+        if mode == "depth":
+            if group_split is None or str(group_split).strip() == "1":
+                return [1], "1"
+            raise ValueError("depth mode expects group_split='1' or None")
+
+        if group_split is None:
+            group_split = "2,1,2"
+
+        try:
+            weights = [int(value.strip()) for value in str(group_split).split(",")]
+        except ValueError as exc:
+            raise ValueError(f"{mode} mode group_split must contain integers: {group_split}") from exc
+
+        if len(weights) != 3:
+            raise ValueError(f"{mode} mode expects exactly 3 split values")
+        if any(weight <= 0 for weight in weights):
+            raise ValueError("group split values must be positive")
+        return weights, ",".join(str(weight) for weight in weights)
+
+    @staticmethod
+    def _split_even_dims(head_dim, weights):
+        num_pairs = head_dim // 2
+        total_weight = sum(weights)
+        pair_counts = [(num_pairs * weight) // total_weight for weight in weights]
+        pair_counts[-1] += num_pairs - sum(pair_counts)
+        return [2 * count for count in pair_counts]
+
+    def _build_inv_freq(self, group_dim):
+        if group_dim <= 0:
+            return torch.empty(0)
+        return 1.0 / (self.theta ** (torch.arange(0, group_dim, 2).float() / group_dim))
+
+    def _position_values(self, pos):
+        pos = torch.nan_to_num(pos.float(), nan=0.0, posinf=self.max_depth, neginf=-self.max_depth)
+        x = pos[..., 0]
+        y = pos[..., 1]
+        z = pos[..., 2]
+
+        if self.mode == "depth":
+            depth = z.clamp(min=0.0, max=self.max_depth)
+            return [torch.log1p(depth) / math.log1p(self.max_depth)]
+
+        if self.mode == "xyz":
+            scale = max(self.max_depth, 1e-6)
+            x = (x / scale).clamp(min=-1.0, max=1.0)
+            y = (y / scale).clamp(min=-1.0, max=1.0)
+            z = z.clamp(min=0.0, max=self.max_depth)
+            z = torch.log1p(z) / math.log1p(self.max_depth)
+            return [x, y, z]
+
+        radius_xz = torch.sqrt(x * x + z * z + 1e-6)
+        r = torch.sqrt(x * x + y * y + z * z + 1e-6)
+        azimuth = torch.atan2(x, z)
+        elevation = torch.atan2(y, radius_xz)
+        log_r = torch.log1p(r.clamp(max=self.max_depth)) / math.log1p(self.max_depth)
+        return [azimuth, elevation, log_r]
+
+    @staticmethod
+    def _rotate_group(x_group, position_value, inv_freq):
+        if x_group.shape[-1] == 0:
+            return x_group
+
+        inv_freq = inv_freq.to(device=x_group.device, dtype=position_value.dtype)
+        angle = position_value.unsqueeze(-1) * inv_freq
+        cos = angle.cos().unsqueeze(1).to(dtype=x_group.dtype)
+        sin = angle.sin().unsqueeze(1).to(dtype=x_group.dtype)
+
+        x_even = x_group[..., 0::2]
+        x_odd = x_group[..., 1::2]
+        rot_even = x_even * cos - x_odd * sin
+        rot_odd = x_even * sin + x_odd * cos
+        return torch.stack((rot_even, rot_odd), dim=-1).flatten(-2)
+
+    def forward(self, x, pos):
+        """
+        Args:
+            x: [B, H, N, head_dim]
+            pos: [B, N, 3]
+        Returns:
+            x_rotated: [B, H, N, head_dim]
+        """
+        if x.dim() != 4:
+            raise ValueError(f"GeometryRoPE expects x as [B, H, N, D], got {tuple(x.shape)}")
+        if pos.dim() != 3 or pos.shape[-1] != 3:
+            raise ValueError(f"GeometryRoPE expects pos as [B, N, 3], got {tuple(pos.shape)}")
+        if x.shape[0] != pos.shape[0] or x.shape[2] != pos.shape[1]:
+            raise ValueError(
+                "GeometryRoPE position shape must match x batch/token dims, "
+                f"got x={tuple(x.shape)} and pos={tuple(pos.shape)}"
+            )
+
+        position_values = self._position_values(pos.to(device=x.device))
+        rotated_groups = []
+        start = 0
+        for idx, group_dim in enumerate(self.group_dims):
+            end = start + group_dim
+            x_group = x[..., start:end]
+            inv_freq = getattr(self, f"inv_freq_{idx}")
+            rotated_groups.append(self._rotate_group(x_group, position_values[idx], inv_freq))
+            start = end
+
+        if start < x.shape[-1]:
+            rotated_groups.append(x[..., start:])
+        return torch.cat(rotated_groups, dim=-1)
+
+
+class CrossAttentionFusion3DRoPE(nn.Module):
+    def __init__(
+        self,
+        d_clip,
+        d_spatial_encoder,
+        d_attn,
+        num_heads,
+        rope_mode="spherical",
+        max_depth=10.0,
+        group_split=None,
+        log_stats=False,
+        dropout_rate=0.1,
+    ):
+        super().__init__()
+        if d_attn % num_heads != 0:
+            raise ValueError(f"d_attn ({d_attn}) must be divisible by num_heads ({num_heads})")
+
+        self.d_attn = d_attn
+        self.num_heads = num_heads
+        self.head_dim = d_attn // num_heads
+
+        self.clip_norm = nn.LayerNorm(d_clip)
+        self.spatial_encoder_norm = nn.LayerNorm(d_spatial_encoder)
+
+        self.clip_query_proj = nn.Linear(d_clip, d_attn)
+        self.spatial_encoder_key_proj = nn.Linear(d_spatial_encoder, d_attn)
+        self.spatial_encoder_value_proj = nn.Linear(d_spatial_encoder, d_attn)
+
+        # Manual equivalent of nn.MultiheadAttention's internal projections.
+        self.attn_query_proj = nn.Linear(d_attn, d_attn)
+        self.attn_key_proj = nn.Linear(d_attn, d_attn)
+        self.attn_value_proj = nn.Linear(d_attn, d_attn)
+        self.attn_out_proj = nn.Linear(d_attn, d_attn)
+        self._reset_attention_parameters()
+
+        self.geometry_rope = GeometryRoPE(
+            head_dim=self.head_dim,
+            mode=rope_mode,
+            max_depth=max_depth,
+            group_split=group_split,
+        )
+        self.rope_gate_q = nn.Parameter(torch.zeros(()))
+        self.rope_gate_k = nn.Parameter(torch.zeros(()))
+
+        self.out_proj = nn.Linear(d_attn, d_clip)
+        self.out_norm = nn.LayerNorm(d_clip)
+        self.dropout = nn.Dropout(dropout_rate)
+        self.log_stats = log_stats
+        self.last_geometry_rope_stats = {
+            "group_split": self.geometry_rope.group_split,
+            "group_dims": list(self.geometry_rope.group_dims),
+        }
+
+    def _reset_attention_parameters(self):
+        in_proj_weight = torch.empty(3 * self.d_attn, self.d_attn)
+        nn.init.xavier_uniform_(in_proj_weight)
+        with torch.no_grad():
+            self.attn_query_proj.weight.copy_(in_proj_weight[:self.d_attn])
+            self.attn_key_proj.weight.copy_(in_proj_weight[self.d_attn:2 * self.d_attn])
+            self.attn_value_proj.weight.copy_(in_proj_weight[2 * self.d_attn:])
+            self.attn_query_proj.bias.zero_()
+            self.attn_key_proj.bias.zero_()
+            self.attn_value_proj.bias.zero_()
+
+    def _reshape_to_heads(self, x):
+        bsz, seq_len, _ = x.shape
+        return x.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+
+    def _merge_heads(self, x):
+        bsz, _, seq_len, _ = x.shape
+        return x.transpose(1, 2).contiguous().view(bsz, seq_len, self.d_attn)
+
+    @staticmethod
+    def _mean_std(x):
+        x = x.detach().float()
+        return {
+            "mean": x.mean().item(),
+            "std": x.std(unbiased=False).item(),
+        }
+
+    def _record_stats(self, pos_clip, pos_spatial, q_delta, k_delta):
+        self.last_geometry_rope_stats = {
+            "pos_clip": self._mean_std(pos_clip),
+            "pos_spatial": self._mean_std(pos_spatial),
+            "q_rope_minus_q": self._mean_std(q_delta),
+            "k_rope_minus_k": self._mean_std(k_delta),
+            "rope_gate_q": float(self.rope_gate_q.detach().float().item()),
+            "rope_gate_k": float(self.rope_gate_k.detach().float().item()),
+            "group_split": self.geometry_rope.group_split,
+            "group_dims": list(self.geometry_rope.group_dims),
+        }
+
+    def forward(self, clip_features, spatial_encoder_features, pos_clip, pos_spatial):
+        """
+        Args:
+            clip_features: [B, N_clip, D_clip]
+            spatial_encoder_features: [B, N_spatial, D_spatial_encoder]
+            pos_clip: [B, N_clip, 3]
+            pos_spatial: [B, N_spatial, 3]
+        Returns:
+            fused_features: [B, N_clip, D_clip]
+            attn_weights: [B, N_clip, N_spatial]
+        """
+        clip_features_norm = self.clip_norm(clip_features)
+        spatial_encoder_features_norm = self.spatial_encoder_norm(spatial_encoder_features)
+
+        q = self.clip_query_proj(clip_features_norm)
+        k = self.spatial_encoder_key_proj(spatial_encoder_features_norm)
+        v = self.spatial_encoder_value_proj(spatial_encoder_features_norm)
+
+        q = self.attn_query_proj(q)
+        k = self.attn_key_proj(k)
+        v = self.attn_value_proj(v)
+
+        q = self._reshape_to_heads(q)
+        k = self._reshape_to_heads(k)
+        v = self._reshape_to_heads(v)
+
+        q_rope = self.geometry_rope(q, pos_clip)
+        k_rope = self.geometry_rope(k, pos_spatial)
+        q_delta = q_rope - q
+        k_delta = k_rope - k
+        if self.log_stats:
+            self._record_stats(pos_clip, pos_spatial, q_delta, k_delta)
+
+        q = q + self.rope_gate_q * q_delta
+        k = k + self.rope_gate_k * k_delta
+
+        attn = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        attn = F.softmax(attn.float(), dim=-1).to(dtype=q.dtype)
+        out = torch.matmul(attn, v)
+
+        out = self._merge_heads(out)
+        out = self.attn_out_proj(out)
+        out = self.out_proj(out)
+        out = self.out_norm(out)
+        out = clip_features + out
+        out = self.dropout(out)
+        return out, attn.mean(dim=1)
 
 
 class PatchCrossAttentionCameraConcatFusion(nn.Module):
@@ -492,6 +764,11 @@ class ConcatSelfAttentionFusion(nn.Module):
 
 def build_multimodal_fusion_block(config, delay_load=False, **kwargs):
     fusion_block_type = getattr(config, "fusion_block", "cross_attention")
+    rope_mode_aliases = {
+        "svf_depth_rope": "depth",
+        "svf_xyz_rope": "xyz",
+        "svf_spherical_rope": "spherical",
+    }
     d_clip = config.mm_hidden_size
     d_llm = config.hidden_size
     d_attn = d_clip
@@ -584,6 +861,28 @@ def build_multimodal_fusion_block(config, delay_load=False, **kwargs):
             d_spatial_encoder=d_spatial_encoder,
             d_attn=d_attn,
             num_heads=18,
+        )
+    elif fusion_block_type == "svf_3d_rope" or fusion_block_type in rope_mode_aliases:
+        if fusion_block_type == "svf_depth_rope":
+            rope_mode = "depth"
+        elif fusion_block_type == "svf_xyz_rope":
+            rope_mode = "xyz"
+        elif fusion_block_type == "svf_spherical_rope":
+            rope_mode = "spherical"
+        else:
+            rope_mode = getattr(config, "geometry_rope_mode", "spherical")
+        log_stats = getattr(config, "geometry_rope_log_stats", False)
+        if isinstance(log_stats, str):
+            log_stats = log_stats.lower() in {"1", "true", "yes", "y", "on"}
+        return CrossAttentionFusion3DRoPE(
+            d_clip=d_clip,
+            d_spatial_encoder=d_spatial_encoder,
+            d_attn=d_attn,
+            num_heads=18,
+            rope_mode=rope_mode,
+            max_depth=getattr(config, "geometry_rope_max_depth", 10.0),
+            group_split=getattr(config, "geometry_rope_group_split", None),
+            log_stats=log_stats,
         )
     elif fusion_block_type == "svf_cat_feat":
         # Comparison 1: feature-dim concat of [camera, patch] as KV.
