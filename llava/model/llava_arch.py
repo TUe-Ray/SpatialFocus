@@ -567,6 +567,11 @@ class LlavaMetaForCausalLM(ABC):
         self._spatial_rank_grad_checked = True
 
         groups = {"p_geo": [], "block0_lora": [], "block1plus_lora": [], "upstream": []}
+        frozen_p_geo = bool(getattr(self.config, "freeze_spatial_rank_head", False))
+        if frozen_p_geo and getattr(self, "spatial_rank_head", None) is not None:
+            assert all(not param.requires_grad for param in self.spatial_rank_head.parameters()), (
+                "freeze_spatial_rank_head=True but at least one P_geo parameter is trainable."
+            )
         for name, param in self.named_parameters():
             if not param.requires_grad:
                 continue
@@ -607,7 +612,8 @@ class LlavaMetaForCausalLM(ABC):
         for (key, name), grad in zip(check_names, grads):
             by_group[key].append((name, grad))
 
-        for key in ("p_geo", "block0_lora", "upstream"):
+        required_gradient_groups = ("block0_lora", "upstream") if frozen_p_geo else ("p_geo", "block0_lora", "upstream")
+        for key in required_gradient_groups:
             if groups[key]:
                 assert any(grad is not None and torch.isfinite(grad).all() and grad.abs().sum() > 0 for _, grad in by_group[key]), (
                     f"Expected rank-loss gradient for {key}, but none was found."
@@ -759,6 +765,7 @@ class LlavaMetaForCausalLM(ABC):
             "spatial_rank_student_sim_pos": float(torch.stack(student_pos_values).mean().detach().float().item()),
             "spatial_rank_student_sim_neg": float(torch.stack(student_neg_values).mean().detach().float().item()),
             "spatial_rank_accuracy": float(torch.stack(accuracies).mean().detach().float().item()),
+            "spatial_rank_head_frozen": bool(getattr(self.config, "freeze_spatial_rank_head", False)),
         })
         self._spatial_rank_debug_printed = True
         return rank_loss, metrics

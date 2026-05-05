@@ -297,6 +297,8 @@ class TrainingArguments(transformers.TrainingArguments):
     anchors_per_frame: int = field(default=128, metadata={"help": "Number of anchor visual tokens sampled per frame."})
     positive_top_percent: float = field(default=10.0, metadata={"help": "Teacher-similarity top percent used as positive pool."})
     negative_bottom_percent: float = field(default=30.0, metadata={"help": "Teacher-similarity bottom percent used as negative pool."})
+    spatial_rank_head_path: str = field(default="", metadata={"help": "Optional path to a saved spatial_rank_head/P_geo state dict."})
+    freeze_spatial_rank_head: bool = field(default=False, metadata={"help": "Freeze spatial_rank_head/P_geo parameters while keeping its forward pass differentiable."})
     spatial_rank_debug_checks: bool = field(default=False, metadata={"help": "Run one-time expensive spatial-rank assertions and gradient checks."})
     
     group_by_varlen: bool = field(default=False)
@@ -407,6 +409,89 @@ def find_spatial_rank_model(model):
     if hasattr(model, "initialize_spatial_rank_head"):
         return model
     raise RuntimeError("Could not find a VLM-3R module that can initialize spatial_rank_head/P_geo.")
+
+
+def _normalize_optional_path(path):
+    if path is None:
+        return ""
+    path = str(path).strip()
+    if path.lower() in ("", "none", "null"):
+        return ""
+    return path
+
+
+def _unwrap_spatial_rank_checkpoint(checkpoint):
+    if not isinstance(checkpoint, dict):
+        raise ValueError("spatial_rank_head checkpoint must be a state-dict-like object.")
+    for key in ("state_dict", "model", "module"):
+        nested = checkpoint.get(key)
+        if isinstance(nested, dict) and any("spatial_rank_head" in str(k) for k in nested.keys()):
+            return nested
+    return checkpoint
+
+
+def _extract_spatial_rank_head_state(checkpoint, expected_keys):
+    checkpoint = _unwrap_spatial_rank_checkpoint(checkpoint)
+    expected_keys = list(expected_keys)
+
+    candidates = {}
+    for key, value in checkpoint.items():
+        key = str(key)
+        if "spatial_rank_head." in key:
+            candidates[key.split("spatial_rank_head.", 1)[1]] = value
+        elif key in expected_keys:
+            candidates[key] = value
+
+    if not candidates:
+        raise ValueError(
+            "No spatial_rank_head weights found. Expected keys like "
+            "spatial_rank_head.0.weight or already-stripped keys like 0.weight."
+        )
+
+    final_state = {key: candidates[key] for key in expected_keys if key in candidates}
+    missing = [key for key in expected_keys if key not in final_state]
+    unexpected = [key for key in candidates.keys() if key not in expected_keys]
+    if missing or unexpected:
+        raise RuntimeError(
+            "spatial_rank_head checkpoint keys do not match this architecture. "
+            f"missing={missing}, unexpected={unexpected}"
+        )
+    return final_state
+
+
+def _count_parameters(module):
+    return sum(p.ds_numel if hasattr(p, "ds_numel") else p.numel() for p in module.parameters())
+
+
+def _module_requires_grad(module):
+    return any(p.requires_grad for p in module.parameters())
+
+
+def load_and_configure_spatial_rank_head(rank_model, training_args):
+    head_path = _normalize_optional_path(training_args.spatial_rank_head_path)
+    freeze_head = bool(training_args.freeze_spatial_rank_head)
+    if freeze_head and not head_path:
+        raise ValueError("freeze_spatial_rank_head=True requires --spatial_rank_head_path.")
+
+    if head_path:
+        checkpoint = torch.load(head_path, map_location="cpu")
+        p_geo_state = _extract_spatial_rank_head_state(
+            checkpoint,
+            rank_model.spatial_rank_head.state_dict().keys(),
+        )
+        rank_model.spatial_rank_head.load_state_dict(p_geo_state, strict=True)
+        loaded_keys = list(p_geo_state.keys())
+        rank0_print(f"Loaded {'frozen ' if freeze_head else ''}P_geo from: {head_path}")
+        rank0_print(f"[SPATIAL_RANK_HEAD] loaded_keys = {loaded_keys}")
+
+    for param in rank_model.spatial_rank_head.parameters():
+        param.requires_grad = not freeze_head
+
+    rank_model.config.freeze_spatial_rank_head = freeze_head
+    rank_model.config.spatial_rank_head_path = head_path
+    rank_model._spatial_rank_head_frozen = freeze_head
+    rank_model._spatial_rank_head_path = head_path
+    return head_path, freeze_head
 
 
 def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: str):
@@ -2564,6 +2649,10 @@ def train(attn_implementation=None):
     model.config.positive_top_percent = float(training_args.positive_top_percent)
     model.config.negative_bottom_percent = float(training_args.negative_bottom_percent)
     model.config.spatial_rank_debug_checks = bool(training_args.spatial_rank_debug_checks)
+    model.config.freeze_spatial_rank_head = bool(training_args.freeze_spatial_rank_head)
+    model.config.spatial_rank_head_path = _normalize_optional_path(training_args.spatial_rank_head_path)
+    if training_args.freeze_spatial_rank_head and not model.config.spatial_rank_head_path:
+        raise ValueError("freeze_spatial_rank_head=True requires --spatial_rank_head_path.")
     if training_args.spatial_rank_loss_enable:
         rank_model = find_spatial_rank_model(model)
         rank_model.initialize_spatial_rank_head(
@@ -2571,6 +2660,10 @@ def train(attn_implementation=None):
             device=training_args.device,
             dtype=compute_dtype,
         )
+        head_path, freeze_head = load_and_configure_spatial_rank_head(rank_model, training_args)
+        p_geo_params = _count_parameters(rank_model.spatial_rank_head)
+        p_geo_requires_grad = _module_requires_grad(rank_model.spatial_rank_head)
+        p_geo_in_optimizer = p_geo_requires_grad
         rank0_print(
             "[SPATIAL_RANK] enabled "
             f"lambda_sim={training_args.lambda_sim}, margin={training_args.spatial_rank_margin}, "
@@ -2579,6 +2672,18 @@ def train(attn_implementation=None):
             f"negative_bottom_percent={training_args.negative_bottom_percent}"
         )
         rank0_print("[SPATIAL_RANK] P_geo initialized as LayerNorm(hidden_size)+Linear(hidden_size, 256).")
+        rank0_print("[SPATIAL_RANK_HEAD]")
+        rank0_print(f"enable = {bool(training_args.spatial_rank_loss_enable)}")
+        rank0_print(f"head_path = {head_path if head_path else 'none'}")
+        rank0_print(f"freeze_head = {freeze_head}")
+        rank0_print("projection_dim = 256")
+        rank0_print(f"num_parameters = {p_geo_params}")
+        rank0_print(f"requires_grad = {p_geo_requires_grad}")
+        rank0_print(f"in_optimizer = {p_geo_in_optimizer}")
+        rank0_print(f"P_geo parameter count: {p_geo_params}")
+        rank0_print(f"P_geo requires_grad: {p_geo_requires_grad}")
+        rank0_print(f"P_geo in optimizer: {p_geo_in_optimizer}")
+        rank0_print(f"spatial_rank_head_frozen = {freeze_head}")
 
     data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
     trainer = LLaVATrainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)
