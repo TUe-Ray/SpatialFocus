@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import inspect
 import json
 import random
 import sys
@@ -167,31 +168,65 @@ def extract_h1(
     batch = move_to_device(batch, device, dtype)
     h1_holder: dict[str, torch.Tensor] = {}
 
+    prepare_fn = getattr(model, "prepare_inputs_labels_for_multimodal", None)
+    if prepare_fn is None:
+        raise RuntimeError("Model does not expose prepare_inputs_labels_for_multimodal().")
+    prepare_kwargs = {
+        "input_ids": batch["input_ids"],
+        "position_ids": None,
+        "attention_mask": batch["attention_mask"],
+        "past_key_values": None,
+        "labels": None,
+        "images": batch["images"],
+        "spatial_features": batch.get("spatial_features"),
+        "point_maps": batch.get("point_maps"),
+        "modalities": batch.get("modalities"),
+        "image_sizes": batch.get("image_sizes"),
+    }
+    if "return_visual_metadata" in inspect.signature(prepare_fn).parameters:
+        prepare_kwargs["return_visual_metadata"] = True
+    else:
+        raise RuntimeError(
+            "prepare_inputs_labels_for_multimodal() does not support return_visual_metadata. "
+            "Please use a checkpoint/code version with visual metadata support."
+        )
+    with torch.inference_mode():
+        prepared = prepare_fn(**prepare_kwargs)
+    (
+        input_ids,
+        position_ids,
+        attention_mask,
+        past_key_values,
+        inputs_embeds,
+        _labels,
+        visual_metadata,
+    ) = prepared
+    if not visual_metadata:
+        raise RuntimeError("Model did not return visual metadata.")
+
     def capture_h1(_module, _inputs, output):
         h1_holder["h1"] = output[0] if isinstance(output, (tuple, list)) else output
 
     handle = get_first_block(model).register_forward_hook(capture_h1)
     try:
         with torch.inference_mode():
-            model(
-                input_ids=batch["input_ids"],
-                attention_mask=batch["attention_mask"],
-                images=batch["images"],
-                spatial_features=batch.get("spatial_features"),
-                image_sizes=batch.get("image_sizes"),
-                modalities=batch.get("modalities"),
-                return_visual_metadata=True,
+            model.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                inputs_embeds=inputs_embeds,
                 use_cache=False,
+                output_attentions=False,
+                output_hidden_states=False,
+                return_dict=True,
             )
     finally:
         handle.remove()
 
     if "h1" not in h1_holder:
         raise RuntimeError("H1 hook did not fire.")
-    metadata = getattr(model, "_last_visual_metadata", None)
-    if not metadata:
-        raise RuntimeError("Model did not return visual metadata.")
-    metadata = metadata[0]
+    metadata = visual_metadata[0]
 
     h1 = h1_holder["h1"]
     visual_indices = metadata["visual_token_indices"].to(device=h1.device)
