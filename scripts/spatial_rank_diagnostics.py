@@ -18,10 +18,14 @@ import json
 import math
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+try:
+    import matplotlib.pyplot as plt
+except ImportError:
+    plt = None
 
 
 def pool_cut3r(tokens: torch.Tensor, target_tokens: int, pool_mode: str) -> torch.Tensor:
@@ -106,6 +110,9 @@ def train_probe(student: torch.Tensor, teacher: torch.Tensor, dim: int, steps: i
 
 
 def save_maps(output_dir: Path, name: str, maps: dict[str, torch.Tensor]) -> None:
+    if plt is None:
+        print("[WARN] matplotlib is not installed; skipping similarity-map PNG output.")
+        return
     fig, axes = plt.subplots(1, len(maps), figsize=(4 * len(maps), 4), squeeze=False)
     for ax, (title, value) in zip(axes[0], maps.items()):
         ax.imshow(value, cmap="viridis")
@@ -129,7 +136,10 @@ def main() -> None:
     parser.add_argument("--probe-steps", type=int, default=300)
     parser.add_argument("--probe-dim", type=int, default=256)
     parser.add_argument("--probe-lr", type=float, default=1e-3)
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
+
+    torch.manual_seed(args.seed)
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
