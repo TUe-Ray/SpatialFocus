@@ -681,7 +681,7 @@ class LlavaMetaForCausalLM(ABC):
                 elif fusion_block_type in ['svf_3d_rope', 'svf_depth_rope', 'svf_xyz_rope', 'svf_spherical_rope']:
                     geometry_point_maps = _coalesce_point_maps(point_maps)
                     if geometry_point_maps is None and isinstance(loaded_spatial_features, dict):
-                        for point_key in ("point_maps", "point_map", "points", "pts3d"):
+                        for point_key in ("point_maps", "point_maps_cam", "point_maps_ref", "point_map", "points", "pts3d"):
                             if point_key in loaded_spatial_features:
                                 geometry_point_maps = _coalesce_point_maps(loaded_spatial_features[point_key])
                                 break
