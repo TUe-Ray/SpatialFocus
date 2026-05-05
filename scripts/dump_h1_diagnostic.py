@@ -22,6 +22,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from PIL import Image
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -255,9 +256,10 @@ def extract_h1(
     return result
 
 
-def find_valid_sample(dataset: LazySupervisedDataset, collator: DataCollatorForSupervisedDataset, args: argparse.Namespace):
+def find_valid_samples(dataset: LazySupervisedDataset, collator: DataCollatorForSupervisedDataset, args: argparse.Namespace):
     end = min(len(dataset), args.sample_index + max(1, args.max_sample_tries))
     last_error = None
+    samples = []
     for idx in range(args.sample_index, end):
         try:
             item = dataset[idx]
@@ -267,10 +269,99 @@ def find_valid_sample(dataset: LazySupervisedDataset, collator: DataCollatorForS
             if not isinstance(sf, dict) or "patch_tokens" not in sf:
                 continue
             batch = collator([item])
-            return idx, item, batch
+            raw_item = dataset.list_data_dict[idx]
+            samples.append((idx, item, batch, raw_item))
+            if len(samples) >= args.num_samples:
+                return samples
         except Exception as exc:
             last_error = exc
+    if samples:
+        return samples
     raise RuntimeError(f"No valid CUT3R sample found from index {args.sample_index} to {end - 1}. Last error: {last_error}")
+
+
+def sample_output_path(output: Path, ordinal: int, num_samples: int) -> Path:
+    if num_samples == 1 and output.suffix == ".pt":
+        return output
+    root = output.parent / output.stem if output.suffix == ".pt" else output
+    return root / f"sample_{ordinal:03d}" / "h1_dump.pt"
+
+
+def source_media_paths(raw_item: dict[str, Any], args: argparse.Namespace) -> list[str]:
+    if "video" in raw_item:
+        video = raw_item["video"]
+        if isinstance(video, str):
+            return [video if Path(video).is_absolute() else str(Path(args.video_folder) / video)]
+    if "image" in raw_item:
+        images = raw_item["image"]
+        if not isinstance(images, list):
+            images = [images]
+        return [image if Path(image).is_absolute() else str(Path(args.image_folder) / image) for image in images]
+    return []
+
+
+def tensor_to_uint8_image(frame: torch.Tensor, image_processor: Any) -> np.ndarray:
+    frame = frame.detach().float().cpu()
+    mean = torch.tensor(getattr(image_processor, "image_mean", [0.5, 0.5, 0.5])).view(3, 1, 1)
+    std = torch.tensor(getattr(image_processor, "image_std", [0.5, 0.5, 0.5])).view(3, 1, 1)
+    frame = (frame * std + mean).clamp(0.0, 1.0)
+    return (frame.permute(1, 2, 0).numpy() * 255.0).round().astype(np.uint8)
+
+
+def save_input_frames(batch: dict[str, Any], image_processor: Any, output_dir: Path, max_frames: int) -> list[str]:
+    images = batch.get("images")
+    if images is None:
+        return []
+    if isinstance(images, (list, tuple)):
+        if not images:
+            return []
+        tensor = images[0]
+    else:
+        tensor = images
+        if tensor.dim() >= 4 and tensor.shape[0] == 1:
+            tensor = tensor[0]
+    if tensor.dim() == 3:
+        tensor = tensor.unsqueeze(0)
+    elif tensor.dim() == 5 and tensor.shape[0] == 1:
+        tensor = tensor[0]
+    if tensor.dim() != 4:
+        return []
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    saved = []
+    frame_count = min(int(tensor.shape[0]), int(max_frames))
+    for frame_idx in range(frame_count):
+        frame_path = output_dir / f"frame_{frame_idx:03d}.png"
+        Image.fromarray(tensor_to_uint8_image(tensor[frame_idx], image_processor)).save(frame_path)
+        saved.append(str(frame_path))
+    return saved
+
+
+def write_sample_metadata(
+    output_path: Path,
+    sample_idx: int,
+    raw_item: dict[str, Any],
+    payload: dict[str, Any],
+    saved_frames: list[str],
+    args: argparse.Namespace,
+) -> None:
+    metadata = {
+        "sample_index": sample_idx,
+        "sample_id": payload.get("sample_id"),
+        "source_media_paths": source_media_paths(raw_item, args),
+        "saved_input_frames": saved_frames,
+        "saved_input_frames_note": (
+            "These PNGs are denormalized model input frames after dataset decoding/preprocessing, "
+            "not byte-for-byte copies of the original source media."
+        ),
+        "data_keys": sorted(str(key) for key in raw_item.keys()),
+        "video": raw_item.get("video"),
+        "image": raw_item.get("image"),
+        "conversations": raw_item.get("conversations"),
+    }
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2, ensure_ascii=False)
+        f.write("\n")
 
 
 def main() -> None:
@@ -289,6 +380,7 @@ def main() -> None:
     parser.add_argument("--output", required=True)
     parser.add_argument("--runtime-root", default=str(REPO_ROOT / ".offline_runtime"))
     parser.add_argument("--sample-index", type=int, default=0)
+    parser.add_argument("--num-samples", type=int, default=1)
     parser.add_argument("--max-sample-tries", type=int, default=200)
     parser.add_argument("--data-percentage", type=float, default=100.0)
     parser.add_argument("--frames-upbound", type=int, default=32)
@@ -297,6 +389,8 @@ def main() -> None:
     parser.add_argument("--attn-implementation", default="sdpa")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--dtype", default="float16", choices=["float16", "bfloat16"])
+    parser.add_argument("--save-input-frames", action="store_true")
+    parser.add_argument("--max-saved-frames", type=int, default=32)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -315,44 +409,52 @@ def main() -> None:
     data_args = make_data_args(args, image_processor)
     dataset = LazySupervisedDataset(tokenizer=tokenizer, data_path=args.data_path, data_args=data_args)
     collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
-    sample_idx, item, batch = find_valid_sample(dataset, collator, args)
+    samples = find_valid_samples(dataset, collator, args)
 
-    baseline = extract_h1(baseline_model, batch, device, dtype, compute_pgeo=False)
+    baseline_results = []
+    for _sample_idx, _item, batch, _raw_item in samples:
+        baseline_results.append(extract_h1(baseline_model, batch, device, dtype, compute_pgeo=False))
     del baseline_model
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
     _, ours_model, _ = load_one_model(args.ours_checkpoint, args, device, dtype)
-    ours = extract_h1(ours_model, batch, device, dtype, compute_pgeo=True)
+    output_arg = Path(args.output)
+    for ordinal, ((sample_idx, item, batch, raw_item), baseline) in enumerate(zip(samples, baseline_results)):
+        ours = extract_h1(ours_model, batch, device, dtype, compute_pgeo=True)
 
-    spatial_features = item["spatial_features"]
-    patch_tokens = spatial_features["patch_tokens"]
-    if patch_tokens.dim() == 4 and patch_tokens.shape[0] == 1:
-        patch_tokens = patch_tokens[0]
-    if patch_tokens.dim() != 3:
-        raise RuntimeError(f"Expected cut3r patch_tokens [F,729,C], got {tuple(patch_tokens.shape)}")
+        spatial_features = item["spatial_features"]
+        patch_tokens = spatial_features["patch_tokens"]
+        if patch_tokens.dim() == 4 and patch_tokens.shape[0] == 1:
+            patch_tokens = patch_tokens[0]
+        if patch_tokens.dim() != 3:
+            raise RuntimeError(f"Expected cut3r patch_tokens [F,729,C], got {tuple(patch_tokens.shape)}")
 
-    payload = {
-        "cut3r_patch_tokens": patch_tokens.detach().cpu(),
-        "baseline_h1": baseline["h1"],
-        "ours_h1": ours["h1"],
-        "sample_index": sample_idx,
-        "sample_id": item.get("id", sample_idx),
-        "baseline_checkpoint": args.baseline_checkpoint,
-        "ours_checkpoint": args.ours_checkpoint,
-    }
-    if "pgeo_h1" in ours:
-        payload["ours_pgeo_h1"] = ours["pgeo_h1"]
+        payload = {
+            "cut3r_patch_tokens": patch_tokens.detach().cpu(),
+            "baseline_h1": baseline["h1"],
+            "ours_h1": ours["h1"],
+            "sample_index": sample_idx,
+            "sample_id": item.get("id", sample_idx),
+            "baseline_checkpoint": args.baseline_checkpoint,
+            "ours_checkpoint": args.ours_checkpoint,
+        }
+        if "pgeo_h1" in ours:
+            payload["ours_pgeo_h1"] = ours["pgeo_h1"]
 
-    output = Path(args.output)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(payload, output)
-    print(f"[DONE] wrote {output}")
-    print(f"sample_index={sample_idx} sample_id={payload['sample_id']}")
-    for key in ("cut3r_patch_tokens", "baseline_h1", "ours_h1", "ours_pgeo_h1"):
-        if key in payload and isinstance(payload[key], torch.Tensor):
-            print(f"{key}: {tuple(payload[key].shape)}")
+        output = sample_output_path(output_arg, ordinal, len(samples))
+        output.parent.mkdir(parents=True, exist_ok=True)
+        saved_frames = []
+        if args.save_input_frames:
+            saved_frames = save_input_frames(batch, image_processor, output.parent / "input_frames", args.max_saved_frames)
+        write_sample_metadata(output.parent / "sample_metadata.json", sample_idx, raw_item, payload, saved_frames, args)
+        torch.save(payload, output)
+        print(f"[DONE] wrote {output}")
+        print(f"sample_index={sample_idx} sample_id={payload['sample_id']}")
+        for key in ("cut3r_patch_tokens", "baseline_h1", "ours_h1", "ours_pgeo_h1"):
+            if key in payload and isinstance(payload[key], torch.Tensor):
+                print(f"{key}: {tuple(payload[key].shape)}")
 
 
 if __name__ == "__main__":

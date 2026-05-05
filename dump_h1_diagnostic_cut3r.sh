@@ -30,11 +30,12 @@ SPATIAL_FEATURES_SUBDIR="${SPATIAL_FEATURES_SUBDIR:-spatial_features}"
 
 OUT_ROOT="${OUT_ROOT:-/leonardo_scratch/fast/EUHPC_D32_006/diag/h1_cut3r}"
 RUN_NAME="${RUN_NAME:-$(date +%Y%m%d_%H%M%S)}"
-H1_DUMP="${H1_DUMP:-$OUT_ROOT/$RUN_NAME/h1_dump.pt}"
-DIAG_OUT="${DIAG_OUT:-$OUT_ROOT/$RUN_NAME/diag}"
+H1_OUTPUT="${H1_OUTPUT:-$OUT_ROOT/$RUN_NAME/samples}"
 
 SAMPLE_INDEX="${SAMPLE_INDEX:-0}"
+SAMPLE_COUNT="${SAMPLE_COUNT:-3}"
 MAX_SAMPLE_TRIES="${MAX_SAMPLE_TRIES:-200}"
+MAX_SAVED_FRAMES="${MAX_SAVED_FRAMES:-32}"
 FRAME="${FRAME:-0}"
 ROI_INDEX="${ROI_INDEX:-105}"
 PROBE_STEPS="${PROBE_STEPS:-300}"
@@ -46,7 +47,7 @@ if [[ -z "$BASELINE_CHECKPOINT" ]]; then
   exit 1
 fi
 
-mkdir -p logs/diag "$(dirname "$H1_DUMP")" "$DIAG_OUT"
+mkdir -p logs/diag "$H1_OUTPUT"
 cd "$REPO_DIR"
 
 if command -v module >/dev/null 2>&1; then
@@ -80,8 +81,9 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 echo "BASELINE_CHECKPOINT=$BASELINE_CHECKPOINT"
 echo "OURS_CHECKPOINT=$OURS_CHECKPOINT"
-echo "H1_DUMP=$H1_DUMP"
-echo "DIAG_OUT=$DIAG_OUT"
+echo "H1_OUTPUT=$H1_OUTPUT"
+echo "SAMPLE_INDEX=$SAMPLE_INDEX"
+echo "SAMPLE_COUNT=$SAMPLE_COUNT"
 
 python scripts/dump_h1_diagnostic.py \
   --baseline-checkpoint "$BASELINE_CHECKPOINT" \
@@ -95,17 +97,26 @@ python scripts/dump_h1_diagnostic.py \
   --spatial-features-root "$SPATIAL_FEATURES_ROOT" \
   --spatial-features-subdir "$SPATIAL_FEATURES_SUBDIR" \
   --sample-index "$SAMPLE_INDEX" \
+  --num-samples "$SAMPLE_COUNT" \
   --max-sample-tries "$MAX_SAMPLE_TRIES" \
-  --output "$H1_DUMP"
+  --save-input-frames \
+  --max-saved-frames "$MAX_SAVED_FRAMES" \
+  --output "$H1_OUTPUT"
 
-python scripts/spatial_rank_diagnostics.py \
-  --input "$H1_DUMP" \
-  --output-dir "$DIAG_OUT" \
-  --pool-mode bilinear \
-  --frame "$FRAME" \
-  --roi-index "$ROI_INDEX" \
-  --anchors-per-frame 128 \
-  --positive-top-percent 10 \
-  --negative-bottom-percent 30 \
-  --probe-steps "$PROBE_STEPS" \
-  --seed 42
+for sample_dir in "$H1_OUTPUT"/sample_*; do
+  if [[ ! -d "$sample_dir" ]]; then
+    continue
+  fi
+  echo "[DIAG] $sample_dir"
+  python scripts/spatial_rank_diagnostics.py \
+    --input "$sample_dir/h1_dump.pt" \
+    --output-dir "$sample_dir/diag" \
+    --pool-mode bilinear \
+    --frame "$FRAME" \
+    --roi-index "$ROI_INDEX" \
+    --anchors-per-frame 128 \
+    --positive-top-percent 10 \
+    --negative-bottom-percent 30 \
+    --probe-steps "$PROBE_STEPS" \
+    --seed 42
+done
