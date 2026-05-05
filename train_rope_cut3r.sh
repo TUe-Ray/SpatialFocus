@@ -18,15 +18,15 @@ NOTE="CUT3R Geometry-RoPE fusion: svf_3d_rope with point-map-derived spherical p
 
 TRAIN_DATA_PERCENTAGE="100"
 
-MODEL_FUSION_BLOCK="svf_3d_rope"
+MODEL_FUSION_BLOCK="${MODEL_FUSION_BLOCK:-svf_3d_rope}"
 # Fusion options for this Geometry-RoPE experiment:
 # - svf_patch_only
 # - svf_3d_rope
 # - svf_depth_rope / svf_xyz_rope / svf_spherical_rope
-MODEL_GEOMETRY_ROPE_MODE="spherical"
-MODEL_GEOMETRY_ROPE_MAX_DEPTH="10.0"
-MODEL_GEOMETRY_ROPE_GROUP_SPLIT="2,1,2"
-MODEL_GEOMETRY_ROPE_LOG_STATS="False"
+MODEL_GEOMETRY_ROPE_MODE="${MODEL_GEOMETRY_ROPE_MODE:-spherical}"
+MODEL_GEOMETRY_ROPE_MAX_DEPTH="${MODEL_GEOMETRY_ROPE_MAX_DEPTH:-10.0}"
+MODEL_GEOMETRY_ROPE_GROUP_SPLIT="${MODEL_GEOMETRY_ROPE_GROUP_SPLIT:-2,1,2}"
+MODEL_GEOMETRY_ROPE_LOG_STATS="${MODEL_GEOMETRY_ROPE_LOG_STATS:-False}"
 # Group split rules:
 # - svf_depth_rope requires MODEL_GEOMETRY_ROPE_GROUP_SPLIT="1"
 # - svf_xyz_rope uses x,y,z split, e.g. "1,1,1" or "2,1,2"
@@ -288,6 +288,21 @@ echo "[BATCH] GRADIENT_ACCUMULATION_STEPS=$GRADIENT_ACCUMULATION_STEPS"
 #   False -> use normal spatial_features (.pt)
 #   True  -> load .pt and zero all tensor values
 echo "[ABLATION] ZERO_SPATIAL_FEATURES=$ZERO_SPATIAL_FEATURES"
+
+# Alias fusion blocks define their own Geometry-RoPE coordinate mode.
+# This keeps Slurm submissions robust even when MODEL_GEOMETRY_ROPE_MODE
+# is not explicitly exported for depth/xyz/spherical aliases.
+case "$MODEL_FUSION_BLOCK" in
+    svf_depth_rope)
+        MODEL_GEOMETRY_ROPE_MODE="depth"
+        ;;
+    svf_xyz_rope)
+        MODEL_GEOMETRY_ROPE_MODE="xyz"
+        ;;
+    svf_spherical_rope)
+        MODEL_GEOMETRY_ROPE_MODE="spherical"
+        ;;
+esac
 
 # Validate fusion option and print method summary for reproducibility.
 VALID_FUSION_BLOCKS=(
