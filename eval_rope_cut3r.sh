@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=RoPE_CUT3R_Eval
+#SBATCH --job-name=DBGRoPE_CUT3R_Eval
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=4
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=32
-#SBATCH --time=03:00:00
+#SBATCH --time=00:30:00
 #SBATCH --partition=boost_usr_prod
-#SBATCH --qos=normal
+#SBATCH --qos=boost_qos_dbg
 #SBATCH --output=logs/eval/%x_%j.out
 #SBATCH --error=logs/eval/%x_%j.err
 #SBATCH --mem=0
@@ -25,9 +25,11 @@ CONDA_ENV="${CONDA_ENV:-vsibench}"
 FAST_ROOT="${FAST_ROOT:-/leonardo_scratch/fast/EUHPC_D32_006}"
 HF_HOME="${HF_HOME:-$FAST_ROOT/hf_cache}"
 VSI_ROOT="${VSI_ROOT:-$FAST_ROOT/vsibench}"
+VSI_MEDIA_ROOT="${VSI_MEDIA_ROOT:-$HF_HOME/vsibench}"
 DATA_ROOT="${DATA_ROOT:-$FAST_ROOT/data/vlm3r}"
 SPATIAL_FEATURES_ROOT="${SPATIAL_FEATURES_ROOT:-$DATA_ROOT}"
 SPATIAL_FEATURES_SUBDIR="${SPATIAL_FEATURES_SUBDIR:-spatial_features_points}"
+CHECK_SPATIAL_SIDECARS="${CHECK_SPATIAL_SIDECARS:-True}"
 
 MODEL_ROOT="${MODEL_ROOT:-/leonardo_work/EUHPC_D32_006/FAST/hf_models/VLM3R}"
 PRETRAINED_LOCAL="${PRETRAINED_LOCAL:-$MODEL_ROOT/Journey9ni/vlm-3r-llava-qwen2-lora}"
@@ -74,9 +76,11 @@ echo "TASK_FILE=$TASK_FILE"
 echo "FAST_ROOT=$FAST_ROOT"
 echo "HF_HOME=$HF_HOME"
 echo "VSI_ROOT=$VSI_ROOT"
+echo "VSI_MEDIA_ROOT=$VSI_MEDIA_ROOT"
 echo "DATA_ROOT=$DATA_ROOT"
 echo "SPATIAL_FEATURES_ROOT=$SPATIAL_FEATURES_ROOT"
 echo "SPATIAL_FEATURES_SUBDIR=$SPATIAL_FEATURES_SUBDIR"
+echo "CHECK_SPATIAL_SIDECARS=$CHECK_SPATIAL_SIDECARS"
 echo "PRETRAINED_LOCAL=$PRETRAINED_LOCAL"
 echo "MODEL_BASE_LOCAL=$MODEL_BASE_LOCAL"
 echo "SIGLIP_LOCAL=$SIGLIP_LOCAL"
@@ -125,8 +129,9 @@ for parquet in "$VSI_ROOT/test_pruned.parquet" "$VSI_ROOT/test_debiased.parquet"
 done
 
 for split in scannet arkitscenes scannetpp; do
-  if [[ ! -e "$VSI_ROOT/$split" ]]; then
-    echo "[ERROR] Missing video root: $VSI_ROOT/$split"
+  if [[ ! -e "$VSI_MEDIA_ROOT/$split" ]]; then
+    echo "[ERROR] Missing video root used by task loader: $VSI_MEDIA_ROOT/$split"
+    echo "[ERROR] The offline task resolves videos as HF_HOME/vsibench/<dataset>/<scene>.mp4."
     exit 1
   fi
   if [[ ! -d "$SPATIAL_FEATURES_ROOT/$split/$SPATIAL_FEATURES_SUBDIR" ]]; then
@@ -196,6 +201,75 @@ nvidia-smi || true
 python -c "import sys; print('python', sys.version)"
 python -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'available', torch.cuda.is_available())"
 python -c "import lmms_eval; print('lmms_eval import ok')"
+
+if [[ "$CHECK_SPATIAL_SIDECARS" == "True" ]]; then
+  echo "==== VSiBench media/sidecar preflight ===="
+  python - "$VSI_ROOT" "$VSI_MEDIA_ROOT" "$SPATIAL_FEATURES_ROOT" "$SPATIAL_FEATURES_SUBDIR" <<'PY'
+import sys
+from pathlib import Path
+
+vsi_root = Path(sys.argv[1])
+media_root = Path(sys.argv[2])
+spatial_root = Path(sys.argv[3])
+spatial_subdir = sys.argv[4]
+
+parquets = [vsi_root / "test_pruned.parquet", vsi_root / "test_debiased.parquet"]
+
+try:
+    import pandas as pd
+
+    rows = []
+    for parquet in parquets:
+        rows.extend(pd.read_parquet(parquet, columns=["dataset", "scene_name"]).to_dict("records"))
+except Exception:
+    import pyarrow.parquet as pq
+
+    rows = []
+    for parquet in parquets:
+        table = pq.read_table(parquet, columns=["dataset", "scene_name"])
+        rows.extend(table.to_pylist())
+
+missing_media = []
+missing_sidecars = []
+seen = set()
+
+for row in rows:
+    dataset = str(row["dataset"])
+    scene = str(row["scene_name"])
+    key = (dataset, scene)
+    if key in seen:
+        continue
+    seen.add(key)
+
+    media = media_root / dataset / f"{scene}.mp4"
+    sidecar = spatial_root / dataset / spatial_subdir / f"{scene}.pt"
+    if not media.is_file():
+        missing_media.append(str(media))
+    if not sidecar.is_file():
+        missing_sidecars.append(str(sidecar))
+
+print(f"Unique videos in eval parquet: {len(seen)}")
+print(f"Missing media files: {len(missing_media)}")
+print(f"Missing CUT3R point-map sidecars: {len(missing_sidecars)}")
+
+if missing_media:
+    print("First missing media files:")
+    for path in missing_media[:20]:
+        print(f"  {path}")
+
+if missing_sidecars:
+    print("First missing sidecars:")
+    for path in missing_sidecars[:20]:
+        print(f"  {path}")
+
+if missing_media or missing_sidecars:
+    raise SystemExit(
+        "RoPE eval preflight failed. Generate/copy the missing videos and CUT3R point-map sidecars, "
+        "or set CHECK_SPATIAL_SIDECARS=False to bypass this guard."
+    )
+PY
+  echo "=========================================="
+fi
 
 prepare_runtime_pretrained() {
   local runtime_dir="$RUNTIME_ROOT/pretrained_siglip_local"
