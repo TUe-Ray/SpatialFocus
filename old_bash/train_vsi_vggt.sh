@@ -39,9 +39,9 @@ HF_DATASETS_CACHE="$HF_HOME/datasets"
 HUGGINGFACE_HUB_CACHE="$HF_HOME/hub"
 
 # VGGT runtime paths (required by llava/model/multimodal_spatial_encoder/vggt_spatial_encoder.py)
-REPO_ROOT="/leonardo/home/userexternal/shuang00/VLM-3R"
-LOCAL_VGGT_ROOT="$REPO_ROOT/vggt"
-LOCAL_VGGT_WEIGHTS="/leonardo_scratch/fast/EUHPC_D32_006/hf_models/vggt"
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+LOCAL_VGGT_ROOT="${LOCAL_VGGT_ROOT:-$REPO_ROOT/third_party/VGGT}"
+LOCAL_VGGT_WEIGHTS="${LOCAL_VGGT_WEIGHTS:-facebook/VGGT-1B}"
 
 # ============================================================
 # User-defined variables: Resume / Ablation
@@ -61,7 +61,7 @@ MODEL_LORA_R="128"
 MODEL_LORA_ALPHA="256"
 MODEL_SPATIAL_TOWER="vggt"
 MODEL_SPATIAL_TOWER_SELECT_FEATURE="all_tokens"
-MODEL_SPATIAL_FEATURE_DIM="1024"
+MODEL_SPATIAL_FEATURE_DIM="2048"
 MODEL_FUSION_BLOCK="cross_attention"
 MODEL_TUNE_SPATIAL_TOWER="False"
 MODEL_TUNE_FUSION_BLOCK="True"
@@ -249,9 +249,9 @@ if [[ ! -d "$LOCAL_VGGT_ROOT" ]]; then
     echo "        Expected by vggt_spatial_encoder import path logic."
     exit 1
 fi
-if [[ ! -d "$LOCAL_VGGT_WEIGHTS" ]]; then
+if [[ "$LOCAL_VGGT_WEIGHTS" == /* || "$LOCAL_VGGT_WEIGHTS" == ./* || "$LOCAL_VGGT_WEIGHTS" == ../* ]] && [[ ! -e "$LOCAL_VGGT_WEIGHTS" ]]; then
     echo "[ERROR] Local VGGT weights not found: $LOCAL_VGGT_WEIGHTS"
-    echo "        Expected by vggt_spatial_encoder default weights path."
+    echo "        Set LOCAL_VGGT_WEIGHTS to a local Hugging Face cache directory or use a repo id such as facebook/VGGT-1B."
     exit 1
 fi
 
@@ -285,6 +285,7 @@ declare -A MODEL_ARGS=(
     [spatial_tower]="$MODEL_SPATIAL_TOWER"
     [spatial_tower_select_feature]="$MODEL_SPATIAL_TOWER_SELECT_FEATURE"
     [spatial_feature_dim]="$MODEL_SPATIAL_FEATURE_DIM"
+    [vggt_weights_path]="$LOCAL_VGGT_WEIGHTS"
     [fusion_block]="$MODEL_FUSION_BLOCK"
     [tune_spatial_tower]="$MODEL_TUNE_SPATIAL_TOWER"
     [tune_fusion_block]="$MODEL_TUNE_FUSION_BLOCK"

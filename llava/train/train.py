@@ -187,6 +187,12 @@ class ModelArguments:
     )
     spatial_tower_select_layer: Optional[int] = field(default=-1)
     spatial_feature_dim: Optional[int] = field(default=None)
+    vggt_weights_path: Optional[str] = field(
+        default=None,
+        metadata={"help": "Hugging Face repo id or local directory/checkpoint for VGGT weights."},
+    )
+    vggt_image_size: Optional[int] = field(default=518, metadata={"help": "VGGT input image size."})
+    vggt_patch_size: Optional[int] = field(default=14, metadata={"help": "VGGT patch size."})
     tune_spatial_tower: bool = field(default=False)
     ## fusion block
     fusion_block: Optional[str] = field(
@@ -2270,10 +2276,19 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
         overwrite_config["mm_spatial_pool_mode"] = model_args.mm_spatial_pool_mode
 
     if model_args.spatial_tower is not None:
+        spatial_feature_dim = model_args.spatial_feature_dim
+        if model_args.spatial_tower == "vggt" and spatial_feature_dim is None:
+            spatial_feature_dim = 2048
         overwrite_config["spatial_tower"] = model_args.spatial_tower
         overwrite_config["spatial_tower_select_feature"] = model_args.spatial_tower_select_feature
         overwrite_config["spatial_tower_select_layer"] = model_args.spatial_tower_select_layer
-        overwrite_config["spatial_feature_dim"] = model_args.spatial_feature_dim
+        overwrite_config["spatial_feature_dim"] = spatial_feature_dim
+        if model_args.vggt_weights_path is not None:
+            overwrite_config["vggt_weights_path"] = model_args.vggt_weights_path
+        if model_args.vggt_image_size is not None:
+            overwrite_config["vggt_image_size"] = model_args.vggt_image_size
+        if model_args.vggt_patch_size is not None:
+            overwrite_config["vggt_patch_size"] = model_args.vggt_patch_size
 
     if model_args.fusion_block is not None:
         overwrite_config["fusion_block"] = model_args.fusion_block
@@ -2542,6 +2557,9 @@ def train(attn_implementation=None):
             conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1"]
 
     if model_args.spatial_tower is not None:
+        spatial_feature_dim = model_args.spatial_feature_dim
+        if model_args.spatial_tower == "vggt" and spatial_feature_dim is None:
+            spatial_feature_dim = 2048
         model.get_model().initialize_spatial_tower(model_args=model_args, fsdp=training_args.fsdp)
         spatial_tower = model.get_spatial_tower()
         spatial_tower.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
@@ -2549,7 +2567,11 @@ def train(attn_implementation=None):
         model.config.spatial_tower = model_args.spatial_tower
         model.config.spatial_tower_select_feature = model_args.spatial_tower_select_feature
         model.config.spatial_tower_select_layer = model_args.spatial_tower_select_layer
-        model.config.spatial_feature_dim = model_args.spatial_feature_dim
+        model.config.spatial_feature_dim = spatial_feature_dim
+        if model_args.vggt_weights_path is not None:
+            model.config.vggt_weights_path = model_args.vggt_weights_path
+        model.config.vggt_image_size = model_args.vggt_image_size
+        model.config.vggt_patch_size = model_args.vggt_patch_size
         data_args.spatial_tower_type = model_args.spatial_tower
 
     if model_args.fusion_block is not None:

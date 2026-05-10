@@ -928,7 +928,7 @@ class LlavaMetaForCausalLM(ABC):
 
     #     return image_features
 
-    def encode_images(self, images, spatial_features=None, point_maps=None):
+    def encode_images(self, images, spatial_features=None, point_maps=None, split_sizes=None):
         # vision features
         image_features = self.get_model().get_vision_tower()(images)
         # fuse with spatial features
@@ -994,6 +994,15 @@ class LlavaMetaForCausalLM(ABC):
                         spatial_tower_class_name,
                     )
                 )
+                is_vggt_spatial = any(
+                    "vggt" in value
+                    for value in (
+                        cfg_spatial_tower_name,
+                        runtime_spatial_tower_name,
+                        spatial_tower_module,
+                        spatial_tower_class_name,
+                    )
+                )
                 loaded_spatial_features = spatial_features[0] if spatial_features is not None else None
                 has_token_pair_features = (
                     isinstance(loaded_spatial_features, dict)
@@ -1039,7 +1048,27 @@ class LlavaMetaForCausalLM(ABC):
                     camera_tokens, patch_tokens = _sf.camera_tokens, _sf.patch_tokens
                 else:
                     ensure_spatial_tower_loaded()
-                    camera_tokens, patch_tokens = spatial_tower(images)
+                    if is_vggt_spatial and split_sizes is not None:
+                        if images.ndim != 4:
+                            raise RuntimeError(
+                                "VGGT grouped runtime path expects flattened 4D images, "
+                                f"got shape {tuple(images.shape)}"
+                            )
+                        if sum(split_sizes) != images.shape[0]:
+                            raise RuntimeError(
+                                "VGGT split_sizes must sum to the flattened image count, "
+                                f"got split_sizes={split_sizes} and images={tuple(images.shape)}"
+                            )
+                        camera_token_chunks = []
+                        patch_token_chunks = []
+                        for image_chunk in torch.split(images, split_sizes, dim=0):
+                            chunk_camera_tokens, chunk_patch_tokens = spatial_tower(image_chunk)
+                            camera_token_chunks.append(chunk_camera_tokens)
+                            patch_token_chunks.append(chunk_patch_tokens)
+                        camera_tokens = torch.cat(camera_token_chunks, dim=0)
+                        patch_tokens = torch.cat(patch_token_chunks, dim=0)
+                    else:
+                        camera_tokens, patch_tokens = spatial_tower(images)
                     # Runtime path parity for svf_pose_prepend:
                     # compute camera_pose from camera_head using runtime camera_tokens.
                     if fusion_block_type == 'svf_pose_prepend':
@@ -1332,7 +1361,7 @@ class LlavaMetaForCausalLM(ABC):
 
             concat_images = torch.cat([image for image in images_list], dim=0)
             split_sizes = [image.shape[0] for image in images_list]
-            encoded_image_features = self.encode_images(concat_images, spatial_features, point_maps)
+            encoded_image_features = self.encode_images(concat_images, spatial_features, point_maps, split_sizes=split_sizes)
             # if self.get_model().get_spatial_tower() is not None:
             #     if spatial_features is None:
             #         camera_tokens, patch_tokens = self.encode_spatial_features(concat_images)
@@ -1593,7 +1622,8 @@ class LlavaMetaForCausalLM(ABC):
             else:
                 raise ValueError(f"Unexpected mm_patch_merge_type: {self.config.mm_patch_merge_type}")
         else:
-            image_features = self.encode_images(images)
+            split_sizes = [1] * images.shape[0] if getattr(images, "ndim", 0) == 4 else None
+            image_features = self.encode_images(images, split_sizes=split_sizes)
             image_feature_metadata = [{"visual_token_indices": _empty_long(image_features.device)}]
 
         if "image_feature_metadata" not in locals():

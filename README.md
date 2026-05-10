@@ -21,7 +21,8 @@ SpatialFocus/
 |-- third_party/
 |   |-- CUT3R/                # Geometry encoder submodule
 |   |-- EoMT/                 # EoMT submodule
-|   `-- Pi3/                  # Pi3 submodule
+|   |-- Pi3/                  # Pi3 submodule
+|   `-- VGGT/                 # VGGT spatial encoder submodule
 |-- thinking-in-space/        # VSiBench / VSTiBench evaluation framework
 |-- scripts/                  # Training, inference, and utility scripts
 |-- vlm_3r_data_process/      # Data processing pipeline
@@ -111,6 +112,19 @@ pip install gdown
 gdown --fuzzy https://drive.google.com/file/d/1Asz-ZB3FfpzZYwunhQvNPZEUA8XUNAYD/view?usp=drive_link
 cd ../../..
 ```
+
+### 5. Set up VGGT
+
+VGGT is included as a submodule under `third_party/VGGT`. The spatial encoder adapter can load weights from Hugging Face by default:
+
+```bash
+--spatial_tower vggt \
+--spatial_tower_select_feature all_tokens \
+--spatial_feature_dim 2048 \
+--vggt_weights_path facebook/VGGT-1B
+```
+
+For offline cluster jobs, pre-cache the VGGT checkpoint and pass the local path with `--vggt_weights_path /path/to/VGGT-1B`.
 
 ## Offline Cluster Setup 🧊
 
@@ -207,6 +221,7 @@ This repository is released under the Apache License 2.0. See [LICENSE](LICENSE)
 Some third-party components may be distributed under different licenses. In particular:
 
 - CUT3R is licensed under CC BY-NC-SA 4.0.
+- VGGT is distributed under its own license in `third_party/VGGT/LICENSE.txt`; note that VGGT checkpoint licenses differ between the original and commercial-use checkpoints.
 - This may impose restrictions on commercial use.
 
 Review all dependency licenses before production or commercial use.
@@ -217,5 +232,6 @@ This project builds on several excellent open-source projects:
 
 - [VLM-3R](https://github.com/VITA-Group/VLM-3R)
 - [CUT3R](https://github.com/CUT3R/CUT3R)
+- [VGGT](https://github.com/facebookresearch/vggt)
 - [LLaVA-NeXT](https://github.com/LLaVA-VL/LLaVA-NeXT)
 - [thinking-in-space](https://github.com/vision-x-nyu/thinking-in-space)
