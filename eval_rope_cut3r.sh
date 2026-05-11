@@ -35,9 +35,10 @@ MODEL_ROOT="${MODEL_ROOT:-/leonardo_work/EUHPC_D32_006/FAST/hf_models/VLM3R}"
 PRETRAINED_LOCAL="${PRETRAINED_LOCAL:-$MODEL_ROOT/Journey9ni/vlm-3r-llava-qwen2-lora}"
 MODEL_BASE_LOCAL="${MODEL_BASE_LOCAL:-$MODEL_ROOT/LLaVA-NeXT-Video-7B-Qwen2}"
 SIGLIP_LOCAL="${SIGLIP_LOCAL:-$MODEL_ROOT/siglip-so400m-patch14-384}"
+RUN_NAME="${RUN_NAME:-eval_rope_cut3r}"
 RUNTIME_ROOT="${RUNTIME_ROOT:-$REPO_DIR/.offline_runtime}"
-# Scope to SLURM_JOB_ID so concurrent jobs on different nodes never clobber each other.
-# Falls back to RUN_NAME for non-SLURM use.
+# Use a job-specific subdir to prevent concurrent jobs from clobbering each other.
+# SLURM_JOB_ID is unique per job; fall back to RUN_NAME for non-SLURM use.
 RUNTIME_ROOT="$RUNTIME_ROOT/${SLURM_JOB_ID:-$RUN_NAME}"
 PRETRAINED_RUNTIME=""
 
@@ -49,7 +50,6 @@ BATCH_SIZE="${BATCH_SIZE:-1}"
 MAX_FRAMES_NUM="${MAX_FRAMES_NUM:-32}"
 CONV_TEMPLATE="${CONV_TEMPLATE:-qwen_1_5}"
 MODEL_NAME="${MODEL_NAME:-vlm-3r-llava-qwen2-lora}"
-RUN_NAME="${RUN_NAME:-eval_rope_cut3r}"
 LIMIT="${LIMIT:-0}"
 
 MODEL_SPATIAL_TOWER="${MODEL_SPATIAL_TOWER:-cut3r}"
