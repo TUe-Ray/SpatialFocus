@@ -1,10 +1,10 @@
 #!/bin/bash
 #SBATCH --job-name=Eval_feat_align_frozen_p_geo
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=4
+#SBATCH --gpus-per-node=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=32
-#SBATCH --time=03:00:00
+#SBATCH --time=09:00:00
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=normal
 #SBATCH --output=logs/eval/%x_%j.out
