@@ -326,8 +326,6 @@ PY
   PRETRAINED_RUNTIME="$runtime_dir"
 }
 
-trap 'rm -rf "$RUNTIME_ROOT"' EXIT
-
 prepare_runtime_pretrained
 
 cd "$SUBMODULE_DIR"
@@ -368,6 +366,7 @@ cleanup_cmd_group() {
   if [[ -n "${cmd_pid:-}" ]] && kill -0 "$cmd_pid" >/dev/null 2>&1; then
     kill -- -"${cmd_pid}" >/dev/null 2>&1 || true
   fi
+  rm -rf "${RUNTIME_ROOT:-}" 2>/dev/null || true
 }
 
 trap cleanup_cmd_group EXIT
