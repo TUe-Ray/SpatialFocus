@@ -36,6 +36,9 @@ PRETRAINED_LOCAL="${PRETRAINED_LOCAL:-$MODEL_ROOT/Journey9ni/vlm-3r-llava-qwen2-
 MODEL_BASE_LOCAL="${MODEL_BASE_LOCAL:-$MODEL_ROOT/LLaVA-NeXT-Video-7B-Qwen2}"
 SIGLIP_LOCAL="${SIGLIP_LOCAL:-$MODEL_ROOT/siglip-so400m-patch14-384}"
 RUNTIME_ROOT="${RUNTIME_ROOT:-$REPO_DIR/.offline_runtime}"
+# Use a job-specific subdir to prevent concurrent jobs from clobbering each other.
+# SLURM_JOB_ID is unique per job; fall back to RUN_NAME for non-SLURM use.
+RUNTIME_ROOT="$RUNTIME_ROOT/${SLURM_JOB_ID:-$RUN_NAME}"
 PRETRAINED_RUNTIME=""
 
 TASK_DIR="${TASK_DIR:-$SUBMODULE_DIR/lmms_eval/tasks/vsibench_leonardo_offline}"
@@ -322,6 +325,8 @@ PY
 
   PRETRAINED_RUNTIME="$runtime_dir"
 }
+
+trap 'rm -rf "$RUNTIME_ROOT"' EXIT
 
 prepare_runtime_pretrained
 
