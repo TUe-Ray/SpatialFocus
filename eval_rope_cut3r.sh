@@ -36,6 +36,9 @@ PRETRAINED_LOCAL="${PRETRAINED_LOCAL:-$MODEL_ROOT/Journey9ni/vlm-3r-llava-qwen2-
 MODEL_BASE_LOCAL="${MODEL_BASE_LOCAL:-$MODEL_ROOT/LLaVA-NeXT-Video-7B-Qwen2}"
 SIGLIP_LOCAL="${SIGLIP_LOCAL:-$MODEL_ROOT/siglip-so400m-patch14-384}"
 RUNTIME_ROOT="${RUNTIME_ROOT:-$REPO_DIR/.offline_runtime}"
+# Scope to SLURM_JOB_ID so concurrent jobs on different nodes never clobber each other.
+# Falls back to RUN_NAME for non-SLURM use.
+RUNTIME_ROOT="$RUNTIME_ROOT/${SLURM_JOB_ID:-$RUN_NAME}"
 PRETRAINED_RUNTIME=""
 
 TASK_DIR="${TASK_DIR:-$SUBMODULE_DIR/lmms_eval/tasks/vsibench_leonardo_offline}"
@@ -363,6 +366,7 @@ cleanup_cmd_group() {
   if [[ -n "${cmd_pid:-}" ]] && kill -0 "$cmd_pid" >/dev/null 2>&1; then
     kill -- -"${cmd_pid}" >/dev/null 2>&1 || true
   fi
+  rm -rf "${RUNTIME_ROOT:-}" 2>/dev/null || true
 }
 
 trap cleanup_cmd_group EXIT
