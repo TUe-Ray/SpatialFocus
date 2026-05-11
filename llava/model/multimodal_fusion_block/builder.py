@@ -69,18 +69,18 @@ class CrossAttentionFusion(nn.Module):
         return fused_features, attn_weights
 
 
-class GeometryRoPE(nn.Module):
+class GeoRoPEFusionRotary(nn.Module):
     def __init__(self, head_dim, mode="spherical", theta=10000, max_depth=10.0, group_split=None):
         super().__init__()
         if mode not in {"depth", "xyz", "spherical"}:
-            raise ValueError(f"Unexpected geometry_rope_mode: {mode}")
+            raise ValueError(f"Unexpected geo_rope_fusion_mode: {mode}")
 
         self.head_dim = int(head_dim)
         self.mode = mode
         self.theta = theta
         self.max_depth = float(max_depth)
         if self.max_depth <= 0:
-            raise ValueError(f"geometry_rope_max_depth must be positive, got {max_depth}")
+            raise ValueError(f"geo_rope_fusion_max_depth must be positive, got {max_depth}")
 
         weights, self.group_split = self._parse_group_split(group_split, mode)
         group_dims = self._split_even_dims(self.head_dim, weights=weights)
@@ -174,12 +174,12 @@ class GeometryRoPE(nn.Module):
             x_rotated: [B, H, N, head_dim]
         """
         if x.dim() != 4:
-            raise ValueError(f"GeometryRoPE expects x as [B, H, N, D], got {tuple(x.shape)}")
+            raise ValueError(f"GeoRoPEFusionRotary expects x as [B, H, N, D], got {tuple(x.shape)}")
         if pos.dim() != 3 or pos.shape[-1] != 3:
-            raise ValueError(f"GeometryRoPE expects pos as [B, N, 3], got {tuple(pos.shape)}")
+            raise ValueError(f"GeoRoPEFusionRotary expects pos as [B, N, 3], got {tuple(pos.shape)}")
         if x.shape[0] != pos.shape[0] or x.shape[2] != pos.shape[1]:
             raise ValueError(
-                "GeometryRoPE position shape must match x batch/token dims, "
+                "GeoRoPEFusionRotary position shape must match x batch/token dims, "
                 f"got x={tuple(x.shape)} and pos={tuple(pos.shape)}"
             )
 
@@ -198,14 +198,14 @@ class GeometryRoPE(nn.Module):
         return torch.cat(rotated_groups, dim=-1)
 
 
-class CrossAttentionFusion3DRoPE(nn.Module):
+class GeoRoPEFusionCrossAttention(nn.Module):
     def __init__(
         self,
         d_clip,
         d_spatial_encoder,
         d_attn,
         num_heads,
-        rope_mode="spherical",
+        geo_rope_fusion_mode="spherical",
         max_depth=10.0,
         group_split=None,
         log_stats=False,
@@ -233,22 +233,22 @@ class CrossAttentionFusion3DRoPE(nn.Module):
         self.attn_out_proj = nn.Linear(d_attn, d_attn)
         self._reset_attention_parameters()
 
-        self.geometry_rope = GeometryRoPE(
+        self.geo_rope_fusion = GeoRoPEFusionRotary(
             head_dim=self.head_dim,
-            mode=rope_mode,
+            mode=geo_rope_fusion_mode,
             max_depth=max_depth,
             group_split=group_split,
         )
-        self.rope_gate_q = nn.Parameter(torch.zeros(()))
-        self.rope_gate_k = nn.Parameter(torch.zeros(()))
+        self.geo_rope_fusion_gate_q = nn.Parameter(torch.zeros(()))
+        self.geo_rope_fusion_gate_k = nn.Parameter(torch.zeros(()))
 
         self.out_proj = nn.Linear(d_attn, d_clip)
         self.out_norm = nn.LayerNorm(d_clip)
         self.dropout = nn.Dropout(dropout_rate)
         self.log_stats = log_stats
-        self.last_geometry_rope_stats = {
-            "group_split": self.geometry_rope.group_split,
-            "group_dims": list(self.geometry_rope.group_dims),
+        self.last_geo_rope_fusion_stats = {
+            "group_split": self.geo_rope_fusion.group_split,
+            "group_dims": list(self.geo_rope_fusion.group_dims),
         }
 
     def _reset_attention_parameters(self):
@@ -279,15 +279,15 @@ class CrossAttentionFusion3DRoPE(nn.Module):
         }
 
     def _record_stats(self, pos_clip, pos_spatial, q_delta, k_delta):
-        self.last_geometry_rope_stats = {
+        self.last_geo_rope_fusion_stats = {
             "pos_clip": self._mean_std(pos_clip),
             "pos_spatial": self._mean_std(pos_spatial),
-            "q_rope_minus_q": self._mean_std(q_delta),
-            "k_rope_minus_k": self._mean_std(k_delta),
-            "rope_gate_q": float(self.rope_gate_q.detach().float().item()),
-            "rope_gate_k": float(self.rope_gate_k.detach().float().item()),
-            "group_split": self.geometry_rope.group_split,
-            "group_dims": list(self.geometry_rope.group_dims),
+            "q_geo_rope_fusion_minus_q": self._mean_std(q_delta),
+            "k_geo_rope_fusion_minus_k": self._mean_std(k_delta),
+            "geo_rope_fusion_gate_q": float(self.geo_rope_fusion_gate_q.detach().float().item()),
+            "geo_rope_fusion_gate_k": float(self.geo_rope_fusion_gate_k.detach().float().item()),
+            "group_split": self.geo_rope_fusion.group_split,
+            "group_dims": list(self.geo_rope_fusion.group_dims),
         }
 
     def forward(self, clip_features, spatial_encoder_features, pos_clip, pos_spatial):
@@ -316,15 +316,15 @@ class CrossAttentionFusion3DRoPE(nn.Module):
         k = self._reshape_to_heads(k)
         v = self._reshape_to_heads(v)
 
-        q_rope = self.geometry_rope(q, pos_clip)
-        k_rope = self.geometry_rope(k, pos_spatial)
-        q_delta = q_rope - q
-        k_delta = k_rope - k
+        q_geo_rope_fusion = self.geo_rope_fusion(q, pos_clip)
+        k_geo_rope_fusion = self.geo_rope_fusion(k, pos_spatial)
+        q_delta = q_geo_rope_fusion - q
+        k_delta = k_geo_rope_fusion - k
         if self.log_stats:
             self._record_stats(pos_clip, pos_spatial, q_delta, k_delta)
 
-        q = q + self.rope_gate_q * q_delta
-        k = k + self.rope_gate_k * k_delta
+        q = q + self.geo_rope_fusion_gate_q * q_delta
+        k = k + self.geo_rope_fusion_gate_k * k_delta
 
         attn = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
         attn = F.softmax(attn.float(), dim=-1).to(dtype=q.dtype)
@@ -764,10 +764,10 @@ class ConcatSelfAttentionFusion(nn.Module):
 
 def build_multimodal_fusion_block(config, delay_load=False, **kwargs):
     fusion_block_type = getattr(config, "fusion_block", "cross_attention")
-    rope_mode_aliases = {
-        "svf_depth_rope": "depth",
-        "svf_xyz_rope": "xyz",
-        "svf_spherical_rope": "spherical",
+    geo_rope_fusion_mode_aliases = {
+        "svf_depth_geo_rope_fusion": "depth",
+        "svf_xyz_geo_rope_fusion": "xyz",
+        "svf_spherical_geo_rope_fusion": "spherical",
     }
     d_clip = config.mm_hidden_size
     d_llm = config.hidden_size
@@ -862,26 +862,26 @@ def build_multimodal_fusion_block(config, delay_load=False, **kwargs):
             d_attn=d_attn,
             num_heads=18,
         )
-    elif fusion_block_type == "svf_3d_rope" or fusion_block_type in rope_mode_aliases:
-        if fusion_block_type == "svf_depth_rope":
-            rope_mode = "depth"
-        elif fusion_block_type == "svf_xyz_rope":
-            rope_mode = "xyz"
-        elif fusion_block_type == "svf_spherical_rope":
-            rope_mode = "spherical"
+    elif fusion_block_type == "svf_geo_rope_fusion" or fusion_block_type in geo_rope_fusion_mode_aliases:
+        if fusion_block_type == "svf_depth_geo_rope_fusion":
+            geo_rope_fusion_mode = "depth"
+        elif fusion_block_type == "svf_xyz_geo_rope_fusion":
+            geo_rope_fusion_mode = "xyz"
+        elif fusion_block_type == "svf_spherical_geo_rope_fusion":
+            geo_rope_fusion_mode = "spherical"
         else:
-            rope_mode = getattr(config, "geometry_rope_mode", "spherical")
-        log_stats = getattr(config, "geometry_rope_log_stats", False)
+            geo_rope_fusion_mode = getattr(config, "geo_rope_fusion_mode", "spherical")
+        log_stats = getattr(config, "geo_rope_fusion_log_stats", False)
         if isinstance(log_stats, str):
             log_stats = log_stats.lower() in {"1", "true", "yes", "y", "on"}
-        return CrossAttentionFusion3DRoPE(
+        return GeoRoPEFusionCrossAttention(
             d_clip=d_clip,
             d_spatial_encoder=d_spatial_encoder,
             d_attn=d_attn,
             num_heads=18,
-            rope_mode=rope_mode,
-            max_depth=getattr(config, "geometry_rope_max_depth", 10.0),
-            group_split=getattr(config, "geometry_rope_group_split", None),
+            geo_rope_fusion_mode=geo_rope_fusion_mode,
+            max_depth=getattr(config, "geo_rope_fusion_max_depth", 10.0),
+            group_split=getattr(config, "geo_rope_fusion_group_split", None),
             log_stats=log_stats,
         )
     elif fusion_block_type == "svf_cat_feat":

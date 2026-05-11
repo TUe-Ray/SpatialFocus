@@ -195,8 +195,8 @@ class LlavaMetaModel:
                 return "CrossAttentionFusion"
             if fusion_block_type == "svf_patch_only":
                 return "CrossAttentionFusion"
-            if fusion_block_type in ["svf_3d_rope", "svf_depth_rope", "svf_xyz_rope", "svf_spherical_rope"]:
-                return "CrossAttentionFusion3DRoPE"
+            if fusion_block_type in ["svf_geo_rope_fusion", "svf_depth_geo_rope_fusion", "svf_xyz_geo_rope_fusion", "svf_spherical_geo_rope_fusion"]:
+                return "GeoRoPEFusionCrossAttention"
             if fusion_block_type == "svf_patch_cam_concat":
                 return "PatchCrossAttentionCameraConcatFusion"
             if fusion_block_type == "svf_geometry_bridge":
@@ -1165,7 +1165,7 @@ class LlavaMetaForCausalLM(ABC):
                     )
                     image_features = self.get_model().mm_projector(image_features)
 
-                elif fusion_block_type in ['svf_3d_rope', 'svf_depth_rope', 'svf_xyz_rope', 'svf_spherical_rope']:
+                elif fusion_block_type in ['svf_geo_rope_fusion', 'svf_depth_geo_rope_fusion', 'svf_xyz_geo_rope_fusion', 'svf_spherical_geo_rope_fusion']:
                     geometry_point_maps = _coalesce_point_maps(point_maps)
                     if geometry_point_maps is None and isinstance(loaded_spatial_features, dict):
                         point_map_keys = (
@@ -1184,14 +1184,14 @@ class LlavaMetaForCausalLM(ABC):
                                 break
                     if geometry_point_maps is None:
                         raise RuntimeError(
-                            "svf_3d_rope requires point_maps from CUT3R/Pi3X. "
+                            "svf_geo_rope_fusion requires point_maps from CUT3R/Pi3X. "
                             "Expected one of: point_maps, point_maps_ref, point_maps_cam, "
                             "pts3d_in_other_view, pts3d_in_self_view."
                         )
 
                     if geometry_point_maps.shape[0] != image_features.shape[0]:
                         raise RuntimeError(
-                            "svf_3d_rope point_maps batch/frame count must match image_features, "
+                            "svf_geo_rope_fusion point_maps batch/frame count must match image_features, "
                             f"got point_maps={tuple(geometry_point_maps.shape)} and "
                             f"image_features={tuple(image_features.shape)}"
                         )

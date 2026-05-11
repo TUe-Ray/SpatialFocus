@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=rope_cut3r_spherical_100p
+#SBATCH --job-name=geo_rope_fusion_cut3r_spherical_100p
 #SBATCH --nodes=4
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
@@ -14,29 +14,29 @@
 #SBATCH --exclusive
 
 SUFFIX="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
-NOTE="CUT3R Geometry-RoPE fusion: svf_3d_rope with point-map-derived spherical positions, 100% training data"
+NOTE="CUT3R GeoRoPE Fusion: svf_geo_rope_fusion with point-map-derived spherical positions, 100% training data"
 
 TRAIN_DATA_PERCENTAGE="100"
 
-MODEL_FUSION_BLOCK="${MODEL_FUSION_BLOCK:-svf_3d_rope}"
-# Fusion options for this Geometry-RoPE experiment:
+MODEL_FUSION_BLOCK="${MODEL_FUSION_BLOCK:-svf_geo_rope_fusion}"
+# Fusion options for this GeoRoPE Fusion experiment:
 # - svf_patch_only
-# - svf_3d_rope
-# - svf_depth_rope / svf_xyz_rope / svf_spherical_rope
-MODEL_GEOMETRY_ROPE_MODE="${MODEL_GEOMETRY_ROPE_MODE:-spherical}"
-MODEL_GEOMETRY_ROPE_MAX_DEPTH="${MODEL_GEOMETRY_ROPE_MAX_DEPTH:-10.0}"
-MODEL_GEOMETRY_ROPE_GROUP_SPLIT="${MODEL_GEOMETRY_ROPE_GROUP_SPLIT:-2,1,2}"
-MODEL_GEOMETRY_ROPE_LOG_STATS="${MODEL_GEOMETRY_ROPE_LOG_STATS:-False}"
+# - svf_geo_rope_fusion
+# - svf_depth_geo_rope_fusion / svf_xyz_geo_rope_fusion / svf_spherical_geo_rope_fusion
+MODEL_GEO_ROPE_FUSION_MODE="${MODEL_GEO_ROPE_FUSION_MODE:-spherical}"
+MODEL_GEO_ROPE_FUSION_MAX_DEPTH="${MODEL_GEO_ROPE_FUSION_MAX_DEPTH:-10.0}"
+MODEL_GEO_ROPE_FUSION_GROUP_SPLIT="${MODEL_GEO_ROPE_FUSION_GROUP_SPLIT:-2,1,2}"
+MODEL_GEO_ROPE_FUSION_LOG_STATS="${MODEL_GEO_ROPE_FUSION_LOG_STATS:-False}"
 # Group split rules:
-# - svf_depth_rope requires MODEL_GEOMETRY_ROPE_GROUP_SPLIT="1"
-# - svf_xyz_rope uses x,y,z split, e.g. "1,1,1" or "2,1,2"
-# - svf_spherical_rope uses theta,phi,log_r split, e.g. "1,1,1", "2,1,2", or "3,1,3"
-# - svf_3d_rope uses MODEL_GEOMETRY_ROPE_MODE to decide depth/xyz/spherical
+# - svf_depth_geo_rope_fusion requires MODEL_GEO_ROPE_FUSION_GROUP_SPLIT="1"
+# - svf_xyz_geo_rope_fusion uses x,y,z split, e.g. "1,1,1" or "2,1,2"
+# - svf_spherical_geo_rope_fusion uses theta,phi,log_r split, e.g. "1,1,1", "2,1,2", or "3,1,3"
+# - svf_geo_rope_fusion uses MODEL_GEO_ROPE_FUSION_MODE to decide depth/xyz/spherical
 # Run matrix:
 #   baseline:  MODEL_FUSION_BLOCK="svf_patch_only"
-#   depth:     MODEL_FUSION_BLOCK="svf_depth_rope"     MODEL_GEOMETRY_ROPE_GROUP_SPLIT="1"
-#   xyz:       MODEL_FUSION_BLOCK="svf_xyz_rope"       MODEL_GEOMETRY_ROPE_GROUP_SPLIT="1,1,1" or "2,1,2"
-#   spherical: MODEL_FUSION_BLOCK="svf_spherical_rope" MODEL_GEOMETRY_ROPE_GROUP_SPLIT="1,1,1" or "2,1,2" or "3,1,3"
+#   depth:     MODEL_FUSION_BLOCK="svf_depth_geo_rope_fusion"     MODEL_GEO_ROPE_FUSION_GROUP_SPLIT="1"
+#   xyz:       MODEL_FUSION_BLOCK="svf_xyz_geo_rope_fusion"       MODEL_GEO_ROPE_FUSION_GROUP_SPLIT="1,1,1" or "2,1,2"
+#   spherical: MODEL_FUSION_BLOCK="svf_spherical_geo_rope_fusion" MODEL_GEO_ROPE_FUSION_GROUP_SPLIT="1,1,1" or "2,1,2" or "3,1,3"
 # ============== Training percentage and shuffling (for ablation) ==============
 
 # ============================================================
@@ -289,30 +289,30 @@ echo "[BATCH] GRADIENT_ACCUMULATION_STEPS=$GRADIENT_ACCUMULATION_STEPS"
 #   True  -> load .pt and zero all tensor values
 echo "[ABLATION] ZERO_SPATIAL_FEATURES=$ZERO_SPATIAL_FEATURES"
 
-# Alias fusion blocks define their own Geometry-RoPE coordinate mode.
-# This keeps Slurm submissions robust even when MODEL_GEOMETRY_ROPE_MODE
+# Alias fusion blocks define their own GeoRoPE Fusion coordinate mode.
+# This keeps Slurm submissions robust even when MODEL_GEO_ROPE_FUSION_MODE
 # is not explicitly exported for depth/xyz/spherical aliases.
 case "$MODEL_FUSION_BLOCK" in
-    svf_depth_rope)
-        MODEL_GEOMETRY_ROPE_MODE="depth"
+    svf_depth_geo_rope_fusion)
+        MODEL_GEO_ROPE_FUSION_MODE="depth"
         ;;
-    svf_xyz_rope)
-        MODEL_GEOMETRY_ROPE_MODE="xyz"
+    svf_xyz_geo_rope_fusion)
+        MODEL_GEO_ROPE_FUSION_MODE="xyz"
         ;;
-    svf_spherical_rope)
-        MODEL_GEOMETRY_ROPE_MODE="spherical"
+    svf_spherical_geo_rope_fusion)
+        MODEL_GEO_ROPE_FUSION_MODE="spherical"
         ;;
 esac
 
 # Validate fusion option and print method summary for reproducibility.
 VALID_FUSION_BLOCKS=(
     "svf_patch_only"
-    "svf_3d_rope"
-    "svf_depth_rope"
-    "svf_xyz_rope"
-    "svf_spherical_rope"
+    "svf_geo_rope_fusion"
+    "svf_depth_geo_rope_fusion"
+    "svf_xyz_geo_rope_fusion"
+    "svf_spherical_geo_rope_fusion"
 )
-VALID_GEOMETRY_ROPE_MODES=("depth" "xyz" "spherical")
+VALID_GEO_ROPE_FUSION_MODES=("depth" "xyz" "spherical")
 IS_VALID_FUSION="False"
 for fusion_name in "${VALID_FUSION_BLOCKS[@]}"; do
     if [[ "$MODEL_FUSION_BLOCK" == "$fusion_name" ]]; then
@@ -327,17 +327,17 @@ if [[ "$IS_VALID_FUSION" != "True" ]]; then
     exit 1
 fi
 
-IS_VALID_GEOMETRY_ROPE_MODE="False"
-for rope_mode in "${VALID_GEOMETRY_ROPE_MODES[@]}"; do
-    if [[ "$MODEL_GEOMETRY_ROPE_MODE" == "$rope_mode" ]]; then
-        IS_VALID_GEOMETRY_ROPE_MODE="True"
+IS_VALID_GEO_ROPE_FUSION_MODE="False"
+for geo_rope_fusion_mode in "${VALID_GEO_ROPE_FUSION_MODES[@]}"; do
+    if [[ "$MODEL_GEO_ROPE_FUSION_MODE" == "$geo_rope_fusion_mode" ]]; then
+        IS_VALID_GEO_ROPE_FUSION_MODE="True"
         break
     fi
 done
 
-if [[ "$IS_VALID_GEOMETRY_ROPE_MODE" != "True" ]]; then
-    echo "[ERROR] Unsupported MODEL_GEOMETRY_ROPE_MODE: $MODEL_GEOMETRY_ROPE_MODE"
-    echo "[ERROR] Supported values: ${VALID_GEOMETRY_ROPE_MODES[*]}"
+if [[ "$IS_VALID_GEO_ROPE_FUSION_MODE" != "True" ]]; then
+    echo "[ERROR] Unsupported MODEL_GEO_ROPE_FUSION_MODE: $MODEL_GEO_ROPE_FUSION_MODE"
+    echo "[ERROR] Supported values: ${VALID_GEO_ROPE_FUSION_MODES[*]}"
     exit 1
 fi
 
@@ -346,17 +346,17 @@ case "$MODEL_FUSION_BLOCK" in
     svf_patch_only)
         echo "[FUSION] svf_patch_only: baseline patch-only cross-attention, Q=2D, KV=patch_tokens"
         ;;
-    svf_3d_rope)
-        echo "[FUSION] svf_3d_rope: Geometry-RoPE cross-attention, mode=$MODEL_GEOMETRY_ROPE_MODE, split=$MODEL_GEOMETRY_ROPE_GROUP_SPLIT"
+    svf_geo_rope_fusion)
+        echo "[FUSION] svf_geo_rope_fusion: GeoRoPE Fusion cross-attention, mode=$MODEL_GEO_ROPE_FUSION_MODE, split=$MODEL_GEO_ROPE_FUSION_GROUP_SPLIT"
         ;;
-    svf_depth_rope)
-        echo "[FUSION] svf_depth_rope: Geometry-RoPE cross-attention, mode=depth, split=$MODEL_GEOMETRY_ROPE_GROUP_SPLIT"
+    svf_depth_geo_rope_fusion)
+        echo "[FUSION] svf_depth_geo_rope_fusion: GeoRoPE Fusion cross-attention, mode=depth, split=$MODEL_GEO_ROPE_FUSION_GROUP_SPLIT"
         ;;
-    svf_xyz_rope)
-        echo "[FUSION] svf_xyz_rope: Geometry-RoPE cross-attention, mode=xyz, split=$MODEL_GEOMETRY_ROPE_GROUP_SPLIT"
+    svf_xyz_geo_rope_fusion)
+        echo "[FUSION] svf_xyz_geo_rope_fusion: GeoRoPE Fusion cross-attention, mode=xyz, split=$MODEL_GEO_ROPE_FUSION_GROUP_SPLIT"
         ;;
-    svf_spherical_rope)
-        echo "[FUSION] svf_spherical_rope: Geometry-RoPE cross-attention, mode=spherical, split=$MODEL_GEOMETRY_ROPE_GROUP_SPLIT"
+    svf_spherical_geo_rope_fusion)
+        echo "[FUSION] svf_spherical_geo_rope_fusion: GeoRoPE Fusion cross-attention, mode=spherical, split=$MODEL_GEO_ROPE_FUSION_GROUP_SPLIT"
         ;;
 esac
 
@@ -369,10 +369,10 @@ declare -A MODEL_ARGS=(
     [spatial_tower_select_feature]="$MODEL_SPATIAL_TOWER_SELECT_FEATURE"
     [spatial_feature_dim]="$MODEL_SPATIAL_FEATURE_DIM"
     [fusion_block]="$MODEL_FUSION_BLOCK"
-    [geometry_rope_mode]="$MODEL_GEOMETRY_ROPE_MODE"
-    [geometry_rope_max_depth]="$MODEL_GEOMETRY_ROPE_MAX_DEPTH"
-    [geometry_rope_group_split]="$MODEL_GEOMETRY_ROPE_GROUP_SPLIT"
-    [geometry_rope_log_stats]="$MODEL_GEOMETRY_ROPE_LOG_STATS"
+    [geo_rope_fusion_mode]="$MODEL_GEO_ROPE_FUSION_MODE"
+    [geo_rope_fusion_max_depth]="$MODEL_GEO_ROPE_FUSION_MAX_DEPTH"
+    [geo_rope_fusion_group_split]="$MODEL_GEO_ROPE_FUSION_GROUP_SPLIT"
+    [geo_rope_fusion_log_stats]="$MODEL_GEO_ROPE_FUSION_LOG_STATS"
     [tune_spatial_tower]="$MODEL_TUNE_SPATIAL_TOWER"
     [tune_fusion_block]="$MODEL_TUNE_FUSION_BLOCK"
     [tune_mm_mlp_adapter]="$MODEL_TUNE_MM_MLP_ADAPTER"

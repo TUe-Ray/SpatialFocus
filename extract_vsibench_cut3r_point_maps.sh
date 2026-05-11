@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-NOTE="Pre-extract CUT3R point-map sidecars for the VSI-Bench eval videos used by Geometry-RoPE evaluation."
+NOTE="Pre-extract CUT3R point-map sidecars for the VSI-Bench eval videos used by GeoRoPE Fusion evaluation."
 echo "-------- Note --------"
 echo "  note: $NOTE"
 

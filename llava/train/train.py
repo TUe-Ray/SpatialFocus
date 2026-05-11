@@ -198,31 +198,31 @@ class ModelArguments:
     fusion_block: Optional[str] = field(
         default=None,
         metadata={
-            "help": "Fusion strategy. New ablations: svf_baseline, svf_patch_cam_concat, svf_geometry_bridge, svf_3d_rope"
+            "help": "Fusion strategy. New ablations: svf_baseline, svf_patch_cam_concat, svf_geometry_bridge, svf_geo_rope_fusion"
         },
     )
-    geometry_rope_mode: Optional[str] = field(
+    geo_rope_fusion_mode: Optional[str] = field(
         default=None,
-        metadata={"help": "Geometry-RoPE mode for svf_3d_rope: depth, xyz, or spherical."},
+        metadata={"help": "GeoRoPE Fusion mode for svf_geo_rope_fusion: depth, xyz, or spherical."},
     )
-    geometry_rope_max_depth: Optional[float] = field(
+    geo_rope_fusion_max_depth: Optional[float] = field(
         default=None,
-        metadata={"help": "Maximum depth/radius used to normalize Geometry-RoPE positions."},
+        metadata={"help": "Maximum depth/radius used to normalize GeoRoPE Fusion positions."},
     )
-    geometry_rope_group_split: Optional[str] = field(
+    geo_rope_fusion_group_split: Optional[str] = field(
         default=None,
         metadata={
             "help": (
-                "Comma-separated Geometry-RoPE group split. "
+                "Comma-separated GeoRoPE Fusion group split. "
                 "For xyz: x,y,z. For spherical: theta,phi,log_r. "
                 "Examples: '1,1,1', '2,1,2', '3,1,3'. "
                 "For depth mode, use '1' or leave unset."
             )
         },
     )
-    geometry_rope_log_stats: bool = field(
+    geo_rope_fusion_log_stats: bool = field(
         default=False,
-        metadata={"help": "If True, record Geometry-RoPE tensor mean/std stats during each forward pass."},
+        metadata={"help": "If True, record GeoRoPE Fusion tensor mean/std stats during each forward pass."},
     )
     tune_fusion_block: bool = field(default=False)
 
@@ -2292,13 +2292,13 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
 
     if model_args.fusion_block is not None:
         overwrite_config["fusion_block"] = model_args.fusion_block
-    if model_args.geometry_rope_mode is not None:
-        overwrite_config["geometry_rope_mode"] = model_args.geometry_rope_mode
-    if model_args.geometry_rope_max_depth is not None:
-        overwrite_config["geometry_rope_max_depth"] = model_args.geometry_rope_max_depth
-    if model_args.geometry_rope_group_split is not None:
-        overwrite_config["geometry_rope_group_split"] = model_args.geometry_rope_group_split
-    overwrite_config["geometry_rope_log_stats"] = model_args.geometry_rope_log_stats
+    if model_args.geo_rope_fusion_mode is not None:
+        overwrite_config["geo_rope_fusion_mode"] = model_args.geo_rope_fusion_mode
+    if model_args.geo_rope_fusion_max_depth is not None:
+        overwrite_config["geo_rope_fusion_max_depth"] = model_args.geo_rope_fusion_max_depth
+    if model_args.geo_rope_fusion_group_split is not None:
+        overwrite_config["geo_rope_fusion_group_split"] = model_args.geo_rope_fusion_group_split
+    overwrite_config["geo_rope_fusion_log_stats"] = model_args.geo_rope_fusion_log_stats
 
     if overwrite_config:
         assert cfg_pretrained is not None, "cfg_pretrained is None"
@@ -2576,25 +2576,25 @@ def train(attn_implementation=None):
 
     if model_args.fusion_block is not None:
         model.config.fusion_block = model_args.fusion_block
-        if model_args.geometry_rope_mode is not None:
-            model.config.geometry_rope_mode = model_args.geometry_rope_mode
-        if model_args.geometry_rope_max_depth is not None:
-            model.config.geometry_rope_max_depth = model_args.geometry_rope_max_depth
-        if model_args.geometry_rope_group_split is not None:
-            model.config.geometry_rope_group_split = model_args.geometry_rope_group_split
-        model.config.geometry_rope_log_stats = model_args.geometry_rope_log_stats
+        if model_args.geo_rope_fusion_mode is not None:
+            model.config.geo_rope_fusion_mode = model_args.geo_rope_fusion_mode
+        if model_args.geo_rope_fusion_max_depth is not None:
+            model.config.geo_rope_fusion_max_depth = model_args.geo_rope_fusion_max_depth
+        if model_args.geo_rope_fusion_group_split is not None:
+            model.config.geo_rope_fusion_group_split = model_args.geo_rope_fusion_group_split
+        model.config.geo_rope_fusion_log_stats = model_args.geo_rope_fusion_log_stats
         model.get_model().initialize_fusion_block(model_args=model_args, fsdp=training_args.fsdp)
         fusion_block = model.get_fusion_block()
         fusion_block.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
 
         model.config.fusion_block = model_args.fusion_block
-        if model_args.geometry_rope_mode is not None:
-            model.config.geometry_rope_mode = model_args.geometry_rope_mode
-        if model_args.geometry_rope_max_depth is not None:
-            model.config.geometry_rope_max_depth = model_args.geometry_rope_max_depth
-        if model_args.geometry_rope_group_split is not None:
-            model.config.geometry_rope_group_split = model_args.geometry_rope_group_split
-        model.config.geometry_rope_log_stats = model_args.geometry_rope_log_stats
+        if model_args.geo_rope_fusion_mode is not None:
+            model.config.geo_rope_fusion_mode = model_args.geo_rope_fusion_mode
+        if model_args.geo_rope_fusion_max_depth is not None:
+            model.config.geo_rope_fusion_max_depth = model_args.geo_rope_fusion_max_depth
+        if model_args.geo_rope_fusion_group_split is not None:
+            model.config.geo_rope_fusion_group_split = model_args.geo_rope_fusion_group_split
+        model.config.geo_rope_fusion_log_stats = model_args.geo_rope_fusion_log_stats
         model.config.fusion_block_lr = training_args.fusion_block_lr
 
 

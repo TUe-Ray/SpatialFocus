@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=DBGRoPE_CUT3R_Eval
+#SBATCH --job-name=DBGGeoRoPEFusion_CUT3R_Eval
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=4
 #SBATCH --ntasks-per-node=1
@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-NOTE="Leonardo offline VSI-Bench eval for Geometry-RoPE CUT3R VLM-3R checkpoints. This script uses precomputed CUT3R point-map sidecars during inference."
+NOTE="Leonardo offline VSI-Bench eval for GeoRoPE Fusion CUT3R VLM-3R checkpoints. This script uses precomputed CUT3R point-map sidecars during inference."
 echo "-------- Note --------"
 echo "  note: $NOTE"
 
@@ -35,7 +35,7 @@ MODEL_ROOT="${MODEL_ROOT:-/leonardo_work/EUHPC_D32_006/FAST/hf_models/VLM3R}"
 PRETRAINED_LOCAL="${PRETRAINED_LOCAL:-$MODEL_ROOT/Journey9ni/vlm-3r-llava-qwen2-lora}"
 MODEL_BASE_LOCAL="${MODEL_BASE_LOCAL:-$MODEL_ROOT/LLaVA-NeXT-Video-7B-Qwen2}"
 SIGLIP_LOCAL="${SIGLIP_LOCAL:-$MODEL_ROOT/siglip-so400m-patch14-384}"
-RUN_NAME="${RUN_NAME:-eval_rope_cut3r}"
+RUN_NAME="${RUN_NAME:-eval_geo_rope_fusion_cut3r}"
 RUNTIME_ROOT="${RUNTIME_ROOT:-$REPO_DIR/.offline_runtime}"
 # Use a job-specific subdir to prevent concurrent jobs from clobbering each other.
 # SLURM_JOB_ID is unique per job; fall back to RUN_NAME for non-SLURM use.
@@ -55,17 +55,17 @@ LIMIT="${LIMIT:-0}"
 MODEL_SPATIAL_TOWER="${MODEL_SPATIAL_TOWER:-cut3r}"
 MODEL_SPATIAL_FEATURE_DIM="${MODEL_SPATIAL_FEATURE_DIM:-768}"
 MODEL_SPATIAL_TOWER_SELECT_FEATURE="${MODEL_SPATIAL_TOWER_SELECT_FEATURE:-all_tokens}"
-MODEL_FUSION_BLOCK="${MODEL_FUSION_BLOCK:-svf_3d_rope}"
-MODEL_GEOMETRY_ROPE_MODE="${MODEL_GEOMETRY_ROPE_MODE:-spherical}"
-MODEL_GEOMETRY_ROPE_MAX_DEPTH="${MODEL_GEOMETRY_ROPE_MAX_DEPTH:-10.0}"
-MODEL_GEOMETRY_ROPE_GROUP_SPLIT="${MODEL_GEOMETRY_ROPE_GROUP_SPLIT:-2,1,2}"
-MODEL_GEOMETRY_ROPE_LOG_STATS="${MODEL_GEOMETRY_ROPE_LOG_STATS:-False}"
+MODEL_FUSION_BLOCK="${MODEL_FUSION_BLOCK:-svf_geo_rope_fusion}"
+MODEL_GEO_ROPE_FUSION_MODE="${MODEL_GEO_ROPE_FUSION_MODE:-spherical}"
+MODEL_GEO_ROPE_FUSION_MAX_DEPTH="${MODEL_GEO_ROPE_FUSION_MAX_DEPTH:-10.0}"
+MODEL_GEO_ROPE_FUSION_GROUP_SPLIT="${MODEL_GEO_ROPE_FUSION_GROUP_SPLIT:-2,1,2}"
+MODEL_GEO_ROPE_FUSION_LOG_STATS="${MODEL_GEO_ROPE_FUSION_LOG_STATS:-False}"
 
 # Group split rules:
-# - svf_depth_rope requires MODEL_GEOMETRY_ROPE_GROUP_SPLIT="1"
-# - svf_xyz_rope uses x,y,z split, e.g. "1,1,1" or "2,1,2"
-# - svf_spherical_rope uses theta,phi,log_r split, e.g. "1,1,1", "2,1,2", or "3,1,3"
-# - svf_3d_rope uses MODEL_GEOMETRY_ROPE_MODE to decide depth/xyz/spherical
+# - svf_depth_geo_rope_fusion requires MODEL_GEO_ROPE_FUSION_GROUP_SPLIT="1"
+# - svf_xyz_geo_rope_fusion uses x,y,z split, e.g. "1,1,1" or "2,1,2"
+# - svf_spherical_geo_rope_fusion uses theta,phi,log_r split, e.g. "1,1,1", "2,1,2", or "3,1,3"
+# - svf_geo_rope_fusion uses MODEL_GEO_ROPE_FUSION_MODE to decide depth/xyz/spherical
 
 cd "$REPO_DIR"
 
@@ -97,10 +97,10 @@ echo "MODEL_SPATIAL_TOWER=$MODEL_SPATIAL_TOWER"
 echo "MODEL_SPATIAL_FEATURE_DIM=$MODEL_SPATIAL_FEATURE_DIM"
 echo "MODEL_SPATIAL_TOWER_SELECT_FEATURE=$MODEL_SPATIAL_TOWER_SELECT_FEATURE"
 echo "MODEL_FUSION_BLOCK=$MODEL_FUSION_BLOCK"
-echo "MODEL_GEOMETRY_ROPE_MODE=$MODEL_GEOMETRY_ROPE_MODE"
-echo "MODEL_GEOMETRY_ROPE_MAX_DEPTH=$MODEL_GEOMETRY_ROPE_MAX_DEPTH"
-echo "MODEL_GEOMETRY_ROPE_GROUP_SPLIT=$MODEL_GEOMETRY_ROPE_GROUP_SPLIT"
-echo "MODEL_GEOMETRY_ROPE_LOG_STATS=$MODEL_GEOMETRY_ROPE_LOG_STATS"
+echo "MODEL_GEO_ROPE_FUSION_MODE=$MODEL_GEO_ROPE_FUSION_MODE"
+echo "MODEL_GEO_ROPE_FUSION_MAX_DEPTH=$MODEL_GEO_ROPE_FUSION_MAX_DEPTH"
+echo "MODEL_GEO_ROPE_FUSION_GROUP_SPLIT=$MODEL_GEO_ROPE_FUSION_GROUP_SPLIT"
+echo "MODEL_GEO_ROPE_FUSION_LOG_STATS=$MODEL_GEO_ROPE_FUSION_LOG_STATS"
 echo "=================="
 
 for path in "$REPO_DIR" "$SUBMODULE_DIR" "$TASK_DIR" "$PRETRAINED_LOCAL" "$MODEL_BASE_LOCAL" "$SIGLIP_LOCAL"; do
@@ -288,7 +288,7 @@ prepare_runtime_pretrained() {
   done
 
   cp "$PRETRAINED_LOCAL/config.json" "$runtime_dir/config.json"
-  python - "$runtime_dir/config.json" "$SIGLIP_LOCAL" "$MODEL_SPATIAL_TOWER" "$MODEL_SPATIAL_FEATURE_DIM" "$MODEL_SPATIAL_TOWER_SELECT_FEATURE" "$MODEL_FUSION_BLOCK" "$MODEL_GEOMETRY_ROPE_MODE" "$MODEL_GEOMETRY_ROPE_MAX_DEPTH" "$MODEL_GEOMETRY_ROPE_GROUP_SPLIT" "$MODEL_GEOMETRY_ROPE_LOG_STATS" <<'PY'
+  python - "$runtime_dir/config.json" "$SIGLIP_LOCAL" "$MODEL_SPATIAL_TOWER" "$MODEL_SPATIAL_FEATURE_DIM" "$MODEL_SPATIAL_TOWER_SELECT_FEATURE" "$MODEL_FUSION_BLOCK" "$MODEL_GEO_ROPE_FUSION_MODE" "$MODEL_GEO_ROPE_FUSION_MAX_DEPTH" "$MODEL_GEO_ROPE_FUSION_GROUP_SPLIT" "$MODEL_GEO_ROPE_FUSION_LOG_STATS" <<'PY'
 import json
 import sys
 
@@ -298,10 +298,10 @@ spatial_tower = sys.argv[3]
 spatial_feature_dim = int(sys.argv[4])
 spatial_tower_select_feature = sys.argv[5]
 fusion_block = sys.argv[6]
-geometry_rope_mode = sys.argv[7]
-geometry_rope_max_depth = float(sys.argv[8])
-geometry_rope_group_split = sys.argv[9]
-geometry_rope_log_stats = sys.argv[10].lower() in {"1", "true", "yes", "y", "on"}
+geo_rope_fusion_mode = sys.argv[7]
+geo_rope_fusion_max_depth = float(sys.argv[8])
+geo_rope_fusion_group_split = sys.argv[9]
+geo_rope_fusion_log_stats = sys.argv[10].lower() in {"1", "true", "yes", "y", "on"}
 
 with open(cfg_path, "r", encoding="utf-8") as f:
     cfg = json.load(f)
@@ -313,10 +313,10 @@ cfg["spatial_tower"] = spatial_tower
 cfg["spatial_feature_dim"] = spatial_feature_dim
 cfg["spatial_tower_select_feature"] = spatial_tower_select_feature
 cfg["fusion_block"] = fusion_block
-cfg["geometry_rope_mode"] = geometry_rope_mode
-cfg["geometry_rope_max_depth"] = geometry_rope_max_depth
-cfg["geometry_rope_group_split"] = geometry_rope_group_split
-cfg["geometry_rope_log_stats"] = geometry_rope_log_stats
+cfg["geo_rope_fusion_mode"] = geo_rope_fusion_mode
+cfg["geo_rope_fusion_max_depth"] = geo_rope_fusion_max_depth
+cfg["geo_rope_fusion_group_split"] = geo_rope_fusion_group_split
+cfg["geo_rope_fusion_log_stats"] = geo_rope_fusion_log_stats
 
 with open(cfg_path, "w", encoding="utf-8") as f:
     json.dump(cfg, f, indent=2)

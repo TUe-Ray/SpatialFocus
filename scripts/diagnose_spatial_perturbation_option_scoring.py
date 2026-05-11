@@ -1062,10 +1062,10 @@ def load_model_and_processor(args: argparse.Namespace):
         "spatial_feature_dim",
         "spatial_tower_select_feature",
         "fusion_block",
-        "geometry_rope_mode",
-        "geometry_rope_max_depth",
-        "geometry_rope_group_split",
-        "geometry_rope_log_stats",
+        "geo_rope_fusion_mode",
+        "geo_rope_fusion_max_depth",
+        "geo_rope_fusion_group_split",
+        "geo_rope_fusion_log_stats",
     ):
         if hasattr(cfg, key):
             overwrite_config[key] = getattr(cfg, key)
