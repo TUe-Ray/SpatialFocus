@@ -126,6 +126,12 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
             non_lora_trainables = {(k[11:] if k.startswith("base_model.") else k): v for k, v in non_lora_trainables.items()}
             if any(k.startswith("model.model.") for k in non_lora_trainables):
                 non_lora_trainables = {(k[6:] if k.startswith("model.") else k): v for k, v in non_lora_trainables.items()}
+            # Backward compat: remap old weight key names from before the GeoRoPE Fusion rename.
+            _geo_rope_key_remap = {
+                "model.fusion_block.rope_gate_q": "model.fusion_block.geo_rope_fusion_gate_q",
+                "model.fusion_block.rope_gate_k": "model.fusion_block.geo_rope_fusion_gate_k",
+            }
+            non_lora_trainables = {_geo_rope_key_remap.get(k, k): v for k, v in non_lora_trainables.items()}
             msg = model.load_state_dict(non_lora_trainables, strict=False)
             rank0_print(f"[DEBUG] non_lora_trainables loaded: missing={len(msg.missing_keys)}, unexpected={len(msg.unexpected_keys)}")
 

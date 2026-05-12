@@ -768,6 +768,10 @@ def build_multimodal_fusion_block(config, delay_load=False, **kwargs):
         "svf_depth_geo_rope_fusion": "depth",
         "svf_xyz_geo_rope_fusion": "xyz",
         "svf_spherical_geo_rope_fusion": "spherical",
+        # Backward compat: old names before the GeoRoPE Fusion rename (commit 8561c4d)
+        "svf_depth_rope": "depth",
+        "svf_xyz_rope": "xyz",
+        "svf_spherical_rope": "spherical",
     }
     d_clip = config.mm_hidden_size
     d_llm = config.hidden_size
@@ -863,25 +867,29 @@ def build_multimodal_fusion_block(config, delay_load=False, **kwargs):
             num_heads=18,
         )
     elif fusion_block_type == "svf_geo_rope_fusion" or fusion_block_type in geo_rope_fusion_mode_aliases:
-        if fusion_block_type == "svf_depth_geo_rope_fusion":
-            geo_rope_fusion_mode = "depth"
-        elif fusion_block_type == "svf_xyz_geo_rope_fusion":
-            geo_rope_fusion_mode = "xyz"
-        elif fusion_block_type == "svf_spherical_geo_rope_fusion":
-            geo_rope_fusion_mode = "spherical"
+        if fusion_block_type in geo_rope_fusion_mode_aliases:
+            # Explicit alias (new or old name) → mode is fully determined by the name.
+            geo_rope_fusion_mode = geo_rope_fusion_mode_aliases[fusion_block_type]
         else:
-            geo_rope_fusion_mode = getattr(config, "geo_rope_fusion_mode", "spherical")
-        log_stats = getattr(config, "geo_rope_fusion_log_stats", False)
+            # svf_geo_rope_fusion: fall back to config; check both new and old key names.
+            geo_rope_fusion_mode = (
+                getattr(config, "geo_rope_fusion_mode", None)
+                or getattr(config, "geometry_rope_mode", "spherical")
+            )
+        log_stats = getattr(config, "geo_rope_fusion_log_stats", False) or getattr(config, "geometry_rope_log_stats", False)
         if isinstance(log_stats, str):
             log_stats = log_stats.lower() in {"1", "true", "yes", "y", "on"}
+        # Accept both new and old config key names for max_depth and group_split.
+        max_depth = getattr(config, "geo_rope_fusion_max_depth", None) or getattr(config, "geometry_rope_max_depth", 10.0)
+        group_split = getattr(config, "geo_rope_fusion_group_split", None) or getattr(config, "geometry_rope_group_split", None)
         return GeoRoPEFusionCrossAttention(
             d_clip=d_clip,
             d_spatial_encoder=d_spatial_encoder,
             d_attn=d_attn,
             num_heads=18,
             geo_rope_fusion_mode=geo_rope_fusion_mode,
-            max_depth=getattr(config, "geo_rope_fusion_max_depth", 10.0),
-            group_split=getattr(config, "geo_rope_fusion_group_split", None),
+            max_depth=max_depth,
+            group_split=group_split,
             log_stats=log_stats,
         )
     elif fusion_block_type == "svf_cat_feat":
