@@ -1,8 +1,8 @@
 #!/usr/bin/env python
-"""ROI similarity maps for CUT3R and PI3 decoder-layer outputs.
+"""ROI similarity maps for CUT3R, PI3, and VGGT layer outputs.
 
 This is an inference-only diagnostic. It runs the spatial encoders on selected
-VSI/VLM-3R samples, captures the last decoder layers, pools each native grid to
+VSI/VLM-3R samples, captures selected spatial layers, pools each native grid to
 the target 14x14 visual-token grid, and visualizes anchor-token similarity maps.
 """
 
@@ -27,6 +27,7 @@ import torch
 import torch.nn.functional as F
 import yaml
 from PIL import Image
+from safetensors.torch import load_file as safe_load_file
 from transformers import AutoImageProcessor, AutoTokenizer
 
 try:
@@ -64,6 +65,16 @@ def parse_grid(value: str) -> tuple[int, int]:
     if len(parts) != 2:
         raise ValueError(f"Expected grid as HxW or H,W, got {value!r}")
     return int(parts[0]), int(parts[1])
+
+
+def resolve_layer_indices(layer_indices: list[int], depth: int) -> dict[int, int]:
+    resolved = {}
+    for layer in layer_indices:
+        idx = layer if layer >= 0 else depth + layer
+        if idx < 0 or idx >= depth:
+            raise RuntimeError(f"Layer {layer} resolves to {idx}, outside depth {depth}.")
+        resolved[layer] = idx
+    return resolved
 
 
 def infer_square_hw(token_count: int, name: str) -> tuple[int, int]:
@@ -311,6 +322,67 @@ def run_pi3_decoder_layers(
     return named
 
 
+def load_vggt(args: argparse.Namespace, device: torch.device, dtype: torch.dtype):
+    vggt_root = REPO_ROOT / "third_party" / "VGGT"
+    if str(vggt_root) in sys.path:
+        sys.path.remove(str(vggt_root))
+    sys.path.insert(0, str(vggt_root))
+    from vggt.models.vggt import VGGT
+
+    weights_path = Path(args.vggt_weights)
+    model = VGGT().to(device=device, dtype=dtype).eval()
+    if weights_path.is_dir() and (weights_path / "model.safetensors").exists():
+        state = safe_load_file(str(weights_path / "model.safetensors"), device="cpu")
+        model.load_state_dict(state, strict=True)
+    elif weights_path.is_dir() and (weights_path / "model.pt").exists():
+        state = torch.load(weights_path / "model.pt", map_location="cpu")
+        if isinstance(state, dict) and "model" in state:
+            state = state["model"]
+        model.load_state_dict(state, strict=True)
+    elif weights_path.exists():
+        state = torch.load(weights_path, map_location="cpu")
+        if isinstance(state, dict) and "model" in state:
+            state = state["model"]
+        model.load_state_dict(state, strict=True)
+    else:
+        model = VGGT.from_pretrained(args.vggt_weights).to(device=device, dtype=dtype).eval()
+    for param in model.parameters():
+        param.requires_grad_(False)
+    return model
+
+
+def prepare_vggt_input(pixel_values: torch.Tensor, image_size: int) -> torch.Tensor:
+    if pixel_values.dim() == 4:
+        views = F.interpolate(pixel_values, size=(image_size, image_size), mode="bilinear", align_corners=False)
+        views = views.unsqueeze(0)
+    elif pixel_values.dim() == 5:
+        bsz, frames, channels, height, width = pixel_values.shape
+        views = pixel_values.reshape(bsz * frames, channels, height, width)
+        views = F.interpolate(views, size=(image_size, image_size), mode="bilinear", align_corners=False)
+        views = views.reshape(bsz, frames, channels, image_size, image_size)
+    else:
+        raise RuntimeError(f"VGGT expected pixel values [F,C,H,W] or [B,F,C,H,W], got {tuple(pixel_values.shape)}")
+    return (views * 0.5 + 0.5).clamp(0.0, 1.0)
+
+
+def run_vggt_aggregator_layers(
+    vggt: torch.nn.Module,
+    pixel_values: torch.Tensor,
+    layer_indices: list[int],
+    image_size: int,
+) -> dict[str, torch.Tensor]:
+    views = prepare_vggt_input(pixel_values, image_size)
+    with torch.cuda.amp.autocast(dtype=views.dtype):
+        aggregated_tokens_list, patch_start_idx = vggt.aggregator(views)
+    resolved = resolve_layer_indices(layer_indices, len(aggregated_tokens_list))
+    named = {}
+    for layer, idx in resolved.items():
+        # [B=1, F, camera/register/patch tokens, D] -> [F, patch tokens, D]
+        tokens = aggregated_tokens_list[idx][0, :, patch_start_idx:, :].detach().float().cpu()
+        named[f"VGGT agg {layer}"] = tokens
+    return named
+
+
 def frame_features_from_layers(
     layer_features: dict[str, torch.Tensor],
     local_frame_idx: int,
@@ -367,6 +439,39 @@ def save_figure(
     plt.close(fig)
 
 
+def save_individual_map(
+    path: Path,
+    rgb: np.ndarray,
+    anchor: dict[str, Any],
+    name: str,
+    value: torch.Tensor,
+    normalize_mode: str,
+    global_limits: tuple[float, float] | None,
+) -> None:
+    if plt is None:
+        raise RuntimeError("matplotlib is required for figure generation.")
+    if normalize_mode == "global_per_figure" and global_limits is not None:
+        vmin, vmax = global_limits
+    else:
+        vmin, vmax = float(value.float().min()), float(value.float().max())
+    heat = F.interpolate(value[None, None].float(), size=rgb.shape[:2], mode="bilinear", align_corners=False)[0, 0].numpy()
+    fig, axes = plt.subplots(1, 2, figsize=(6.0, 3.2), squeeze=False)
+    ax = axes[0, 0]
+    ax.imshow(rgb)
+    x = anchor["image_xy"][0] * (rgb.shape[1] - 1)
+    y = anchor["image_xy"][1] * (rgb.shape[0] - 1)
+    ax.scatter([x], [y], s=52, c="red", edgecolors="white", linewidths=1.2)
+    ax.set_title("RGB", fontsize=9)
+    ax.axis("off")
+    ax = axes[0, 1]
+    ax.imshow(heat, cmap="viridis", vmin=vmin, vmax=vmax)
+    ax.set_title(name, fontsize=9)
+    ax.axis("off")
+    fig.tight_layout()
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+
+
 def analyze_sample(
     args: argparse.Namespace,
     image_processor: Any,
@@ -375,6 +480,7 @@ def analyze_sample(
     sample_idx: int,
     cut3r: torch.nn.Module | None,
     pi3: torch.nn.Module | None,
+    vggt: torch.nn.Module | None,
     device: torch.device,
     dtype: torch.dtype,
 ) -> tuple[list[dict[str, Any]], int]:
@@ -391,12 +497,16 @@ def analyze_sample(
             layer_features.update(run_cut3r_decoder_layers(cut3r, pixel_values, args.decoder_layers))
         if pi3 is not None:
             layer_features.update(run_pi3_decoder_layers(pi3, pixel_values, args.decoder_layers, args.pi3x_input_size))
+        if vggt is not None:
+            layer_features.update(run_vggt_aggregator_layers(vggt, pixel_values, args.vggt_layers, args.vggt_input_size))
 
     rows = []
     figures_dir = Path(args.output_dir) / "figures"
+    individual_dir = Path(args.output_dir) / "figures_individual"
     raw_dir = Path(args.output_dir) / "raw"
     frames_dir = Path(args.output_dir) / "frames"
     figures_dir.mkdir(parents=True, exist_ok=True)
+    individual_dir.mkdir(parents=True, exist_ok=True)
     raw_dir.mkdir(parents=True, exist_ok=True)
     frames_dir.mkdir(parents=True, exist_ok=True)
     figure_count = 0
@@ -413,6 +523,23 @@ def analyze_sample(
             raw_maps = {name: similarity_map(value, anchor["token_index"], target_hw) for name, value in frame_features.items()}
             stem = f"{safe_id(sample_id)}_frame{frame_id}_anchor{anchor['anchor_id']}"
             save_figure(figures_dir / f"{stem}.png", rgb, anchor, raw_maps, args.normalize_mode)
+            global_limits = None
+            if args.normalize_mode == "global_per_figure":
+                values = torch.cat([value.float().flatten() for value in raw_maps.values()])
+                global_limits = (float(values.min()), float(values.max()))
+            if args.save_individual_figures:
+                sample_individual_dir = individual_dir / stem
+                sample_individual_dir.mkdir(parents=True, exist_ok=True)
+                for name, sim in raw_maps.items():
+                    save_individual_map(
+                        sample_individual_dir / f"{safe_id(name)}.png",
+                        rgb,
+                        anchor,
+                        name,
+                        sim,
+                        args.normalize_mode,
+                        global_limits,
+                    )
             save_rgb_frame(frames_dir / f"{stem}_rgb_anchor.png", rgb, anchor)
             figure_count += 1
 
@@ -427,12 +554,21 @@ def analyze_sample(
 
             cut_ref = raw_maps.get("CUT3R dec -1")
             pi3_ref = raw_maps.get("PI3 dec -1")
+            vggt_ref = raw_maps.get("VGGT agg -1")
             for name, sim in raw_maps.items():
-                cut_p = cut_s = pi3_p = pi3_s = float("nan")
+                cut_p = cut_s = pi3_p = pi3_s = vggt_p = vggt_s = self_p = self_s = float("nan")
                 if cut_ref is not None:
                     cut_p, cut_s = corr_values(sim, cut_ref)
                 if pi3_ref is not None:
                     pi3_p, pi3_s = corr_values(sim, pi3_ref)
+                if vggt_ref is not None:
+                    vggt_p, vggt_s = corr_values(sim, vggt_ref)
+                if name.startswith("CUT3R") and cut_ref is not None:
+                    self_p, self_s = corr_values(sim, cut_ref)
+                elif name.startswith("PI3") and pi3_ref is not None:
+                    self_p, self_s = corr_values(sim, pi3_ref)
+                elif name.startswith("VGGT") and vggt_ref is not None:
+                    self_p, self_s = corr_values(sim, vggt_ref)
                 rows.append({
                     "sample_id": sample_id,
                     "category": extract_category(raw_item),
@@ -443,6 +579,10 @@ def analyze_sample(
                     "spearman_with_cut3r_dec_m1": cut_s,
                     "pearson_with_pi3_dec_m1": pi3_p,
                     "spearman_with_pi3_dec_m1": pi3_s,
+                    "pearson_with_vggt_agg_m1": vggt_p,
+                    "spearman_with_vggt_agg_m1": vggt_s,
+                    "pearson_with_own_final": self_p,
+                    "spearman_with_own_final": self_s,
                     "mean_similarity": float(sim.float().mean().item()),
                     "std_similarity": float(sim.float().std(unbiased=False).item()),
                 })
@@ -463,6 +603,7 @@ def analyze_sample(
                 "pool_mode": args.pool_mode,
                 "cut3r_weights": args.cut3r_weights if cut3r is not None else None,
                 "pi3x_weights": args.pi3x_weights if pi3 is not None else None,
+                "vggt_weights": args.vggt_weights if vggt is not None else None,
                 "number_of_frames": int(video_tensor.shape[0]),
             }
             with open(raw_dir / f"{stem}.json", "w", encoding="utf-8") as f:
@@ -490,6 +631,10 @@ def write_summary(output_dir: Path, rows: list[dict[str, Any]]) -> dict[str, dic
         "spearman_with_cut3r_dec_m1",
         "pearson_with_pi3_dec_m1",
         "spearman_with_pi3_dec_m1",
+        "pearson_with_vggt_agg_m1",
+        "spearman_with_vggt_agg_m1",
+        "pearson_with_own_final",
+        "spearman_with_own_final",
         "mean_similarity",
         "std_similarity",
     ]
@@ -500,7 +645,12 @@ def write_summary(output_dir: Path, rows: list[dict[str, Any]]) -> dict[str, dic
     grouped: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
     for row in rows:
         rep = row["representation"]
-        for key in ("spearman_with_cut3r_dec_m1", "spearman_with_pi3_dec_m1"):
+        for key in (
+            "spearman_with_cut3r_dec_m1",
+            "spearman_with_pi3_dec_m1",
+            "spearman_with_vggt_agg_m1",
+            "spearman_with_own_final",
+        ):
             value = float(row[key])
             if not math.isnan(value):
                 grouped[rep][key].append(value)
@@ -523,7 +673,9 @@ def main() -> None:
     parser.add_argument("--normalize_mode", choices=["global_per_figure", "per_map"], default="global_per_figure")
     parser.add_argument("--save_raw", type=str2bool, default=True)
     parser.add_argument("--save_features", action="store_true")
+    parser.add_argument("--save_individual_figures", type=str2bool, default=True)
     parser.add_argument("--decoder_layers", type=parse_int_list, default="-3,-2,-1")
+    parser.add_argument("--vggt_layers", type=parse_int_list, default="-8,-6,-4,-2,-1")
     parser.add_argument("--target_grid", default="14x14")
     parser.add_argument("--pool_mode", choices=["bilinear", "average", "max"], default="bilinear")
 
@@ -542,7 +694,9 @@ def main() -> None:
     parser.add_argument("--cut3r_weights", default=str(REPO_ROOT / "third_party/CUT3R/src/cut3r_512_dpt_4_64.pth"))
     parser.add_argument("--pi3x_weights", default="/leonardo_scratch/fast/EUHPC_D32_006/hf_models/Pi3X")
     parser.add_argument("--pi3x_input_size", type=int, default=518)
-    parser.add_argument("--encoder", choices=["both", "cut3r", "pi3"], default="both")
+    parser.add_argument("--vggt_weights", default="/leonardo_work/EUHPC_D32_006/FAST/hf_models/vggt")
+    parser.add_argument("--vggt_input_size", type=int, default=518)
+    parser.add_argument("--encoder", choices=["both", "all", "cut3r", "pi3", "vggt", "cut3r_pi3", "cut3r_vggt", "pi3_vggt"], default="both")
     parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--dtype", choices=["float16", "bfloat16", "float32"], default="float16")
     parser.add_argument("--seed", type=int, default=42)
@@ -552,6 +706,8 @@ def main() -> None:
         raise RuntimeError("matplotlib is required for this script.")
     if args.decoder_layers is None:
         args.decoder_layers = [-3, -2, -1]
+    if args.vggt_layers is None:
+        args.vggt_layers = [-8, -6, -4, -2, -1]
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -573,15 +729,26 @@ def main() -> None:
 
     device = torch.device(args.device)
     dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}[args.dtype]
-    cut3r = load_cut3r(args, device, dtype) if args.encoder in {"both", "cut3r"} else None
-    pi3 = load_pi3(args, device, dtype) if args.encoder in {"both", "pi3"} else None
+    encoder_set = {
+        "both": {"cut3r", "pi3"},
+        "all": {"cut3r", "pi3", "vggt"},
+        "cut3r": {"cut3r"},
+        "pi3": {"pi3"},
+        "vggt": {"vggt"},
+        "cut3r_pi3": {"cut3r", "pi3"},
+        "cut3r_vggt": {"cut3r", "vggt"},
+        "pi3_vggt": {"pi3", "vggt"},
+    }[args.encoder]
+    cut3r = load_cut3r(args, device, dtype) if "cut3r" in encoder_set else None
+    pi3 = load_pi3(args, device, dtype) if "pi3" in encoder_set else None
+    vggt = load_vggt(args, device, dtype) if "vggt" in encoder_set else None
 
     rows: list[dict[str, Any]] = []
     figure_count = 0
     for sample_idx, raw_item in samples:
         try:
             batch = load_video_batch(raw_item, args, image_processor)
-            sample_rows, count = analyze_sample(args, image_processor, batch, raw_item, sample_idx, cut3r, pi3, device, dtype)
+            sample_rows, count = analyze_sample(args, image_processor, batch, raw_item, sample_idx, cut3r, pi3, vggt, device, dtype)
             rows.extend(sample_rows)
             figure_count += count
         except Exception as exc:
