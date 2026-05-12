@@ -218,6 +218,7 @@ class LlavaMetaModel:
             "geometry_position_mode",
             "num_geometry_projection_layers",
             "use_auxiliary_geometry_head",
+            "use_auxiliary_geometry_loss",
             "aux_geometry_targets",
             "lambda_geo",
             "geometry_loss_type",

@@ -234,6 +234,7 @@ class ModelArguments:
     num_geometry_projection_layers: int = field(default=1)
     geometry_projection_num_heads: int = field(default=16)
     use_auxiliary_geometry_head: bool = field(default=True)
+    use_auxiliary_geometry_loss: bool = field(default=True)
     aux_geometry_targets: Optional[str] = field(default="azimuth,elevation,log_distance")
     lambda_geo: float = field(default=0.1)
     geometry_loss_type: str = field(default="smooth_l1")
@@ -2335,6 +2336,7 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
         overwrite_config["num_geometry_projection_layers"] = model_args.num_geometry_projection_layers
         overwrite_config["geometry_projection_num_heads"] = model_args.geometry_projection_num_heads
         overwrite_config["use_auxiliary_geometry_head"] = model_args.use_auxiliary_geometry_head
+        overwrite_config["use_auxiliary_geometry_loss"] = model_args.use_auxiliary_geometry_loss
         overwrite_config["aux_geometry_targets"] = model_args.aux_geometry_targets
         overwrite_config["lambda_geo"] = model_args.lambda_geo
         overwrite_config["geometry_loss_type"] = model_args.geometry_loss_type
@@ -2650,6 +2652,7 @@ def train(attn_implementation=None):
         model.config.num_geometry_projection_layers = model_args.num_geometry_projection_layers
         model.config.geometry_projection_num_heads = model_args.geometry_projection_num_heads
         model.config.use_auxiliary_geometry_head = model_args.use_auxiliary_geometry_head
+        model.config.use_auxiliary_geometry_loss = model_args.use_auxiliary_geometry_loss
         model.config.aux_geometry_targets = model_args.aux_geometry_targets
         model.config.lambda_geo = model_args.lambda_geo
         model.config.geometry_loss_type = model_args.geometry_loss_type

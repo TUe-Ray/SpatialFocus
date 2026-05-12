@@ -194,6 +194,9 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
             use_auxiliary_geometry_head = getattr(self.config, "use_auxiliary_geometry_head", True)
             if isinstance(use_auxiliary_geometry_head, str):
                 use_auxiliary_geometry_head = use_auxiliary_geometry_head.lower() in {"1", "true", "yes", "y", "on"}
+            use_auxiliary_geometry_loss = getattr(self.config, "use_auxiliary_geometry_loss", True)
+            if isinstance(use_auxiliary_geometry_loss, str):
+                use_auxiliary_geometry_loss = use_auxiliary_geometry_loss.lower() in {"1", "true", "yes", "y", "on"}
             geometry_loss_enabled = bool(
                 self.training
                 and labels is not None
@@ -201,6 +204,7 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
                 and geometry_projection_outputs.get("loss_geo") is not None
                 and use_geometry_projection
                 and use_auxiliary_geometry_head
+                and use_auxiliary_geometry_loss
             )
             if not spatial_rank_enabled and not geometry_loss_enabled:
                 return outputs

@@ -66,6 +66,7 @@ def make_config(dtype=torch.float32):
         use_geometry_confidence_mask=True,
         geometry_projection_dropout=0.0,
         allow_missing_geometry_targets=False,
+        use_auxiliary_geometry_loss=True,
     )
 
 
@@ -164,6 +165,7 @@ def test_projection_uses_mm_hidden_size_not_llm_hidden_size():
         num_geometry_projection_layers=1,
         geometry_gate_init=0.0,
         use_auxiliary_geometry_head=True,
+        use_auxiliary_geometry_loss=True,
         aux_geometry_targets="azimuth,elevation,log_distance",
         lambda_geo=0.1,
         geometry_loss_type="smooth_l1",
@@ -193,6 +195,22 @@ def test_invalid_geometry_zeroed_and_no_nan():
     invalid = ~out["geometry_mask"]
     assert invalid.any()
     assert torch.all(out["geometry_pos"][invalid] == 0)
+
+
+def test_auxiliary_geometry_loss_can_be_disabled():
+    cfg = make_config()
+    cfg.use_auxiliary_geometry_loss = False
+    module = MetricGroundedGeometryProjection(cfg)
+    visual_tokens = torch.randn(1, 128, 1024)
+    point_map = make_point_map(1, 16, 16)
+    out = module(
+        visual_tokens=visual_tokens,
+        geometry_outputs={"point_map": point_map},
+        visual_grid_size=(8, 16),
+        num_frames=1,
+    )
+    assert out["geometry_predictions"]
+    assert out["loss_geo"] is None
 
 
 def test_all_invalid_geometry_does_not_nan():
@@ -282,6 +300,7 @@ def main():
     test_bf16_projection_if_supported()
     test_projection_uses_mm_hidden_size_not_llm_hidden_size()
     test_invalid_geometry_zeroed_and_no_nan()
+    test_auxiliary_geometry_loss_can_be_disabled()
     test_all_invalid_geometry_does_not_nan()
     test_depth_mode_uses_log_depth_not_log_radius()
     test_missing_aux_targets_raise_by_default()

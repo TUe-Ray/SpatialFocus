@@ -116,6 +116,7 @@ class MetricGroundedGeometryProjection(nn.Module):
         self.hidden_size = hidden_size
         self.mode = mode
         self.use_auxiliary_geometry_head = _as_bool(getattr(config, "use_auxiliary_geometry_head", True), True)
+        self.use_auxiliary_geometry_loss = _as_bool(getattr(config, "use_auxiliary_geometry_loss", True), True)
         self.lambda_geo = float(getattr(config, "lambda_geo", 0.1))
         self.adapter = GeometryProviderAdapter(
             mode=mode,
@@ -176,7 +177,8 @@ class MetricGroundedGeometryProjection(nn.Module):
         loss_geo = None
         if self.use_auxiliary_geometry_head:
             geometry_predictions = self.aux_head(hidden)
-            loss_geo = self.aux_head.compute_loss(geometry_predictions, geometry_targets, geometry_mask)
+            if self.use_auxiliary_geometry_loss:
+                loss_geo = self.aux_head.compute_loss(geometry_predictions, geometry_targets, geometry_mask)
 
         outputs = {
             "refined_tokens": hidden,
