@@ -95,6 +95,7 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
         images: Optional[torch.FloatTensor] = None,
         spatial_features: Optional[Dict[str, torch.FloatTensor]] = None,
         point_maps: Optional[torch.FloatTensor] = None,
+        geometry_outputs: Optional[Dict[str, torch.FloatTensor]] = None,
         image_sizes: Optional[List[List[int]]] = None,
         return_dict: Optional[bool] = None,
         modalities: Optional[List[str]] = ["image"],
@@ -103,6 +104,9 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
         return_visual_metadata: Optional[bool] = False,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
 
+        self.get_model()._last_geometry_projection_outputs = None
+        self.get_model()._last_geometry_projection_metrics = None
+        self._geometry_projection_last_metrics = {}
         metadata_requested = bool(return_visual_metadata)
         spatial_rank_enabled = bool(
             self.training
@@ -131,6 +135,7 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
                 modalities,
                 image_sizes,
                 return_visual_metadata=spatial_rank_enabled or metadata_requested,
+                geometry_outputs=geometry_outputs,
             )
             if spatial_rank_enabled or metadata_requested:
                 (input_ids, position_ids, attention_mask, past_key_values, inputs_embeds, labels, visual_metadata) = prepared
@@ -182,10 +187,43 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
                     hook_handle.remove()
             if metadata_requested:
                 self._last_visual_metadata = visual_metadata
-            if not spatial_rank_enabled:
+            geometry_projection_outputs = getattr(self.get_model(), "_last_geometry_projection_outputs", None)
+            use_geometry_projection = getattr(self.config, "use_geometry_aware_projection", False)
+            if isinstance(use_geometry_projection, str):
+                use_geometry_projection = use_geometry_projection.lower() in {"1", "true", "yes", "y", "on"}
+            use_auxiliary_geometry_head = getattr(self.config, "use_auxiliary_geometry_head", True)
+            if isinstance(use_auxiliary_geometry_head, str):
+                use_auxiliary_geometry_head = use_auxiliary_geometry_head.lower() in {"1", "true", "yes", "y", "on"}
+            geometry_loss_enabled = bool(
+                self.training
+                and labels is not None
+                and geometry_projection_outputs is not None
+                and geometry_projection_outputs.get("loss_geo") is not None
+                and use_geometry_projection
+                and use_auxiliary_geometry_head
+            )
+            if not spatial_rank_enabled and not geometry_loss_enabled:
                 return outputs
 
             ce_loss = outputs.loss
+            if geometry_loss_enabled and not spatial_rank_enabled:
+                loss_geo = geometry_projection_outputs["loss_geo"]
+                lambda_geo = float(getattr(self.config, "lambda_geo", 0.1))
+                total_loss = ce_loss + lambda_geo * loss_geo
+                self._geometry_projection_last_metrics = {
+                    "geometry_loss_lm": float(ce_loss.detach().float().item()),
+                    "geometry_loss_geo": float(loss_geo.detach().float().item()),
+                    "geometry_loss_total": float(total_loss.detach().float().item()),
+                    "lambda_geo": lambda_geo,
+                }
+                return CausalLMOutputWithPast(
+                    loss=total_loss,
+                    logits=outputs.logits,
+                    past_key_values=outputs.past_key_values,
+                    hidden_states=outputs.hidden_states,
+                    attentions=outputs.attentions,
+                )
+
             h1 = h1_holder.get("h1", None)
             if h1 is None:
                 raise RuntimeError("Spatial ranking loss could not capture H1 from self.model.layers[0].")
@@ -197,12 +235,22 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
             )
             lambda_sim = float(getattr(self.config, "lambda_sim", 0.01))
             total_loss = ce_loss + lambda_sim * rank_loss
+            if geometry_loss_enabled:
+                loss_geo = geometry_projection_outputs["loss_geo"]
+                lambda_geo = float(getattr(self.config, "lambda_geo", 0.1))
+                total_loss = total_loss + lambda_geo * loss_geo
             self._spatial_rank_last_metrics = dict(rank_metrics)
             self._spatial_rank_last_metrics.update({
                 "spatial_rank_ce_loss": float(ce_loss.detach().float().item()),
                 "spatial_rank_total_loss": float(total_loss.detach().float().item()),
                 "spatial_rank_lambda": lambda_sim,
             })
+            if geometry_loss_enabled:
+                self._spatial_rank_last_metrics.update({
+                    "geometry_loss_geo": float(loss_geo.detach().float().item()),
+                    "geometry_loss_weighted": float((loss_geo.detach().float() * lambda_geo).item()),
+                    "lambda_geo": lambda_geo,
+                })
 
             return CausalLMOutputWithPast(
                 loss=total_loss,
@@ -219,6 +267,7 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
         images: Optional[torch.Tensor] = None,
         spatial_features: Optional[torch.Tensor] = None,
         point_maps: Optional[torch.Tensor] = None,
+        geometry_outputs: Optional[Dict[str, torch.Tensor]] = None,
         image_sizes: Optional[torch.Tensor] = None,
         modalities: Optional[List[str]] = ["image"],
         **kwargs,
@@ -229,7 +278,19 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
             raise NotImplementedError("`inputs_embeds` is not supported")
 
         if images is not None:
-            (inputs, position_ids, attention_mask, _, inputs_embeds, _) = self.prepare_inputs_labels_for_multimodal(inputs, position_ids, attention_mask, None, None, images, spatial_features, point_maps, modalities, image_sizes=image_sizes)
+            (inputs, position_ids, attention_mask, _, inputs_embeds, _) = self.prepare_inputs_labels_for_multimodal(
+                inputs,
+                position_ids,
+                attention_mask,
+                None,
+                None,
+                images,
+                spatial_features,
+                point_maps,
+                modalities,
+                image_sizes=image_sizes,
+                geometry_outputs=geometry_outputs,
+            )
         else:
             inputs_embeds = self.get_model().embed_tokens(inputs)
 
@@ -237,10 +298,13 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
 
     def prepare_inputs_for_generation(self, input_ids, past_key_values=None, inputs_embeds=None, **kwargs):
         images = kwargs.pop("images", None)
+        geometry_outputs = kwargs.pop("geometry_outputs", None)
         image_sizes = kwargs.pop("image_sizes", None)
         inputs = super().prepare_inputs_for_generation(input_ids, past_key_values=past_key_values, inputs_embeds=inputs_embeds, **kwargs)
         if images is not None:
             inputs["images"] = images
+        if geometry_outputs is not None:
+            inputs["geometry_outputs"] = geometry_outputs
         if image_sizes is not None:
             inputs["image_sizes"] = image_sizes
         return inputs

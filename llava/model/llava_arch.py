@@ -25,6 +25,7 @@ from .multimodal_spatial_encoder.builder import build_spatial_tower
 from .multimodal_fusion_block.builder import build_multimodal_fusion_block
 from .multimodal_resampler.builder import build_vision_resampler
 from .multimodal_projector.builder import build_vision_projector
+from .geometry import MetricGroundedGeometryProjection, canonicalize_geometry_outputs
 from .pi3x_decoded_features import Pi3XDecodedFeatures
 from llava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 
@@ -48,6 +49,24 @@ def _as_long_tensor(values, device):
 
 def _empty_long(device):
     return torch.empty(0, device=device, dtype=torch.long)
+
+
+def _as_bool_config(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
+def _geometry_projection_hidden_size(module):
+    if module is None:
+        return None
+    if hasattr(module, "hidden_size"):
+        return int(module.hidden_size)
+    if hasattr(module, "layers") and len(module.layers) > 0:
+        return int(module.layers[0].hidden_size)
+    return None
 
 
 def pool_point_map_to_tokens(point_maps, target_num_tokens):
@@ -120,6 +139,7 @@ class LlavaMetaModel:
                 self.spatial_tower = build_spatial_tower(config, delay_load=False)
             if hasattr(config, "fusion_block"):
                 self.fusion_block = build_multimodal_fusion_block(config, delay_load=delay_load)
+            self.geometry_aware_projection = None
 
             self.vision_resampler = build_vision_resampler(config, vision_tower=self.vision_tower)
             self.mm_projector = build_vision_projector(config, vision_cfg=self.vision_tower.config)
@@ -144,6 +164,12 @@ class LlavaMetaModel:
         if type(fusion_block) is list:
             fusion_block = fusion_block[0]
         return fusion_block
+
+    def get_geometry_aware_projection(self):
+        geometry_aware_projection = getattr(self, "geometry_aware_projection", None)
+        if type(geometry_aware_projection) is list:
+            geometry_aware_projection = geometry_aware_projection[0]
+        return geometry_aware_projection
 
     def initialize_spatial_tower(self, model_args, fsdp=None):
         cli_spatial_tower = model_args.spatial_tower
@@ -184,6 +210,45 @@ class LlavaMetaModel:
             print("[DEBUG] tower_name =", getattr(spatial_tower, "tower_name", None))
             print("[DEBUG] model_name =", getattr(spatial_tower, "model_name", None))
             spatial_tower.load_model()
+
+    def initialize_geometry_aware_projection(self, model_args, fsdp=None):
+        for attr in (
+            "use_geometry_aware_projection",
+            "spatial_encoder_type",
+            "geometry_position_mode",
+            "num_geometry_projection_layers",
+            "use_auxiliary_geometry_head",
+            "aux_geometry_targets",
+            "lambda_geo",
+            "geometry_loss_type",
+            "detach_geometry_targets",
+            "geometry_gate_init",
+            "use_geometry_confidence_mask",
+            "geometry_projection_num_heads",
+            "geometry_position_max_abs",
+            "geometry_fixed_scene_scale",
+            "allow_missing_geometry_targets",
+            "geometry_projection_dropout",
+        ):
+            if hasattr(model_args, attr):
+                setattr(self.config, attr, getattr(model_args, attr))
+        if getattr(self.config, "mm_hidden_size", None) is None:
+            raise RuntimeError("initialize_geometry_aware_projection requires config.mm_hidden_size from the vision tower.")
+        existing = self.get_geometry_aware_projection()
+        expected_hidden = int(getattr(self.config, "mm_hidden_size"))
+        needs_rebuild = (
+            existing is None
+            or _geometry_projection_hidden_size(existing) != expected_hidden
+        )
+        if needs_rebuild:
+            module = MetricGroundedGeometryProjection(self.config)
+            if fsdp is not None and len(fsdp) > 0:
+                self.geometry_aware_projection = [module]
+            else:
+                self.geometry_aware_projection = module
+        else:
+            for p in existing.parameters():
+                p.requires_grad = True
 
     def initialize_fusion_block(self, model_args, fsdp=None):
         requested_fusion_block = getattr(model_args, "fusion_block", None)
@@ -293,6 +358,8 @@ class LlavaMetaModel:
         self.config.mm_projector_type = getattr(model_args, "mm_projector_type", "linear")
         current_vt = self.get_vision_tower()
         self.config.mm_hidden_size = getattr(vision_resampler, "hidden_size", current_vt.hidden_size)
+        if _as_bool_config(getattr(self.config, "use_geometry_aware_projection", False), False):
+            self.initialize_geometry_aware_projection(model_args, fsdp=fsdp)
         self.config.mm_vision_select_layer = mm_vision_select_layer
         self.config.mm_vision_select_feature = mm_vision_select_feature
         self.config.mm_patch_merge_type = mm_patch_merge_type
@@ -377,6 +444,9 @@ class LlavaMetaForCausalLM(ABC):
 
     def get_fusion_block(self):
         return self.get_model().get_fusion_block()
+
+    def get_geometry_aware_projection(self):
+        return self.get_model().get_geometry_aware_projection()
 
     def initialize_spatial_rank_head(self, output_dim=256, device=None, dtype=None):
         hidden_size = int(getattr(self.config, "hidden_size"))
@@ -880,6 +950,97 @@ class LlavaMetaForCausalLM(ABC):
             image_feature = torch.cat((prefix_tokens, image_feature), dim=1)
         return image_feature
 
+    def _geometry_visual_grid_size(self, grid_token_count):
+        vision_tower = self.get_vision_tower()
+        side = getattr(vision_tower, "num_patches_per_side", None)
+        if side is not None and int(side) * int(side) == int(grid_token_count):
+            return int(side), int(side)
+        side = int(math.isqrt(int(grid_token_count)))
+        if side * side == int(grid_token_count):
+            return side, side
+        raise ValueError(
+            "Geometry-aware projection needs explicit visual_grid_size for non-square visual tokens, "
+            f"got {grid_token_count}"
+        )
+
+    def _split_geometry_visual_tokens(self, image_features):
+        vision_tower = self.get_vision_tower()
+        side = getattr(vision_tower, "num_patches_per_side", None)
+        if side is not None:
+            grid_tokens = int(side) * int(side)
+            if image_features.shape[1] == grid_tokens:
+                return None, image_features
+            if image_features.shape[1] > grid_tokens:
+                prefix_len = image_features.shape[1] - grid_tokens
+                return image_features[:, :prefix_len, :], image_features[:, prefix_len:, :]
+        prefix_tokens, grid_tokens, _ = self._split_prefix_tokens_for_square_grid(image_features)
+        return prefix_tokens, grid_tokens
+
+    def _canonical_geometry_outputs_for_projection(self, geometry_outputs, point_maps, spatial_features, device):
+        canonical = canonicalize_geometry_outputs(geometry_outputs, spatial_features, point_maps=point_maps)
+        moved = {}
+        for key, value in canonical.items():
+            if isinstance(value, torch.Tensor):
+                moved[key] = value.to(device=device)
+        return moved
+
+    def _apply_geometry_aware_projection(
+        self,
+        image_features,
+        geometry_outputs=None,
+        point_maps=None,
+        spatial_features=None,
+        split_sizes=None,
+    ):
+        module = self.get_model().get_geometry_aware_projection()
+        if module is None:
+            raise RuntimeError("use_geometry_aware_projection=True but geometry_aware_projection is not initialized.")
+        canonical_geometry = self._canonical_geometry_outputs_for_projection(
+            geometry_outputs=geometry_outputs,
+            point_maps=point_maps,
+            spatial_features=spatial_features,
+            device=image_features.device,
+        )
+        if not canonical_geometry:
+            raise RuntimeError(
+                "use_geometry_aware_projection=True requires explicit geometry_outputs, legacy point_maps, "
+                "or spatial_features containing point_map/depth/confidence aliases."
+            )
+
+        prefix_tokens, grid_tokens = self._split_geometry_visual_tokens(image_features)
+        expected_frames = int(grid_tokens.shape[0])
+        for key, value in canonical_geometry.items():
+            if not isinstance(value, torch.Tensor):
+                continue
+            geo_frames = int(value.shape[0])
+            if value.dim() == 5:
+                geo_frames = int(value.shape[0] * value.shape[1])
+            elif key in {"depth", "confidence"} and value.dim() == 4 and value.shape[1] != 1 and value.shape[-1] != 1:
+                geo_frames = int(value.shape[0] * value.shape[1])
+            if geo_frames != expected_frames:
+                raise RuntimeError(
+                    f"Geometry-aware projection frame count mismatch for {key}: "
+                    f"geometry has {geo_frames} frames but visual grid tokens have {expected_frames}. "
+                    f"geometry shape={tuple(value.shape)}, grid_tokens shape={tuple(grid_tokens.shape)}"
+                )
+        visual_grid_size = self._geometry_visual_grid_size(grid_tokens.shape[1])
+        geo_out = module(
+            visual_tokens=grid_tokens,
+            geometry_outputs=canonical_geometry,
+            visual_grid_size=visual_grid_size,
+            num_frames=int(sum(split_sizes)) if split_sizes is not None else int(grid_tokens.shape[0]),
+            spatial_merge_size=getattr(self.config, "spatial_merge_size", None),
+        )
+        refined_tokens = geo_out["refined_tokens"]
+        if prefix_tokens is not None:
+            refined_tokens = torch.cat((prefix_tokens, refined_tokens), dim=1)
+        self.get_model()._last_geometry_projection_outputs = geo_out
+        self.get_model()._last_geometry_projection_metrics = {
+            "loss_geo": None if geo_out.get("loss_geo") is None else float(geo_out["loss_geo"].detach().float().item()),
+            "valid_geometry_tokens": int(geo_out["geometry_mask"].detach().bool().sum().item()),
+        }
+        return refined_tokens
+
     # def encode_images(self, images):
     #     # vision features
     #     image_features = self.get_model().get_vision_tower()(images)
@@ -928,9 +1089,31 @@ class LlavaMetaForCausalLM(ABC):
 
     #     return image_features
 
-    def encode_images(self, images, spatial_features=None, point_maps=None, split_sizes=None):
+    def encode_images(self, images, spatial_features=None, point_maps=None, geometry_outputs=None, split_sizes=None):
         # vision features
         image_features = self.get_model().get_vision_tower()(images)
+        self.get_model()._last_geometry_projection_outputs = None
+        self.get_model()._last_geometry_projection_metrics = None
+
+        use_geometry_projection = _as_bool_config(
+            getattr(self.get_model().config, "use_geometry_aware_projection", False),
+            False,
+        )
+        if use_geometry_projection:
+            zero_spatial_features = getattr(self.get_model().config, "zero_spatial_features", False)
+            if isinstance(zero_spatial_features, str):
+                zero_spatial_features = zero_spatial_features.lower() in {"1", "true", "yes", "y", "on"}
+            if zero_spatial_features:
+                return self.get_model().mm_projector(image_features)
+            image_features = self._apply_geometry_aware_projection(
+                image_features=image_features,
+                geometry_outputs=geometry_outputs,
+                point_maps=point_maps,
+                spatial_features=spatial_features,
+                split_sizes=split_sizes,
+            )
+            return self.get_model().mm_projector(image_features)
+
         # fuse with spatial features
         if self.get_model().get_spatial_tower() is not None and self.get_model().get_fusion_block() is not None:
             spatial_encoder_type = self.get_model().config.spatial_tower
@@ -1330,7 +1513,7 @@ class LlavaMetaForCausalLM(ABC):
         image_feature = image_feature.permute(1, 2, 0).contiguous()
         return image_feature
 
-    def prepare_inputs_labels_for_multimodal(self, input_ids, position_ids, attention_mask, past_key_values, labels, images, spatial_features=None, point_maps=None, modalities=["image"], image_sizes=None, return_visual_metadata=False):
+    def prepare_inputs_labels_for_multimodal(self, input_ids, position_ids, attention_mask, past_key_values, labels, images, spatial_features=None, point_maps=None, modalities=["image"], image_sizes=None, return_visual_metadata=False, geometry_outputs=None):
         vision_tower = self.get_vision_tower()
         # rank_print(modalities)
         if vision_tower is None or images is None or input_ids.shape[1] == 1:
@@ -1361,7 +1544,13 @@ class LlavaMetaForCausalLM(ABC):
 
             concat_images = torch.cat([image for image in images_list], dim=0)
             split_sizes = [image.shape[0] for image in images_list]
-            encoded_image_features = self.encode_images(concat_images, spatial_features, point_maps, split_sizes=split_sizes)
+            encoded_image_features = self.encode_images(
+                concat_images,
+                spatial_features=spatial_features,
+                point_maps=point_maps,
+                geometry_outputs=geometry_outputs,
+                split_sizes=split_sizes,
+            )
             # if self.get_model().get_spatial_tower() is not None:
             #     if spatial_features is None:
             #         camera_tokens, patch_tokens = self.encode_spatial_features(concat_images)
@@ -1623,7 +1812,13 @@ class LlavaMetaForCausalLM(ABC):
                 raise ValueError(f"Unexpected mm_patch_merge_type: {self.config.mm_patch_merge_type}")
         else:
             split_sizes = [1] * images.shape[0] if getattr(images, "ndim", 0) == 4 else None
-            image_features = self.encode_images(images, split_sizes=split_sizes)
+            image_features = self.encode_images(
+                images,
+                spatial_features=spatial_features,
+                point_maps=point_maps,
+                geometry_outputs=geometry_outputs,
+                split_sizes=split_sizes,
+            )
             image_feature_metadata = [{"visual_token_indices": _empty_long(image_features.device)}]
 
         if "image_feature_metadata" not in locals():

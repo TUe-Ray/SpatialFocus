@@ -225,6 +225,26 @@ class ModelArguments:
         metadata={"help": "If True, record GeoRoPE Fusion tensor mean/std stats during each forward pass."},
     )
     tune_fusion_block: bool = field(default=False)
+    use_geometry_aware_projection: bool = field(
+        default=False,
+        metadata={"help": "Enable MetricGroundedGeometryProjection before the VLM projector."},
+    )
+    spatial_encoder_type: Optional[str] = field(default="cut3r")
+    geometry_position_mode: Optional[str] = field(default="spherical")
+    num_geometry_projection_layers: int = field(default=1)
+    geometry_projection_num_heads: int = field(default=16)
+    use_auxiliary_geometry_head: bool = field(default=True)
+    aux_geometry_targets: Optional[str] = field(default="azimuth,elevation,log_distance")
+    lambda_geo: float = field(default=0.1)
+    geometry_loss_type: str = field(default="smooth_l1")
+    detach_geometry_targets: bool = field(default=True)
+    geometry_gate_init: float = field(default=0.0)
+    use_geometry_confidence_mask: bool = field(default=True)
+    geometry_position_max_abs: float = field(default=10.0)
+    geometry_fixed_scene_scale: float = field(default=5.0)
+    allow_missing_geometry_targets: bool = field(default=False)
+    geometry_projection_dropout: float = field(default=0.0)
+    tune_geometry_aware_projection: bool = field(default=False)
 
     unfreeze_mm_vision_tower: bool = field(default=False)
     unfreeze_language_model: bool = field(default=False)
@@ -424,7 +444,7 @@ def get_mm_adapter_state_maybe_zero_3(named_params, keys_to_match):
 def find_all_linear_names(model):
     cls = torch.nn.Linear
     lora_module_names = set()
-    multimodal_keywords = ['mm_projector', 'vision_tower', 'vision_resampler', 'spatial_tower', 'fusion_block']
+    multimodal_keywords = ['mm_projector', 'vision_tower', 'vision_resampler', 'spatial_tower', 'fusion_block', 'geometry_aware_projection']
     for name, module in model.named_modules():
         if any(mm_keyword in name for mm_keyword in multimodal_keywords):
             continue
@@ -534,12 +554,21 @@ def load_and_configure_spatial_rank_head(rank_model, training_args):
 
 def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: str):
     """Collects the state dict and dump to disk."""
-    if hasattr(trainer.args, "tune_mm_mlp_adapter") and trainer.args.tune_mm_mlp_adapter:
-        check_only_save_mm_adapter_tunnable = True
-    if hasattr(trainer.args, "tune_fusion_block") and trainer.args.tune_fusion_block:
+    if (
+        (hasattr(trainer.args, "tune_mm_mlp_adapter") and trainer.args.tune_mm_mlp_adapter)
+        or (hasattr(trainer.args, "tune_fusion_block") and trainer.args.tune_fusion_block)
+        or (hasattr(trainer.args, "tune_geometry_aware_projection") and trainer.args.tune_geometry_aware_projection)
+    ):
         check_only_save_mm_adapter_tunnable = True
     # only has mm_mlp_adapter and mm_vision_resampler in the tuneable parts
-    elif hasattr(trainer.args, "mm_tunable_parts") and (len(trainer.args.mm_tunable_parts.split(",")) == 1 and ("mm_mlp_adapter" in trainer.args.mm_tunable_parts or "mm_vision_resampler" in trainer.args.mm_tunable_parts)):
+    elif hasattr(trainer.args, "mm_tunable_parts") and (
+        len(trainer.args.mm_tunable_parts.split(",")) == 1
+        and (
+            "mm_mlp_adapter" in trainer.args.mm_tunable_parts
+            or "mm_vision_resampler" in trainer.args.mm_tunable_parts
+            or "geometry_aware_projection" in trainer.args.mm_tunable_parts
+        )
+    ):
         check_only_save_mm_adapter_tunnable = True
     else:
         check_only_save_mm_adapter_tunnable = False
@@ -549,7 +578,7 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: st
     rank0_print(f"Only save projectors: {check_only_save_mm_adapter_tunnable}")
     if check_only_save_mm_adapter_tunnable:
         # Only save Adapter
-        keys_to_match = ["mm_projector", "vision_resampler", "fusion_block"] # save fusion_block and projectors
+        keys_to_match = ["mm_projector", "vision_resampler", "fusion_block", "geometry_aware_projection"] # save fusion_block and projectors
         if getattr(trainer.args, "use_im_start_end", False):
             keys_to_match.extend(["embed_tokens", "embed_in"])
 
@@ -2299,6 +2328,23 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
     if model_args.geo_rope_fusion_group_split is not None:
         overwrite_config["geo_rope_fusion_group_split"] = model_args.geo_rope_fusion_group_split
     overwrite_config["geo_rope_fusion_log_stats"] = model_args.geo_rope_fusion_log_stats
+    if model_args.use_geometry_aware_projection:
+        overwrite_config["use_geometry_aware_projection"] = model_args.use_geometry_aware_projection
+        overwrite_config["spatial_encoder_type"] = model_args.spatial_encoder_type
+        overwrite_config["geometry_position_mode"] = model_args.geometry_position_mode
+        overwrite_config["num_geometry_projection_layers"] = model_args.num_geometry_projection_layers
+        overwrite_config["geometry_projection_num_heads"] = model_args.geometry_projection_num_heads
+        overwrite_config["use_auxiliary_geometry_head"] = model_args.use_auxiliary_geometry_head
+        overwrite_config["aux_geometry_targets"] = model_args.aux_geometry_targets
+        overwrite_config["lambda_geo"] = model_args.lambda_geo
+        overwrite_config["geometry_loss_type"] = model_args.geometry_loss_type
+        overwrite_config["detach_geometry_targets"] = model_args.detach_geometry_targets
+        overwrite_config["geometry_gate_init"] = model_args.geometry_gate_init
+        overwrite_config["use_geometry_confidence_mask"] = model_args.use_geometry_confidence_mask
+        overwrite_config["geometry_position_max_abs"] = model_args.geometry_position_max_abs
+        overwrite_config["geometry_fixed_scene_scale"] = model_args.geometry_fixed_scene_scale
+        overwrite_config["allow_missing_geometry_targets"] = model_args.allow_missing_geometry_targets
+        overwrite_config["geometry_projection_dropout"] = model_args.geometry_projection_dropout
 
     if overwrite_config:
         assert cfg_pretrained is not None, "cfg_pretrained is None"
@@ -2597,12 +2643,35 @@ def train(attn_implementation=None):
         model.config.geo_rope_fusion_log_stats = model_args.geo_rope_fusion_log_stats
         model.config.fusion_block_lr = training_args.fusion_block_lr
 
+    if model_args.use_geometry_aware_projection:
+        model.config.use_geometry_aware_projection = model_args.use_geometry_aware_projection
+        model.config.spatial_encoder_type = model_args.spatial_encoder_type
+        model.config.geometry_position_mode = model_args.geometry_position_mode
+        model.config.num_geometry_projection_layers = model_args.num_geometry_projection_layers
+        model.config.geometry_projection_num_heads = model_args.geometry_projection_num_heads
+        model.config.use_auxiliary_geometry_head = model_args.use_auxiliary_geometry_head
+        model.config.aux_geometry_targets = model_args.aux_geometry_targets
+        model.config.lambda_geo = model_args.lambda_geo
+        model.config.geometry_loss_type = model_args.geometry_loss_type
+        model.config.detach_geometry_targets = model_args.detach_geometry_targets
+        model.config.geometry_gate_init = model_args.geometry_gate_init
+        model.config.use_geometry_confidence_mask = model_args.use_geometry_confidence_mask
+        model.config.geometry_position_max_abs = model_args.geometry_position_max_abs
+        model.config.geometry_fixed_scene_scale = model_args.geometry_fixed_scene_scale
+        model.config.allow_missing_geometry_targets = model_args.allow_missing_geometry_targets
+        model.config.geometry_projection_dropout = model_args.geometry_projection_dropout
 
     if model_args.vision_tower is not None:
         model.get_model().initialize_vision_modules(model_args=model_args, fsdp=training_args.fsdp)
 
         vision_tower = model.get_vision_tower()
         vision_tower.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
+
+        if model_args.use_geometry_aware_projection:
+            if model.get_geometry_aware_projection() is None:
+                model.get_model().initialize_geometry_aware_projection(model_args=model_args, fsdp=training_args.fsdp)
+            geometry_aware_projection = model.get_geometry_aware_projection()
+            geometry_aware_projection.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
 
         data_args.image_processor = vision_tower.image_processor
         data_args.is_multimodal = True
@@ -2645,7 +2714,14 @@ def train(attn_implementation=None):
             model.config.tune_mm_vision_resampler = training_args.tune_mm_vision_resampler = model_args.tune_mm_vision_resampler
             model.config.tune_spatial_tower = training_args.tune_spatial_tower = model_args.tune_spatial_tower
             model.config.tune_fusion_block = training_args.tune_fusion_block = model_args.tune_fusion_block
-            if model_args.tune_mm_mlp_adapter or model_args.tune_mm_vision_resampler or model_args.tune_fusion_block or model_args.tune_spatial_tower:
+            model.config.tune_geometry_aware_projection = training_args.tune_geometry_aware_projection = model_args.tune_geometry_aware_projection
+            if (
+                model_args.tune_mm_mlp_adapter
+                or model_args.tune_mm_vision_resampler
+                or model_args.tune_fusion_block
+                or model_args.tune_spatial_tower
+                or model_args.tune_geometry_aware_projection
+            ):
                 model.requires_grad_(False)
             if training_args.lora_enable:
                 for name, param in model.named_parameters():
@@ -2656,6 +2732,9 @@ def train(attn_implementation=None):
                     p.requires_grad = True
             if model_args.tune_fusion_block:
                 for p in model.get_fusion_block().parameters():
+                    p.requires_grad = True
+            if model_args.tune_geometry_aware_projection:
+                for p in model.get_geometry_aware_projection().parameters():
                     p.requires_grad = True
             if model_args.tune_mm_mlp_adapter:
                 for p in model.get_model().mm_projector.parameters():
@@ -2709,6 +2788,9 @@ def train(attn_implementation=None):
                     p.requires_grad = True
             if "fusion_block" in tunable_parts:
                 for p in model.get_fusion_block().parameters():
+                    p.requires_grad = True
+            if "geometry_aware_projection" in tunable_parts:
+                for p in model.get_geometry_aware_projection().parameters():
                     p.requires_grad = True
 
         total_params = sum(p.ds_numel if hasattr(p, "ds_numel") else p.numel() for p in model.parameters())
