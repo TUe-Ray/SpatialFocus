@@ -90,7 +90,7 @@ class AuxiliaryGeometryHead(nn.Module):
             valid = torch.isfinite(pred) & torch.isfinite(target)
             if geometry_mask is not None:
                 valid = valid & geometry_mask.to(device=pred.device, dtype=torch.bool).unsqueeze(-1)
-            element_loss = self._element_loss(target_name, pred, target)
+            element_loss = self._element_loss(target_name, pred.float(), target.float())
             element_loss = torch.nan_to_num(element_loss, nan=0.0, posinf=0.0, neginf=0.0)
             valid = valid.to(dtype=element_loss.dtype)
             cur_num = (element_loss * valid).sum()
