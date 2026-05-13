@@ -382,3 +382,15 @@ class Pi3xSpatialTower(nn.Module):
             return self.spatial_tower.spatial_model.encoder.camera_head
         except AttributeError:
             return None
+
+    @property
+    def pi3_model(self) -> Optional[nn.Module]:
+        """
+        Direct access to the frozen Pi3/Pi3X model.
+        Used by Geometry-RoPE training to decode point/depth/confidence maps from
+        pre-extracted decoded_features without re-running the image encoder.
+        """
+        try:
+            return self.spatial_tower.spatial_model.encoder.pi3
+        except AttributeError:
+            return None

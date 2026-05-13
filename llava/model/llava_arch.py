@@ -979,12 +979,163 @@ class LlavaMetaForCausalLM(ABC):
         return prefix_tokens, grid_tokens
 
     def _canonical_geometry_outputs_for_projection(self, geometry_outputs, point_maps, spatial_features, device):
-        canonical = canonicalize_geometry_outputs(geometry_outputs, spatial_features, point_maps=point_maps)
+        pi3x_geometry = self._decode_pi3x_geometry_outputs_for_projection(spatial_features, device)
+        canonical = canonicalize_geometry_outputs(geometry_outputs, pi3x_geometry, spatial_features, point_maps=point_maps)
         moved = {}
         for key, value in canonical.items():
             if isinstance(value, torch.Tensor):
                 moved[key] = value.to(device=device)
         return moved
+
+    def _decode_pi3x_geometry_outputs_for_projection(self, spatial_features, device):
+        spatial_encoder_type = str(getattr(self.config, "spatial_encoder_type", "") or "").lower()
+        spatial_tower_name = str(getattr(self.config, "spatial_tower", "") or getattr(self.config, "mm_spatial_tower", "") or "").lower()
+        if "pi3" not in spatial_encoder_type and "pi3" not in spatial_tower_name:
+            return None
+        if spatial_features is None:
+            return None
+
+        if isinstance(spatial_features, (list, tuple)):
+            feature_items = [item for item in spatial_features if item is not None]
+        else:
+            feature_items = [spatial_features]
+        decoded_items = [
+            item for item in feature_items
+            if isinstance(item, dict)
+            and isinstance(item.get("frames"), dict)
+            and "decoded_features" in item["frames"]
+        ]
+        if not decoded_items:
+            return None
+
+        spatial_tower = self.get_model().get_spatial_tower()
+        if spatial_tower is None:
+            raise RuntimeError(
+                "PI3X Geometry-RoPE from decoded_features requires --spatial_tower pi3x "
+                "so the frozen PI3X point/camera/conf heads are available."
+            )
+        if hasattr(spatial_tower, "load_model") and not getattr(spatial_tower, "is_loaded", True):
+            spatial_tower.load_model()
+        pi3_model = getattr(spatial_tower, "pi3_model", None)
+        if pi3_model is None:
+            raise RuntimeError("PI3X spatial tower does not expose pi3_model for geometry decoding.")
+
+        decoded_geometry = [
+            self._decode_single_pi3x_geometry_output(item, pi3_model, device)
+            for item in decoded_items
+        ]
+        merged = {}
+        for key in decoded_geometry[0].keys():
+            values = [item[key] for item in decoded_geometry if key in item and item[key] is not None]
+            if not values:
+                continue
+            merged[key] = torch.cat(values, dim=0) if len(values) > 1 else values[0]
+        return merged
+
+    @staticmethod
+    def _module_param_dtype(module, fallback):
+        for param in module.parameters():
+            return param.dtype
+        return fallback
+
+    @staticmethod
+    def _module_param_device(module, fallback):
+        for param in module.parameters():
+            return param.device
+        return fallback
+
+    def _decode_single_pi3x_geometry_output(self, spatial_feature, pi3_model, device):
+        sf = Pi3XDecodedFeatures.from_loaded(spatial_feature)
+        decoded_features = sf.decoded_features.to(device=device)
+        num_frames = int(decoded_features.shape[0])
+        patch_h = patch_w = int(sf.input_size // sf.patch_size)
+        token_count = int(decoded_features.shape[1])
+        expected_tokens = int(patch_h * patch_w + sf.patch_start_idx)
+        if token_count != expected_tokens:
+            raise RuntimeError(
+                "PI3X decoded feature token count does not match stored input/patch metadata: "
+                f"tokens={token_count}, expected={expected_tokens}, input_size={sf.input_size}, patch_size={sf.patch_size}"
+            )
+
+        pos = sf.decoded_pos_template.to(device=device)
+        if pos.dim() == 2:
+            pos = pos.unsqueeze(0).expand(num_frames, -1, -1)
+        elif pos.dim() == 3 and pos.shape[0] != num_frames:
+            pos = pos[:1].expand(num_frames, -1, -1)
+        if pos.dtype not in (torch.int32, torch.int64):
+            pos = pos.to(dtype=torch.int64)
+
+        head_dtype = self._module_param_dtype(pi3_model.point_decoder, decoded_features.dtype)
+        hidden = decoded_features.to(dtype=head_dtype)
+        pos = pos.to(device=hidden.device)
+        patch_start_idx = int(sf.patch_start_idx)
+
+        with torch.no_grad():
+            point_hidden = pi3_model.point_decoder(hidden, xpos=pos)
+            camera_hidden = pi3_model.camera_decoder(hidden, xpos=pos)
+            conf_hidden = pi3_model.conf_decoder(hidden, xpos=pos)
+
+            autocast_device = hidden.device.type if hidden.device.type in {"cuda", "cpu"} else "cuda"
+            with torch.amp.autocast(device_type=autocast_device, enabled=False):
+                point_tokens = point_hidden[:, patch_start_idx:]
+                conf_tokens = conf_hidden[:, patch_start_idx:]
+                camera_tokens = camera_hidden[:, patch_start_idx:]
+
+                if hasattr(pi3_model, "_chunked_conv_head"):
+                    point_tokens = point_tokens.to(dtype=self._module_param_dtype(pi3_model.point_head, point_tokens.dtype))
+                    xy, z = pi3_model._chunked_conv_head(pi3_model.point_head, point_tokens, patch_h, patch_w)
+                    xy = xy.float().permute(0, 2, 3, 1).reshape(1, num_frames, patch_h, patch_w, -1)
+                    z = z.float().permute(0, 2, 3, 1).reshape(1, num_frames, patch_h, patch_w, -1)
+                    z = torch.exp(z.clamp(max=15.0))
+
+                    conf_tokens = conf_tokens.to(dtype=self._module_param_dtype(pi3_model.conf_head, conf_tokens.dtype))
+                    conf = pi3_model._chunked_conv_head(pi3_model.conf_head, conf_tokens, patch_h, patch_w)[0]
+                    conf = conf.float().permute(0, 2, 3, 1).reshape(1, num_frames, patch_h, patch_w, -1)
+                else:
+                    point_tokens = point_tokens.to(dtype=self._module_param_dtype(pi3_model.point_head, point_tokens.dtype))
+                    ret = pi3_model.point_head([point_tokens], (patch_h, patch_w)).float().reshape(
+                        1, num_frames, patch_h, patch_w, -1
+                    )
+                    xy, z = ret.split([2, 1], dim=-1)
+                    z = torch.exp(z)
+
+                    conf_tokens = conf_tokens.to(dtype=self._module_param_dtype(pi3_model.conf_head, conf_tokens.dtype))
+                    conf = pi3_model.conf_head([conf_tokens], (patch_h, patch_w)).float().reshape(
+                        1, num_frames, patch_h, patch_w, -1
+                    )
+
+                local_points = torch.cat([xy * z, z], dim=-1)
+
+                camera_tokens = camera_tokens.to(dtype=self._module_param_dtype(pi3_model.camera_head, camera_tokens.dtype))
+                camera_poses = pi3_model.camera_head(camera_tokens, patch_h, patch_w).float().reshape(1, num_frames, 4, 4)
+
+                ones = torch.ones_like(local_points[..., :1])
+                homogeneous_local_points = torch.cat([local_points, ones], dim=-1)
+                points = torch.einsum("bnij,bnhwj->bnhwi", camera_poses, homogeneous_local_points)[..., :3]
+
+                metric = None
+                if all(hasattr(pi3_model, attr) for attr in ("metric_decoder", "metric_head", "metric_token")):
+                    pos_hw = pos.reshape(1, num_frames * token_count, -1)
+                    metric_hidden = pi3_model.metric_decoder(
+                        pi3_model.metric_token.repeat(1, 1, 1).to(device=hidden.device, dtype=hidden.dtype),
+                        hidden.reshape(1, num_frames * token_count, -1),
+                        xpos=pos_hw[:, 0:1],
+                        ypos=pos_hw,
+                    )
+                    metric_hidden = metric_hidden.to(dtype=self._module_param_dtype(pi3_model.metric_head, metric_hidden.dtype))
+                    metric = pi3_model.metric_head(metric_hidden).reshape(1).float().exp()
+                    points = points * metric.view(1, 1, 1, 1, 1)
+                    local_points = local_points * metric.view(1, 1, 1, 1, 1)
+
+        return {
+            "point_map": points.squeeze(0).detach(),
+            "points": points.squeeze(0).detach(),
+            "local_points": local_points.squeeze(0).detach(),
+            "depth": local_points.squeeze(0)[..., 2].detach(),
+            "confidence": conf.squeeze(0).detach(),
+            "camera_pose": camera_poses.squeeze(0).detach(),
+            "metric": None if metric is None else metric.detach(),
+        }
 
     def _apply_geometry_aware_projection(
         self,

@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=RoPE_Spherical_cut3r_100p
-#SBATCH --nodes=1
+#SBATCH --job-name=metric_geo_proj_vggt_depth_100p
+#SBATCH --nodes=4
 #SBATCH --gpus-per-node=4
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=32
-#SBATCH --time=00:30:00
+#SBATCH --time=16:00:00
 #SBATCH --partition=boost_usr_prod
-#SBATCH --qos=boost_qos_dbg
+#SBATCH --qos=normal
 #SBATCH --output=logs/train/%x_%j.out
 #SBATCH --error=logs/train/%x_%j.err
 #SBATCH --mem=0
@@ -18,12 +18,12 @@ set -euo pipefail
 # Edit this block directly for each experiment.
 TRAIN_DATA_PERCENTAGE="100"
 SUFFIX="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
-NOTE="Spherical MetricGroundedGeometryProjection: 2D visual-token self-attention with Geometry-RoPE from CUT3R point-map sidecars | ${TRAIN_DATA_PERCENTAGE}% training data"
+NOTE="MetricGroundedGeometryProjection: 2D visual-token self-attention with Geometry-RoPE from VGGT depth sidecars | ${TRAIN_DATA_PERCENTAGE}% training data"
 CONDA_ENV_NAME="vlm3r"
 
 MODEL_USE_GEOMETRY_AWARE_PROJECTION="True"
-MODEL_SPATIAL_ENCODER_TYPE="cut3r"
-MODEL_GEOMETRY_POSITION_MODE="spherical"
+MODEL_SPATIAL_ENCODER_TYPE="vggt"
+MODEL_GEOMETRY_POSITION_MODE="depth"
 # geometry_position_mode:
 # depth [1]:      position = log_depth, 1D
 # xyz [2, 1, 2]:        position = normalized x,y,z, 3D
@@ -49,45 +49,18 @@ MODEL_GEOMETRY_PROJECTION_NUM_HEADS="16"
 # auxiliary geometry head 的設計是為了在中途提供額外的監督信號，幫助模型更好地學習幾何投影分支的表示能力。透過預測幾何屬性（如方位角、仰角、距離等），模型可以在訓練過程中獲得更直接的幾何信息反饋，從而提升整體性能。
 MODEL_USE_AUXILIARY_GEOMETRY_HEAD="True"
 MODEL_USE_AUXILIARY_GEOMETRY_LOSS="True"
-MODEL_AUX_GEOMETRY_TARGETS="azimuth,elevation,log_distance"
+MODEL_AUX_GEOMETRY_TARGETS="log_depth"
 # lambda_geo 的設置需要根據 auxiliary geometry loss 的規模和主任務 loss 的規模來調整。一般來說，可以從一個較小的值（如 0.1）開始，觀察訓練過程中 auxiliary geometry loss 和主任務 loss 的變化趨勢。如果 auxiliary geometry loss 過大，可能會對主任務的學習產生干擾，此時可以適當降低 lambda_geo；反之，如果 auxiliary geometry loss 過小，可能無法充分發揮其對幾何投影分支的監督作用，此時可以適當提高 lambda_geo。
 MODEL_LAMBDA_GEO="0.1"
 
 MODEL_GEOMETRY_LOSS_TYPE="smooth_l1"
-#e = pred - target
-#MSE: L_MSE = e²
-    #   你非常相信 geometry target，而且想強烈懲罰大誤差。
-    # 小誤差：懲罰很小
-    # 大誤差：懲罰非常大，因為平方
-    # gradient：2e
-# L1:Mean Absolute Error, L_L1 = |e|
-    #   target 很 noisy，outlier 很多，但梯度會比較不平滑。
-    # 小誤差：線性懲罰
-    # 大誤差：也是線性懲罰
-    # gradient：sign(e)
-# Smooth L1:
-    # 小誤差時像 MSE
-    # 大誤差時像 L1
-    # 如果 |e| 很小：
-    #   loss ≈ 0.5 * e²
-
-    # 如果 |e| 很大：
-    # 小誤差區域：
-    #   平滑，方便細緻收斂
-
-    # 大誤差區域：
-    #   不會像 MSE 被 outlier 主導
-    #   loss ≈ |e| - constant
-    #   預設最合理。
-
 MODEL_DETACH_GEOMETRY_TARGETS="True"
 MODEL_GEOMETRY_GATE_INIT="0.0" # gate_init=0.0 代表一開始幾乎是 identity mapping, 讓模型有機會先專注於學習融合後的語言/視覺表示，再逐漸學習如何利用幾何投影分支提供的增強表示。
 MODEL_USE_GEOMETRY_CONFIDENCE_MASK="True"
-
 #如果 sidecar 有 confidence / conf / depth_conf / pts3d_conf，會只在 confidence > 0 的位置算 geometry attention/loss。
-#CUT3R point sidecar 目前沒有 confidence，所以主要還是靠 finite 且 depth > 0 的 mask。
+#VGGT depth sidecar 有 depth_conf 時，會用 confidence > 0 的位置算 geometry attention/loss。
 MODEL_ALLOW_MISSING_GEOMETRY_TARGETS="False"
-#如果你要求 azimuth,elevation,log_distance，但 sidecar 只能提供 depth，會直接報錯。這是好事，避免你以為有 supervise，其實沒有
+#VGGT 目前的 pre-extract sidecar 只存 depth_map/depth_conf，所以這支 script 固定用 depth + log_depth。
 MODEL_GEOMETRY_POSITION_MAX_ABS="10.0"
 #只影響 xyz mode。xyz 會除以 scene scale 後 clamp 到 [-10, 10]，
 #避免超大座標讓 RoPE angle 爆掉。
@@ -98,15 +71,16 @@ MODEL_GEOMETRY_PROJECTION_DROPOUT="0.0"
 #geometry projection block 裡 attention output / FFN output 的 dropout。現在關掉，讓 ablation 比較乾淨。
 
 
-# Geometry projection only needs pre-extracted sidecars. This tag tells the data loader
-# to load those .pt files without instantiating a runtime CUT3R/PI3/VGGT tower.
+# Geometry projection only needs pre-extracted sidecars. Current data loader only
+# auto-loads sidecars for cut3r/pi3x tags, so this keeps cut3r as a loader tag
+# while MODEL_SPATIAL_ENCODER_TYPE tells the geometry adapter to interpret VGGT keys.
 DATA_SPATIAL_TOWER_TYPE="cut3r"
 
 # ==============================================================================
 DATA_ROOT="/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r"
-#SPATIAL_FEATURES_ROOT="$DATA_ROOT"
-SPATIAL_FEATURES_ROOT="/leonardo_scratch/large/userexternal/shuang00/VLM_3R_cut3r_pointmaps"
-SPATIAL_FEATURES_SUBDIR="spatial_features_points"
+SPATIAL_FEATURES_ROOT="$WORK/VLM_3R_vggt_features"
+# Layout: ${SPATIAL_FEATURES_ROOT}/{dataset}/{video_id}.pt
+SPATIAL_FEATURES_SUBDIR="."
 
 LOCAL_MODEL_BASE="/leonardo_work/EUHPC_D32_006/FAST/hf_models/VLM3R/LLaVA-NeXT-Video-7B-Qwen2"
 LOCAL_SIGLIP="/leonardo_work/EUHPC_D32_006/FAST/hf_models/VLM3R/siglip-so400m-patch14-384"
