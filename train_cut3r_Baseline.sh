@@ -17,8 +17,8 @@
 # ============================================================
 # User-defined variables: General
 # ============================================================
-NOTE="Train VLM3R on VSI-Bench with CUT3R pre-extracted spatial features and cross-attention fusion, aligned with the previous Reproduction2-style baseline."
-CONDA_ENV_NAME="vlm3r"
+NOTE="${NOTE:-Train VLM3R on VSI-Bench with CUT3R pre-extracted spatial features and cross-attention fusion, aligned with the previous Reproduction2-style baseline.}"
+CONDA_ENV_NAME="${CONDA_ENV_NAME:-vlm3r}"
 
 # ============================================================
 # User-defined variables: Paths
@@ -59,7 +59,7 @@ SPATIAL_RANK_DEBUG_CHECKS="${SPATIAL_RANK_DEBUG_CHECKS:-False}"
 # ============================================================
 # User-defined variables: Model/Data/Training presets
 # ============================================================
-SUFFIX="vlm_3r_vsibench_all_tokens_cross_attn_lora"
+SUFFIX="${SUFFIX:-vlm_3r_vsibench_all_tokens_cross_attn_lora}"
 
 MODEL_LORA_ENABLE="True"
 MODEL_LORA_R="128"
@@ -67,7 +67,7 @@ MODEL_LORA_ALPHA="256"
 MODEL_SPATIAL_TOWER="cut3r"
 MODEL_SPATIAL_TOWER_SELECT_FEATURE="all_tokens"
 MODEL_SPATIAL_FEATURE_DIM="768"
-MODEL_FUSION_BLOCK="cross_attention"
+MODEL_FUSION_BLOCK="${MODEL_FUSION_BLOCK:-cross_attention}"
 MODEL_GEO_ROPE_FUSION_MODE="spherical"
 MODEL_GEO_ROPE_FUSION_MAX_DEPTH="10.0"
 MODEL_GEO_ROPE_FUSION_GROUP_SPLIT="2,1,2"
