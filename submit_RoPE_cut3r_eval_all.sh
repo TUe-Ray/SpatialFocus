@@ -5,7 +5,7 @@ set -euo pipefail
 REPO_DIR="${REPO_DIR:-/leonardo/home/userexternal/shuang00/VLM-3R}"
 EVAL_SCRIPT="${EVAL_SCRIPT:-$REPO_DIR/eval_RoPE_cut3r.sh}"
 
-OUTPUT_PATH="${OUTPUT_PATH:-/leonardo_scratch/fast/EUHPC_D32_006/eval/logs/VLM3R/RoPE_cut3r_runtime}"
+OUTPUT_PATH="${OUTPUT_PATH:-/leonardo_scratch/fast/EUHPC_D32_006/eval/logs/VLM3R/RoPE_cut3r_sidecars}"
 LIMIT="${LIMIT:-0}"
 NUM_PROCESSES="${NUM_PROCESSES:-4}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
@@ -70,8 +70,8 @@ submit_one() {
     export BATCH_SIZE="$BATCH_SIZE"
     export MAX_FRAMES_NUM="$MAX_FRAMES_NUM"
 
-    export USE_RUNTIME_CUT3R_GEOMETRY="True"
-    export CHECK_SPATIAL_SIDECARS="False"
+    export USE_RUNTIME_CUT3R_GEOMETRY="False"
+    export CHECK_SPATIAL_SIDECARS="True"
     export MODEL_USE_GEOMETRY_AWARE_PROJECTION="True"
     export MODEL_SPATIAL_ENCODER_TYPE="cut3r"
     export MODEL_SPATIAL_TOWER="cut3r_points"
@@ -111,8 +111,8 @@ submit_one() {
   )
 }
 
-submit_one "eval_rope_depth_cut3r_runtime_41519216" "depth" "$RUN_DEPTH"
-submit_one "eval_rope_spherical_cut3r_runtime_41520134" "spherical" "$RUN_SPHERICAL"
-submit_one "eval_rope_xyz_cut3r_runtime_41519421" "xyz" "$RUN_XYZ"
+submit_one "eval_rope_depth_cut3r_sidecars_41519216" "depth" "$RUN_DEPTH"
+submit_one "eval_rope_spherical_cut3r_sidecars_41520134" "spherical" "$RUN_SPHERICAL"
+submit_one "eval_rope_xyz_cut3r_sidecars_41519421" "xyz" "$RUN_XYZ"
 
 echo "[DONE] Submitted all requested eval jobs."

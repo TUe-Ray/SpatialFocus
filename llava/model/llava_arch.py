@@ -143,6 +143,8 @@ class LlavaMetaModel:
 
             self.vision_resampler = build_vision_resampler(config, vision_tower=self.vision_tower)
             self.mm_projector = build_vision_projector(config, vision_cfg=self.vision_tower.config)
+            if _as_bool_config(getattr(config, "use_geometry_aware_projection", False), False):
+                self.initialize_geometry_aware_projection(config)
 
             if "unpad" in getattr(config, "mm_patch_merge_type", ""):
                 self.image_newline = nn.Parameter(torch.empty(config.hidden_size, dtype=self.dtype))

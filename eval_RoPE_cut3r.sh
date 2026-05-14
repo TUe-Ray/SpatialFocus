@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-NOTE="Leonardo offline VSI-Bench eval for MetricGroundedGeometryProjection CUT3R VLM-3R checkpoints. By default this runs CUT3R on-the-fly as the spatial geometry encoder instead of loading pre-extracted point-map sidecars."
+NOTE="Leonardo offline VSI-Bench eval for MetricGroundedGeometryProjection CUT3R VLM-3R checkpoints. By default this reads pre-extracted CUT3R point-map sidecars under DATA_ROOT instead of running CUT3R on the fly."
 echo "-------- Note --------"
 echo "  note: $NOTE"
 
@@ -29,15 +29,15 @@ VSI_MEDIA_ROOT="${VSI_MEDIA_ROOT:-$HF_HOME/vsibench}"
 DATA_ROOT="${DATA_ROOT:-$FAST_ROOT/data/vlm3r}"
 SPATIAL_FEATURES_ROOT="${SPATIAL_FEATURES_ROOT:-$DATA_ROOT}"
 SPATIAL_FEATURES_SUBDIR="${SPATIAL_FEATURES_SUBDIR:-spatial_features_points}"
-USE_RUNTIME_CUT3R_GEOMETRY="${USE_RUNTIME_CUT3R_GEOMETRY:-True}"
-CHECK_SPATIAL_SIDECARS="${CHECK_SPATIAL_SIDECARS:-False}"
+USE_RUNTIME_CUT3R_GEOMETRY="${USE_RUNTIME_CUT3R_GEOMETRY:-False}"
+CHECK_SPATIAL_SIDECARS="${CHECK_SPATIAL_SIDECARS:-True}"
 CUT3R_WEIGHTS="${CUT3R_WEIGHTS:-$REPO_DIR/third_party/CUT3R/src/cut3r_512_dpt_4_64.pth}"
 
 MODEL_ROOT="${MODEL_ROOT:-/leonardo_work/EUHPC_D32_006/FAST/hf_models/VLM3R}"
 PRETRAINED_LOCAL="${PRETRAINED_LOCAL:-$MODEL_ROOT/Journey9ni/vlm-3r-llava-qwen2-lora}"
 MODEL_BASE_LOCAL="${MODEL_BASE_LOCAL:-$MODEL_ROOT/LLaVA-NeXT-Video-7B-Qwen2}"
 SIGLIP_LOCAL="${SIGLIP_LOCAL:-$MODEL_ROOT/siglip-so400m-patch14-384}"
-RUN_NAME="${RUN_NAME:-eval_metric_geometry_projection_cut3r_runtime}"
+RUN_NAME="${RUN_NAME:-eval_metric_geometry_projection_cut3r_sidecars}"
 RUNTIME_ROOT="${RUNTIME_ROOT:-$REPO_DIR/.offline_runtime}"
 # Use a job-specific subdir to prevent concurrent jobs from clobbering each other.
 # SLURM_JOB_ID is unique per job; fall back to RUN_NAME for non-SLURM use.
