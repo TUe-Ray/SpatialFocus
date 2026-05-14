@@ -285,7 +285,12 @@ class Cut3rPointsSpatialTower(nn.Module):
 
         self.is_loaded = False
 
-        self.config = Cut3rPointsConfig(weights_path=_DEFAULT_CUT3R_WEIGHTS_PATH)
+        weights_path = (
+            getattr(spatial_tower_cfg, "cut3r_weights_path", None)
+            or getattr(spatial_tower_cfg, "weights_path", None)
+            or _DEFAULT_CUT3R_WEIGHTS_PATH
+        )
+        self.config = Cut3rPointsConfig(weights_path=weights_path)
 
         self.spatial_tower_name = spatial_tower
 

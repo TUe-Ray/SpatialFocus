@@ -987,6 +987,38 @@ class LlavaMetaForCausalLM(ABC):
                 moved[key] = value.to(device=device)
         return moved
 
+    def _runtime_geometry_outputs_for_projection(self, images):
+        spatial_tower = self.get_model().get_spatial_tower()
+        if spatial_tower is None:
+            return None
+
+        if hasattr(spatial_tower, "load_model") and not getattr(spatial_tower, "is_loaded", True):
+            spatial_tower.load_model()
+        if isinstance(images, torch.Tensor):
+            if images.is_floating_point():
+                spatial_tower.to(device=images.device, dtype=images.dtype)
+            else:
+                spatial_tower.to(device=images.device)
+
+        with torch.no_grad():
+            outputs = spatial_tower(images)
+
+        canonical = canonicalize_geometry_outputs(outputs)
+        if canonical:
+            return canonical
+
+        spatial_tower_name = str(
+            getattr(self.config, "spatial_tower", "")
+            or getattr(self.config, "mm_spatial_tower", "")
+            or getattr(spatial_tower, "spatial_tower_name", "")
+        )
+        raise RuntimeError(
+            "Runtime geometry-aware projection could not obtain point_map/depth from "
+            f"spatial_tower={spatial_tower_name!r}. Use spatial_tower='cut3r_points' "
+            "for on-the-fly CUT3R point-map prediction, or provide pre-extracted "
+            "CUT3R point-map sidecars as spatial_features."
+        )
+
     def _decode_pi3x_geometry_outputs_for_projection(self, spatial_features, device):
         spatial_encoder_type = str(getattr(self.config, "spatial_encoder_type", "") or "").lower()
         spatial_tower_name = str(getattr(self.config, "spatial_tower", "") or getattr(self.config, "mm_spatial_tower", "") or "").lower()
@@ -1258,6 +1290,8 @@ class LlavaMetaForCausalLM(ABC):
                 zero_spatial_features = zero_spatial_features.lower() in {"1", "true", "yes", "y", "on"}
             if zero_spatial_features:
                 return self.get_model().mm_projector(image_features)
+            if geometry_outputs is None and point_maps is None and spatial_features is None:
+                geometry_outputs = self._runtime_geometry_outputs_for_projection(images)
             image_features = self._apply_geometry_aware_projection(
                 image_features=image_features,
                 geometry_outputs=geometry_outputs,
