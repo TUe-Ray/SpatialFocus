@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=cut3r_svf_baseline
+#SBATCH --job-name=cut3r_cross_attn_baseline
 #SBATCH --nodes=4
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
@@ -17,20 +17,21 @@
 # ============================================================
 # User-defined variables: General
 # ============================================================
-NOTE="Train VLM3R on VSI-Bench with CUT3R pre-extracted spatial features and svf_baseline fusion (paper-style KV concatenation)."
+NOTE="Train VLM3R on VSI-Bench with CUT3R pre-extracted spatial features and cross-attention fusion, aligned with the previous Reproduction2-style baseline."
 CONDA_ENV_NAME="vlm3r"
 
 # ============================================================
 # User-defined variables: Paths
 # ============================================================
-LOCAL_MODEL_BASE="/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/LLaVA-NeXT-Video-7B-Qwen2"
-LOCAL_SIGLIP="/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/siglip-so400m-patch14-384"
-DATA_ROOT="/leonardo_work/EUHPC_D32_006/FAST/train_data/vlm3r"
+MODEL_ROOT="${MODEL_ROOT:-/leonardo_work/EUHPC_D32_006/FAST/hf_models/VLM3R}"
+LOCAL_MODEL_BASE="${LOCAL_MODEL_BASE:-$MODEL_ROOT/LLaVA-NeXT-Video-7B-Qwen2}"
+LOCAL_SIGLIP="${LOCAL_SIGLIP:-$MODEL_ROOT/siglip-so400m-patch14-384}"
+DATA_ROOT="${DATA_ROOT:-/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r}"
+SPATIAL_FEATURES_ROOT="${SPATIAL_FEATURES_ROOT:-/leonardo_work/EUHPC_D32_006/FAST/train_data/vlm3r}"
+SPATIAL_FEATURES_SUBDIR="${SPATIAL_FEATURES_SUBDIR:-spatial_features}"
 
 TRAIN_SAVE_ROOT="/leonardo_work/EUHPC_D32_006/Train_Model/VLM3R"
 TRAIN_RUN_NAME="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
-TRAIN_LOG_ROOT="/leonardo_scratch/fast/EUHPC_D32_006/hf_models/VLM3R/train_log"
-TRAIN_LOG_FILE="$TRAIN_LOG_ROOT/ablation_svf_geometry_bridge_25percent_${SLURM_JOB_ID}.log"
 
 WANDB_DIR="$WORK/wandb"
 WANDB_CACHE_DIR="$WORK/wandb_cache"
@@ -58,7 +59,7 @@ SPATIAL_RANK_DEBUG_CHECKS="${SPATIAL_RANK_DEBUG_CHECKS:-False}"
 # ============================================================
 # User-defined variables: Model/Data/Training presets
 # ============================================================
-SUFFIX="vlm_3r_vsibench_cut3r_svf_baseline_lora"
+SUFFIX="vlm_3r_vsibench_all_tokens_cross_attn_lora"
 
 MODEL_LORA_ENABLE="True"
 MODEL_LORA_R="128"
@@ -66,7 +67,7 @@ MODEL_LORA_ALPHA="256"
 MODEL_SPATIAL_TOWER="cut3r"
 MODEL_SPATIAL_TOWER_SELECT_FEATURE="all_tokens"
 MODEL_SPATIAL_FEATURE_DIM="768"
-MODEL_FUSION_BLOCK="svf_baseline"
+MODEL_FUSION_BLOCK="cross_attention"
 MODEL_GEO_ROPE_FUSION_MODE="spherical"
 MODEL_GEO_ROPE_FUSION_MAX_DEPTH="10.0"
 MODEL_GEO_ROPE_FUSION_GROUP_SPLIT="2,1,2"
@@ -136,7 +137,6 @@ DATALOADER_DROP_LAST="True"
 echo "-------- Note --------"
 echo "  note: $NOTE"
 mkdir -p logs/train
-mkdir -p "$TRAIN_LOG_ROOT"
 
 JOB_TIME_LIMIT=$(squeue -j "$SLURM_JOB_ID" -h -o "%l")
 
@@ -351,7 +351,8 @@ declare -A DATA_ARGS=(
     [data_path]="$DATA_PATH_YAML"
     [image_folder]="$DATA_ROOT"
     [video_folder]="$DATA_ROOT"
-    [spatial_features_subdir]="spatial_features"
+    [spatial_features_root]="$SPATIAL_FEATURES_ROOT"
+    [spatial_features_subdir]="$SPATIAL_FEATURES_SUBDIR"
     [zero_spatial_features]="$ZERO_SPATIAL_FEATURES"
     [group_by_modality_length]="$DATA_GROUP_BY_MODALITY_LENGTH"   #控制 dataloader sampler 是否按模態長度分組（
                                         #通常可減少 padding、讓 batch 更穩定）
@@ -450,6 +451,5 @@ srun --export=ALL torchrun \
         --rdzv_endpoint="$MASTER_ADDR:$MASTER_PORT" \
         llava/train/train_mem.py \
         "${TORCHRUN_ARGS[@]}"
-    2>&1 | tee "$TRAIN_LOG_FILE"
 
 exit 0
