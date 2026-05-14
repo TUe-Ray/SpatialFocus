@@ -84,7 +84,7 @@ echo "LLM_LAYERS=$LLM_LAYERS"
 nvidia-smi || true
 python -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'available', torch.cuda.is_available())"
 
-python scripts/analyze_roi_similarity_maps.py \
+python scripts/analysis/analyze_roi_similarity_maps.py \
   --model_path "$MODEL_PATH" \
   --model_base "$MODEL_BASE" \
   --siglip_path "$SIGLIP_PATH" \

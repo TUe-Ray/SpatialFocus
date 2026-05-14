@@ -196,12 +196,12 @@ sbatch eval_vsi_snellius.sh
 
 ## Geometry Retention vs Correctness Diagnostic
 
-Use `scripts/analyze_geometry_retention_vs_correctness.py` to test whether VSI-Bench samples with better hidden-state retention of CUT3R token similarity are more likely to be answered correctly. The prediction file must already contain `correctness` as `1` or `0`; the script intentionally does not guess answer matching.
+Use `scripts/analysis/analyze_geometry_retention_vs_correctness.py` to test whether VSI-Bench samples with better hidden-state retention of CUT3R token similarity are more likely to be answered correctly. The prediction file must already contain `correctness` as `1` or `0`; the script intentionally does not guess answer matching.
 
 Recommended first run:
 
 ```bash
-python scripts/analyze_geometry_retention_vs_correctness.py \
+python scripts/analysis/analyze_geometry_retention_vs_correctness.py \
     --model_path /path/to/original_vlm3r_checkpoint \
   --data_json /path/to/vsi_val.json \
   --prediction_json /path/to/original_predictions_with_correctness.json \

@@ -52,7 +52,7 @@ echo "DECODER_LAYERS=$DECODER_LAYERS"
 nvidia-smi || true
 python -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'available', torch.cuda.is_available())"
 
-python scripts/analyze_spatial_decoder_layer_roi.py \
+python scripts/analysis/analyze_spatial_decoder_layer_roi.py \
   --data_json "$DATA_PATH" \
   --output_dir "$OUTPUT_DIR" \
   --num_samples 3 \

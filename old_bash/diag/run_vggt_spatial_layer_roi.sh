@@ -30,7 +30,8 @@ RUN_NAME="${RUN_NAME:-vggt_cut3r_pi3_roi_$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_DIR="${OUTPUT_DIR:-/leonardo_scratch/fast/EUHPC_D32_006/diag/roi_similarity/$RUN_NAME}"
 
 NUM_SAMPLES="${NUM_SAMPLES:-3}"
-SAMPLE_IDS="${SAMPLE_IDS:-001bd120-cb6e-4d77-a87e-a21c4ddc00f8,0021c68f-2e4c-4aac-97ef-e58d05bf40f0,0054a922-4345-4264-86e4-b176f2d110b0}"
+MAX_VISUALIZED_SAMPLES="${MAX_VISUALIZED_SAMPLES:-$NUM_SAMPLES}"
+SAMPLE_IDS="${SAMPLE_IDS-001bd120-cb6e-4d77-a87e-a21c4ddc00f8,0021c68f-2e4c-4aac-97ef-e58d05bf40f0,0054a922-4345-4264-86e4-b176f2d110b0}"
 FRAMES="${FRAMES:-4}"
 FRAMES_UPBOUND="${FRAMES_UPBOUND:-8}"
 DECODER_LAYERS="${DECODER_LAYERS:--8,-6,-4,-2,-1}"
@@ -73,6 +74,7 @@ echo "CUT3R_WEIGHTS=$CUT3R_WEIGHTS"
 echo "PI3X_WEIGHTS=$PI3X_WEIGHTS"
 echo "VGGT_WEIGHTS=$VGGT_WEIGHTS"
 echo "SAMPLE_IDS=$SAMPLE_IDS"
+echo "MAX_VISUALIZED_SAMPLES=$MAX_VISUALIZED_SAMPLES"
 echo "FRAMES=$FRAMES"
 echo "FRAMES_UPBOUND=$FRAMES_UPBOUND"
 echo "DECODER_LAYERS=$DECODER_LAYERS"
@@ -82,7 +84,7 @@ echo "DTYPE=$DTYPE"
 nvidia-smi || true
 python -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'available', torch.cuda.is_available())"
 
-python scripts/analyze_spatial_decoder_layer_roi.py \
+python scripts/analysis/analyze_spatial_decoder_layer_roi.py \
   --data_json "$DATA_PATH" \
   --output_dir "$OUTPUT_DIR" \
   --num_samples "$NUM_SAMPLES" \
@@ -92,6 +94,8 @@ python scripts/analyze_spatial_decoder_layer_roi.py \
   --normalize_mode global_per_figure \
   --save_raw True \
   --save_individual_figures True \
+  --max_visualized_samples "$MAX_VISUALIZED_SAMPLES" \
+  --include_siglip_reference True \
   --decoder_layers="$DECODER_LAYERS" \
   --vggt_layers="$VGGT_LAYERS" \
   --target_grid 14x14 \

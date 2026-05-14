@@ -36,11 +36,11 @@ except ImportError:  # pragma: no cover
     plt = None
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.analyze_roi_similarity_maps import (  # noqa: E402
+from scripts.analysis.analyze_roi_similarity_maps import (  # noqa: E402
     build_anchors,
     corr_values,
     extract_category,
@@ -351,6 +351,16 @@ def load_vggt(args: argparse.Namespace, device: torch.device, dtype: torch.dtype
     return model
 
 
+def load_siglip_reference(args: argparse.Namespace, device: torch.device, dtype: torch.dtype):
+    from llava.model.multimodal_encoder.siglip_encoder import SigLipVisionTower
+
+    tower = SigLipVisionTower(args.siglip_path, SimpleNamespace(), delay_load=False)
+    tower.to(device=device, dtype=dtype)
+    tower.eval()
+    tower.requires_grad_(False)
+    return tower
+
+
 def prepare_vggt_input(pixel_values: torch.Tensor, image_size: int) -> torch.Tensor:
     if pixel_values.dim() == 4:
         views = F.interpolate(pixel_values, size=(image_size, image_size), mode="bilinear", align_corners=False)
@@ -478,9 +488,11 @@ def analyze_sample(
     batch: dict[str, Any],
     raw_item: dict[str, Any],
     sample_idx: int,
+    visualize: bool,
     cut3r: torch.nn.Module | None,
     pi3: torch.nn.Module | None,
     vggt: torch.nn.Module | None,
+    siglip_ref: torch.nn.Module | None,
     device: torch.device,
     dtype: torch.dtype,
 ) -> tuple[list[dict[str, Any]], int]:
@@ -493,6 +505,8 @@ def analyze_sample(
     pixel_values = video_tensor.to(device=device, dtype=dtype)
     layer_features: dict[str, torch.Tensor] = {}
     with torch.inference_mode():
+        if siglip_ref is not None:
+            layer_features["SigLIP selected (-2)"] = siglip_ref(pixel_values).detach().float().cpu()
         if cut3r is not None:
             layer_features.update(run_cut3r_decoder_layers(cut3r, pixel_values, args.decoder_layers))
         if pi3 is not None:
@@ -518,16 +532,18 @@ def analyze_sample(
         if not anchors:
             continue
         rgb = tensor_to_uint8_image(video_tensor[local_frame_idx], image_processor)
-        save_rgb_frame(frames_dir / f"{safe_id(sample_id)}_frame{frame_id}.png", rgb)
+        if visualize:
+            save_rgb_frame(frames_dir / f"{safe_id(sample_id)}_frame{frame_id}.png", rgb)
         for anchor in anchors:
             raw_maps = {name: similarity_map(value, anchor["token_index"], target_hw) for name, value in frame_features.items()}
             stem = f"{safe_id(sample_id)}_frame{frame_id}_anchor{anchor['anchor_id']}"
-            save_figure(figures_dir / f"{stem}.png", rgb, anchor, raw_maps, args.normalize_mode)
+            if visualize:
+                save_figure(figures_dir / f"{stem}.png", rgb, anchor, raw_maps, args.normalize_mode)
             global_limits = None
             if args.normalize_mode == "global_per_figure":
                 values = torch.cat([value.float().flatten() for value in raw_maps.values()])
                 global_limits = (float(values.min()), float(values.max()))
-            if args.save_individual_figures:
+            if visualize and args.save_individual_figures:
                 sample_individual_dir = individual_dir / stem
                 sample_individual_dir.mkdir(parents=True, exist_ok=True)
                 for name, sim in raw_maps.items():
@@ -540,8 +556,9 @@ def analyze_sample(
                         args.normalize_mode,
                         global_limits,
                     )
-            save_rgb_frame(frames_dir / f"{stem}_rgb_anchor.png", rgb, anchor)
-            figure_count += 1
+            if visualize:
+                save_rgb_frame(frames_dir / f"{stem}_rgb_anchor.png", rgb, anchor)
+                figure_count += 1
 
             if args.save_raw:
                 torch.save(
@@ -555,14 +572,17 @@ def analyze_sample(
             cut_ref = raw_maps.get("CUT3R dec -1")
             pi3_ref = raw_maps.get("PI3 dec -1")
             vggt_ref = raw_maps.get("VGGT agg -1")
+            siglip_reference = raw_maps.get("SigLIP selected (-2)")
             for name, sim in raw_maps.items():
-                cut_p = cut_s = pi3_p = pi3_s = vggt_p = vggt_s = self_p = self_s = float("nan")
+                cut_p = cut_s = pi3_p = pi3_s = vggt_p = vggt_s = siglip_p = siglip_s = self_p = self_s = float("nan")
                 if cut_ref is not None:
                     cut_p, cut_s = corr_values(sim, cut_ref)
                 if pi3_ref is not None:
                     pi3_p, pi3_s = corr_values(sim, pi3_ref)
                 if vggt_ref is not None:
                     vggt_p, vggt_s = corr_values(sim, vggt_ref)
+                if siglip_reference is not None:
+                    siglip_p, siglip_s = corr_values(sim, siglip_reference)
                 if name.startswith("CUT3R") and cut_ref is not None:
                     self_p, self_s = corr_values(sim, cut_ref)
                 elif name.startswith("PI3") and pi3_ref is not None:
@@ -581,6 +601,11 @@ def analyze_sample(
                     "spearman_with_pi3_dec_m1": pi3_s,
                     "pearson_with_vggt_agg_m1": vggt_p,
                     "spearman_with_vggt_agg_m1": vggt_s,
+                    "pearson_with_siglip_selected_m2": siglip_p,
+                    "spearman_with_siglip_selected_m2": siglip_s,
+                    "spearman_geometry_minus_siglip": (
+                        cut_s - siglip_s if not math.isnan(cut_s) and not math.isnan(siglip_s) else float("nan")
+                    ),
                     "pearson_with_own_final": self_p,
                     "spearman_with_own_final": self_s,
                     "mean_similarity": float(sim.float().mean().item()),
@@ -604,6 +629,7 @@ def analyze_sample(
                 "cut3r_weights": args.cut3r_weights if cut3r is not None else None,
                 "pi3x_weights": args.pi3x_weights if pi3 is not None else None,
                 "vggt_weights": args.vggt_weights if vggt is not None else None,
+                "siglip_path": args.siglip_path if siglip_ref is not None else None,
                 "number_of_frames": int(video_tensor.shape[0]),
             }
             with open(raw_dir / f"{stem}.json", "w", encoding="utf-8") as f:
@@ -633,6 +659,9 @@ def write_summary(output_dir: Path, rows: list[dict[str, Any]]) -> dict[str, dic
         "spearman_with_pi3_dec_m1",
         "pearson_with_vggt_agg_m1",
         "spearman_with_vggt_agg_m1",
+        "pearson_with_siglip_selected_m2",
+        "spearman_with_siglip_selected_m2",
+        "spearman_geometry_minus_siglip",
         "pearson_with_own_final",
         "spearman_with_own_final",
         "mean_similarity",
@@ -649,6 +678,8 @@ def write_summary(output_dir: Path, rows: list[dict[str, Any]]) -> dict[str, dic
             "spearman_with_cut3r_dec_m1",
             "spearman_with_pi3_dec_m1",
             "spearman_with_vggt_agg_m1",
+            "spearman_with_siglip_selected_m2",
+            "spearman_geometry_minus_siglip",
             "spearman_with_own_final",
         ):
             value = float(row[key])
@@ -674,6 +705,8 @@ def main() -> None:
     parser.add_argument("--save_raw", type=str2bool, default=True)
     parser.add_argument("--save_features", action="store_true")
     parser.add_argument("--save_individual_figures", type=str2bool, default=True)
+    parser.add_argument("--max_visualized_samples", type=int, default=-1)
+    parser.add_argument("--include_siglip_reference", type=str2bool, default=True)
     parser.add_argument("--decoder_layers", type=parse_int_list, default="-3,-2,-1")
     parser.add_argument("--vggt_layers", type=parse_int_list, default="-8,-6,-4,-2,-1")
     parser.add_argument("--target_grid", default="14x14")
@@ -742,13 +775,28 @@ def main() -> None:
     cut3r = load_cut3r(args, device, dtype) if "cut3r" in encoder_set else None
     pi3 = load_pi3(args, device, dtype) if "pi3" in encoder_set else None
     vggt = load_vggt(args, device, dtype) if "vggt" in encoder_set else None
+    siglip_ref = load_siglip_reference(args, device, dtype) if args.include_siglip_reference else None
 
     rows: list[dict[str, Any]] = []
     figure_count = 0
-    for sample_idx, raw_item in samples:
+    for selected_ordinal, (sample_idx, raw_item) in enumerate(samples):
         try:
             batch = load_video_batch(raw_item, args, image_processor)
-            sample_rows, count = analyze_sample(args, image_processor, batch, raw_item, sample_idx, cut3r, pi3, vggt, device, dtype)
+            visualize = args.max_visualized_samples < 0 or selected_ordinal < args.max_visualized_samples
+            sample_rows, count = analyze_sample(
+                args,
+                image_processor,
+                batch,
+                raw_item,
+                sample_idx,
+                visualize,
+                cut3r,
+                pi3,
+                vggt,
+                siglip_ref,
+                device,
+                dtype,
+            )
             rows.extend(sample_rows)
             figure_count += count
         except Exception as exc:
