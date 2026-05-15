@@ -265,12 +265,13 @@ class Vlm3r(lmms):
         )
         eval_logger.info("[ABLATION][EVAL] zero_spatial_features={}", self.zero_spatial_features)
         eval_logger.info(
-            "[ROPE][EVAL] fusion_block={}, geometry_rope_mode={}, group_split={}, max_depth={}, log_stats={}",
+            "[ROPE][EVAL] fusion_block={}, geometry_rope_mode={}, group_split={}, max_depth={}, log_stats={}, eval_lambda={}",
             getattr(self._config, "fusion_block", None),
             getattr(self._config, "geometry_rope_mode", None),
             getattr(self._config, "geometry_rope_group_split", None),
             getattr(self._config, "geometry_rope_max_depth", None),
             getattr(self._config, "geometry_rope_log_stats", None),
+            getattr(self._config, "geo_rope_fusion_eval_lambda", None),
         )
         eval_logger.info(
             "[SPATIAL][EVAL] spatial_tower={}, spatial_features_root={}, spatial_features_subdir={}",

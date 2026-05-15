@@ -263,6 +263,8 @@ class LlavaMetaModel:
                 return "CrossAttentionFusion"
             if fusion_block_type == "svf_patch_only":
                 return "CrossAttentionFusion"
+            if fusion_block_type == "svf_patch_only_geo_rope_eval":
+                return "PostHocGeoRoPEPatchCrossAttention"
             if fusion_block_type in ["svf_geo_rope_fusion", "svf_depth_geo_rope_fusion", "svf_xyz_geo_rope_fusion", "svf_spherical_geo_rope_fusion",
                                       "svf_depth_rope", "svf_xyz_rope", "svf_spherical_rope"]:
                 return "GeoRoPEFusionCrossAttention"
@@ -1537,7 +1539,8 @@ class LlavaMetaForCausalLM(ABC):
                     )
                     image_features = self.get_model().mm_projector(image_features)
 
-                elif fusion_block_type in ['svf_geo_rope_fusion', 'svf_depth_geo_rope_fusion', 'svf_xyz_geo_rope_fusion', 'svf_spherical_geo_rope_fusion',
+                elif fusion_block_type in ['svf_patch_only_geo_rope_eval',
+                                           'svf_geo_rope_fusion', 'svf_depth_geo_rope_fusion', 'svf_xyz_geo_rope_fusion', 'svf_spherical_geo_rope_fusion',
                                            'svf_depth_rope', 'svf_xyz_rope', 'svf_spherical_rope']:
                     geometry_point_maps = _coalesce_point_maps(point_maps)
                     if geometry_point_maps is None and isinstance(loaded_spatial_features, dict):

@@ -339,6 +339,128 @@ class GeoRoPEFusionCrossAttention(nn.Module):
         return out, attn.mean(dim=1)
 
 
+class PostHocGeoRoPEPatchCrossAttention(nn.Module):
+    """
+    Eval-only variant for injecting Geometry-RoPE into a trained svf_patch_only
+    checkpoint without changing the learned baseline parameter names.
+    """
+    def __init__(
+        self,
+        d_clip,
+        d_spatial_encoder,
+        d_attn,
+        num_heads,
+        geo_rope_fusion_mode="spherical",
+        max_depth=10.0,
+        group_split=None,
+        eval_lambda=0.0,
+        eval_lambda_q=None,
+        eval_lambda_k=None,
+        log_stats=False,
+    ):
+        super().__init__()
+        if d_attn % num_heads != 0:
+            raise ValueError(f"d_attn ({d_attn}) must be divisible by num_heads ({num_heads})")
+
+        self.d_attn = d_attn
+        self.num_heads = num_heads
+        self.head_dim = d_attn // num_heads
+
+        self.clip_norm = nn.LayerNorm(d_clip)
+        self.spatial_encoder_norm = nn.LayerNorm(d_spatial_encoder)
+        self.clip_query_proj = nn.Linear(d_clip, d_attn)
+        self.spatial_encoder_key_proj = nn.Linear(d_spatial_encoder, d_attn)
+        self.spatial_encoder_value_proj = nn.Linear(d_spatial_encoder, d_attn)
+        self.cross_attention = nn.MultiheadAttention(embed_dim=d_attn, num_heads=num_heads, batch_first=True)
+        self.out_norm = nn.LayerNorm(d_attn)
+        self.out_proj = nn.Linear(d_attn, d_clip)
+        self.dropout = nn.Dropout(0.1)
+
+        self.geo_rope_fusion = GeoRoPEFusionRotary(
+            head_dim=self.head_dim,
+            mode=geo_rope_fusion_mode,
+            max_depth=max_depth,
+            group_split=group_split,
+        )
+        self.eval_lambda_q = float(eval_lambda if eval_lambda_q is None else eval_lambda_q)
+        self.eval_lambda_k = float(eval_lambda if eval_lambda_k is None else eval_lambda_k)
+        self.log_stats = log_stats
+        self.last_geo_rope_fusion_stats = {
+            "eval_lambda_q": self.eval_lambda_q,
+            "eval_lambda_k": self.eval_lambda_k,
+            "group_split": self.geo_rope_fusion.group_split,
+            "group_dims": list(self.geo_rope_fusion.group_dims),
+        }
+
+    def _reshape_to_heads(self, x):
+        bsz, seq_len, _ = x.shape
+        return x.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+
+    def _merge_heads(self, x):
+        bsz, _, seq_len, _ = x.shape
+        return x.transpose(1, 2).contiguous().view(bsz, seq_len, self.d_attn)
+
+    @staticmethod
+    def _mean_std(x):
+        x = x.detach().float()
+        return {
+            "mean": x.mean().item(),
+            "std": x.std(unbiased=False).item(),
+        }
+
+    def _record_stats(self, pos_clip, pos_spatial, q_delta, k_delta):
+        self.last_geo_rope_fusion_stats = {
+            "pos_clip": self._mean_std(pos_clip),
+            "pos_spatial": self._mean_std(pos_spatial),
+            "q_geo_rope_fusion_minus_q": self._mean_std(q_delta),
+            "k_geo_rope_fusion_minus_k": self._mean_std(k_delta),
+            "eval_lambda_q": self.eval_lambda_q,
+            "eval_lambda_k": self.eval_lambda_k,
+            "group_split": self.geo_rope_fusion.group_split,
+            "group_dims": list(self.geo_rope_fusion.group_dims),
+        }
+
+    def forward(self, clip_features, spatial_encoder_features, pos_clip, pos_spatial):
+        clip_features_norm = self.clip_norm(clip_features)
+        spatial_encoder_features_norm = self.spatial_encoder_norm(spatial_encoder_features)
+
+        q = self.clip_query_proj(clip_features_norm)
+        k = self.spatial_encoder_key_proj(spatial_encoder_features_norm)
+        v = self.spatial_encoder_value_proj(spatial_encoder_features_norm)
+
+        in_proj_weight = self.cross_attention.in_proj_weight
+        in_proj_bias = self.cross_attention.in_proj_bias
+        q = F.linear(q, in_proj_weight[:self.d_attn], in_proj_bias[:self.d_attn])
+        k = F.linear(k, in_proj_weight[self.d_attn:2 * self.d_attn], in_proj_bias[self.d_attn:2 * self.d_attn])
+        v = F.linear(v, in_proj_weight[2 * self.d_attn:], in_proj_bias[2 * self.d_attn:])
+
+        q = self._reshape_to_heads(q)
+        k = self._reshape_to_heads(k)
+        v = self._reshape_to_heads(v)
+
+        q_geo_rope_fusion = self.geo_rope_fusion(q, pos_clip)
+        k_geo_rope_fusion = self.geo_rope_fusion(k, pos_spatial)
+        q_delta = q_geo_rope_fusion - q
+        k_delta = k_geo_rope_fusion - k
+        if self.log_stats:
+            self._record_stats(pos_clip, pos_spatial, q_delta, k_delta)
+
+        q = q + self.eval_lambda_q * q_delta
+        k = k + self.eval_lambda_k * k_delta
+
+        attn = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        attn = F.softmax(attn.float(), dim=-1).to(dtype=q.dtype)
+        fused_features = torch.matmul(attn, v)
+        fused_features = self._merge_heads(fused_features)
+        fused_features = self.cross_attention.out_proj(fused_features)
+        fused_features = self.out_proj(fused_features)
+        fused_features = self.out_norm(fused_features)
+        fused_features = fused_features + clip_features
+        fused_features = self.dropout(fused_features)
+
+        return fused_features, attn.mean(dim=1)
+
+
 class PatchCrossAttentionCameraConcatFusion(nn.Module):
     def __init__(self, d_clip, d_spatial_encoder, d_attn, num_heads, dropout_rate=0.1, d_camera_encoder=None):
         super(PatchCrossAttentionCameraConcatFusion, self).__init__()
@@ -865,6 +987,34 @@ def build_multimodal_fusion_block(config, delay_load=False, **kwargs):
             d_spatial_encoder=d_spatial_encoder,
             d_attn=d_attn,
             num_heads=18,
+        )
+    elif fusion_block_type == "svf_patch_only_geo_rope_eval":
+        geo_rope_fusion_mode = (
+            getattr(config, "geo_rope_fusion_mode", None)
+            or getattr(config, "geometry_rope_mode", "spherical")
+        )
+        log_stats = getattr(config, "geo_rope_fusion_log_stats", False) or getattr(config, "geometry_rope_log_stats", False)
+        if isinstance(log_stats, str):
+            log_stats = log_stats.lower() in {"1", "true", "yes", "y", "on"}
+        max_depth = getattr(config, "geo_rope_fusion_max_depth", None) or getattr(config, "geometry_rope_max_depth", 10.0)
+        group_split = getattr(config, "geo_rope_fusion_group_split", None) or getattr(config, "geometry_rope_group_split", None)
+        eval_lambda = getattr(config, "geo_rope_fusion_eval_lambda", None)
+        if eval_lambda is None:
+            eval_lambda = getattr(config, "geometry_rope_eval_lambda", 0.0)
+        eval_lambda_q = getattr(config, "geo_rope_fusion_eval_lambda_q", None)
+        eval_lambda_k = getattr(config, "geo_rope_fusion_eval_lambda_k", None)
+        return PostHocGeoRoPEPatchCrossAttention(
+            d_clip=d_clip,
+            d_spatial_encoder=d_spatial_encoder,
+            d_attn=d_attn,
+            num_heads=18,
+            geo_rope_fusion_mode=geo_rope_fusion_mode,
+            max_depth=max_depth,
+            group_split=group_split,
+            eval_lambda=eval_lambda,
+            eval_lambda_q=eval_lambda_q,
+            eval_lambda_k=eval_lambda_k,
+            log_stats=log_stats,
         )
     elif fusion_block_type == "svf_geo_rope_fusion" or fusion_block_type in geo_rope_fusion_mode_aliases:
         if fusion_block_type in geo_rope_fusion_mode_aliases:
