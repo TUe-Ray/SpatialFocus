@@ -51,11 +51,6 @@ submit_one() {
   local job_name="Eval_PostHocGeoRoPE_l${lambda_tag}"
   local fusion_block="svf_patch_only_geo_rope_eval"
 
-  if [[ "$lambda" == "0" || "$lambda" == "0.0" || "$lambda" == "0.00" ]]; then
-    fusion_block="svf_patch_only"
-    run_name="posthoc_geo_rope_${MODEL_GEO_ROPE_FUSION_MODE}_lambda_${lambda_tag}_baseline"
-  fi
-
   echo "==== Submit lambda=$lambda ===="
   echo "checkpoint=$PRETRAINED_LOCAL"
   echo "fusion_block=$fusion_block"
