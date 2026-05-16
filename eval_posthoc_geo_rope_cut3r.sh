@@ -32,7 +32,7 @@ SPATIAL_FEATURES_SUBDIR="${SPATIAL_FEATURES_SUBDIR:-spatial_features_points}"
 CHECK_SPATIAL_SIDECARS="${CHECK_SPATIAL_SIDECARS:-True}"
 
 MODEL_ROOT="${MODEL_ROOT:-/leonardo_work/EUHPC_D32_006/FAST/hf_models/VLM3R}"
-PRETRAINED_LOCAL="${PRETRAINED_LOCAL:-$REPO_DIR/.offline_runtime/selec_100__baseline_40390735_vsibench_40409403_pretrained_siglip_local}"
+PRETRAINED_LOCAL="${PRETRAINED_LOCAL:-/leonardo_work/EUHPC_D32_006/Train_Model/VLM3R/archived_eomt/selec_100%_baseline_40390735}"
 MODEL_BASE_LOCAL="${MODEL_BASE_LOCAL:-$MODEL_ROOT/LLaVA-NeXT-Video-7B-Qwen2}"
 SIGLIP_LOCAL="${SIGLIP_LOCAL:-$MODEL_ROOT/siglip-so400m-patch14-384}"
 RUN_NAME="${RUN_NAME:-posthoc_geo_rope_cut3r}"
@@ -110,6 +110,19 @@ done
 
 if [[ ! -f "$PRETRAINED_LOCAL/config.json" ]]; then
   echo "[ERROR] Missing pretrained config: $PRETRAINED_LOCAL/config.json"
+  exit 1
+fi
+if [[ ! -f "$PRETRAINED_LOCAL/adapter_config.json" ]]; then
+  echo "[ERROR] Missing LoRA adapter config: $PRETRAINED_LOCAL/adapter_config.json"
+  exit 1
+fi
+if [[ ! -f "$PRETRAINED_LOCAL/non_lora_trainables.bin" ]]; then
+  echo "[ERROR] Missing non-LoRA trainables: $PRETRAINED_LOCAL/non_lora_trainables.bin"
+  echo "[ERROR] Use the real checkpoint directory, not a stale runtime directory with broken symlinks."
+  exit 1
+fi
+if [[ ! -f "$PRETRAINED_LOCAL/adapter_model.bin" && ! -f "$PRETRAINED_LOCAL/adapter_model.safetensors" ]]; then
+  echo "[ERROR] Missing LoRA adapter weights: expected adapter_model.bin or adapter_model.safetensors under $PRETRAINED_LOCAL"
   exit 1
 fi
 if [[ ! -f "$SIGLIP_LOCAL/config.json" ]]; then
