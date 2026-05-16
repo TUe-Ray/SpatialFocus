@@ -173,6 +173,50 @@ class LlavaMetaModel:
             geometry_aware_projection = geometry_aware_projection[0]
         return geometry_aware_projection
 
+    def get_pi3x_geometry_tower(self):
+        pi3x_geometry_tower = getattr(self, "pi3x_geometry_tower", None)
+        if type(pi3x_geometry_tower) is list:
+            pi3x_geometry_tower = pi3x_geometry_tower[0]
+        return pi3x_geometry_tower
+
+    def initialize_pi3x_geometry_tower(self, model_args=None, fsdp=None, device=None, dtype=None):
+        existing = self.get_pi3x_geometry_tower()
+        if existing is not None:
+            if hasattr(existing, "load_model") and not getattr(existing, "is_loaded", True):
+                existing.load_model()
+            if device is not None or dtype is not None:
+                existing.to(device=device, dtype=dtype)
+            return existing
+
+        class _Pi3xGeometryTowerConfig:
+            pass
+
+        cfg = _Pi3xGeometryTowerConfig()
+        cfg.spatial_tower = "pi3x"
+        cfg.mm_spatial_tower = "pi3x"
+        cfg.mm_tunable_parts = ""
+        cfg.pi3x_weights_path = (
+            getattr(model_args, "pi3x_weights_path", None)
+            if model_args is not None
+            else getattr(self.config, "pi3x_weights_path", None)
+        ) or "/leonardo_scratch/fast/EUHPC_D32_006/hf_models/Pi3X"
+        cfg.pi3x_input_size = (
+            getattr(model_args, "pi3x_input_size", None)
+            if model_args is not None
+            else getattr(self.config, "pi3x_input_size", 518)
+        ) or 518
+
+        tower = build_spatial_tower(cfg, delay_load=False)
+        tower.requires_grad_(False)
+        if device is not None or dtype is not None:
+            tower.to(device=device, dtype=dtype)
+
+        if fsdp is not None and len(fsdp) > 0:
+            self.pi3x_geometry_tower = [tower]
+        else:
+            self.pi3x_geometry_tower = tower
+        return tower
+
     def initialize_spatial_tower(self, model_args, fsdp=None):
         cli_spatial_tower = model_args.spatial_tower
         self.config.mm_spatial_tower = cli_spatial_tower
@@ -1023,10 +1067,10 @@ class LlavaMetaForCausalLM(ABC):
             "CUT3R point-map sidecars as spatial_features."
         )
 
-    def _decode_pi3x_geometry_outputs_for_projection(self, spatial_features, device):
+    def _decode_pi3x_geometry_outputs_for_projection(self, spatial_features, device, force=False):
         spatial_encoder_type = str(getattr(self.config, "spatial_encoder_type", "") or "").lower()
         spatial_tower_name = str(getattr(self.config, "spatial_tower", "") or getattr(self.config, "mm_spatial_tower", "") or "").lower()
-        if "pi3" not in spatial_encoder_type and "pi3" not in spatial_tower_name:
+        if not force and "pi3" not in spatial_encoder_type and "pi3" not in spatial_tower_name:
             return None
         if spatial_features is None:
             return None
@@ -1044,11 +1088,18 @@ class LlavaMetaForCausalLM(ABC):
         if not decoded_items:
             return None
 
-        spatial_tower = self.get_model().get_spatial_tower()
+        if force:
+            target_dtype = torch.float32
+            spatial_tower = self.get_model().initialize_pi3x_geometry_tower(
+                device=device,
+                dtype=target_dtype,
+            )
+        else:
+            spatial_tower = self.get_model().get_spatial_tower()
         if spatial_tower is None:
             raise RuntimeError(
                 "PI3X Geometry-RoPE from decoded_features requires --spatial_tower pi3x "
-                "so the frozen PI3X point/camera/conf heads are available."
+                "or geometry_spatial_tower_type=pi3x so the frozen PI3X point/camera/conf heads are available."
             )
         if hasattr(spatial_tower, "load_model") and not getattr(spatial_tower, "is_loaded", True):
             spatial_tower.load_model()
@@ -1084,6 +1135,7 @@ class LlavaMetaForCausalLM(ABC):
         sf = Pi3XDecodedFeatures.from_loaded(spatial_feature)
         decoded_features = sf.decoded_features.to(device=device)
         num_frames = int(decoded_features.shape[0])
+        input_h = input_w = int(sf.input_size)
         patch_h = patch_w = int(sf.input_size // sf.patch_size)
         token_count = int(decoded_features.shape[1])
         expected_tokens = int(patch_h * patch_w + sf.patch_start_idx)
@@ -1101,48 +1153,51 @@ class LlavaMetaForCausalLM(ABC):
         if pos.dtype not in (torch.int32, torch.int64):
             pos = pos.to(dtype=torch.int64)
 
-        head_dtype = self._module_param_dtype(pi3_model.point_decoder, decoded_features.dtype)
+        head_dtype = self._module_param_dtype(pi3_model.point_decoder, torch.float32)
+        if head_dtype == torch.bfloat16:
+            pi3_model.to(dtype=torch.float32)
+            head_dtype = torch.float32
         hidden = decoded_features.to(dtype=head_dtype)
-        pos = pos.to(device=hidden.device)
+        pos = pos.to(device=hidden.device).contiguous()
         patch_start_idx = int(sf.patch_start_idx)
 
         with torch.no_grad():
-            point_hidden = pi3_model.point_decoder(hidden, xpos=pos)
-            camera_hidden = pi3_model.camera_decoder(hidden, xpos=pos)
-            conf_hidden = pi3_model.conf_decoder(hidden, xpos=pos)
-
             autocast_device = hidden.device.type if hidden.device.type in {"cuda", "cpu"} else "cuda"
             with torch.amp.autocast(device_type=autocast_device, enabled=False):
+                point_hidden = pi3_model.point_decoder(hidden, xpos=pos)
+                camera_hidden = pi3_model.camera_decoder(hidden, xpos=pos)
+                conf_hidden = pi3_model.conf_decoder(hidden, xpos=pos)
+
                 point_tokens = point_hidden[:, patch_start_idx:]
                 conf_tokens = conf_hidden[:, patch_start_idx:]
                 camera_tokens = camera_hidden[:, patch_start_idx:]
 
                 if hasattr(pi3_model, "_chunked_conv_head"):
-                    point_tokens = point_tokens.to(dtype=self._module_param_dtype(pi3_model.point_head, point_tokens.dtype))
+                    point_tokens = point_tokens.to(dtype=self._module_param_dtype(pi3_model.point_head, point_tokens.dtype)).contiguous()
                     xy, z = pi3_model._chunked_conv_head(pi3_model.point_head, point_tokens, patch_h, patch_w)
-                    xy = xy.float().permute(0, 2, 3, 1).reshape(1, num_frames, patch_h, patch_w, -1)
-                    z = z.float().permute(0, 2, 3, 1).reshape(1, num_frames, patch_h, patch_w, -1)
+                    xy = xy.float().permute(0, 2, 3, 1).reshape(1, num_frames, input_h, input_w, -1)
+                    z = z.float().permute(0, 2, 3, 1).reshape(1, num_frames, input_h, input_w, -1)
                     z = torch.exp(z.clamp(max=15.0))
 
-                    conf_tokens = conf_tokens.to(dtype=self._module_param_dtype(pi3_model.conf_head, conf_tokens.dtype))
+                    conf_tokens = conf_tokens.to(dtype=self._module_param_dtype(pi3_model.conf_head, conf_tokens.dtype)).contiguous()
                     conf = pi3_model._chunked_conv_head(pi3_model.conf_head, conf_tokens, patch_h, patch_w)[0]
-                    conf = conf.float().permute(0, 2, 3, 1).reshape(1, num_frames, patch_h, patch_w, -1)
+                    conf = conf.float().permute(0, 2, 3, 1).reshape(1, num_frames, input_h, input_w, -1)
                 else:
-                    point_tokens = point_tokens.to(dtype=self._module_param_dtype(pi3_model.point_head, point_tokens.dtype))
-                    ret = pi3_model.point_head([point_tokens], (patch_h, patch_w)).float().reshape(
-                        1, num_frames, patch_h, patch_w, -1
+                    point_tokens = point_tokens.to(dtype=self._module_param_dtype(pi3_model.point_head, point_tokens.dtype)).contiguous()
+                    ret = pi3_model.point_head([point_tokens], (input_h, input_w)).float().reshape(
+                        1, num_frames, input_h, input_w, -1
                     )
                     xy, z = ret.split([2, 1], dim=-1)
                     z = torch.exp(z)
 
-                    conf_tokens = conf_tokens.to(dtype=self._module_param_dtype(pi3_model.conf_head, conf_tokens.dtype))
-                    conf = pi3_model.conf_head([conf_tokens], (patch_h, patch_w)).float().reshape(
-                        1, num_frames, patch_h, patch_w, -1
+                    conf_tokens = conf_tokens.to(dtype=self._module_param_dtype(pi3_model.conf_head, conf_tokens.dtype)).contiguous()
+                    conf = pi3_model.conf_head([conf_tokens], (input_h, input_w)).float().reshape(
+                        1, num_frames, input_h, input_w, -1
                     )
 
                 local_points = torch.cat([xy * z, z], dim=-1)
 
-                camera_tokens = camera_tokens.to(dtype=self._module_param_dtype(pi3_model.camera_head, camera_tokens.dtype))
+                camera_tokens = camera_tokens.to(dtype=self._module_param_dtype(pi3_model.camera_head, camera_tokens.dtype)).contiguous()
                 camera_poses = pi3_model.camera_head(camera_tokens, patch_h, patch_w).float().reshape(1, num_frames, 4, 4)
 
                 ones = torch.ones_like(local_points[..., :1])
@@ -1278,7 +1333,7 @@ class LlavaMetaForCausalLM(ABC):
 
     #     return image_features
 
-    def encode_images(self, images, spatial_features=None, point_maps=None, geometry_outputs=None, split_sizes=None):
+    def encode_images(self, images, spatial_features=None, geometry_spatial_features=None, point_maps=None, geometry_outputs=None, split_sizes=None):
         # vision features
         image_features = self.get_model().get_vision_tower()(images)
         self.get_model()._last_geometry_projection_outputs = None
@@ -1542,7 +1597,20 @@ class LlavaMetaForCausalLM(ABC):
                 elif fusion_block_type in ['svf_patch_only_geo_rope_eval',
                                            'svf_geo_rope_fusion', 'svf_depth_geo_rope_fusion', 'svf_xyz_geo_rope_fusion', 'svf_spherical_geo_rope_fusion',
                                            'svf_depth_rope', 'svf_xyz_rope', 'svf_spherical_rope']:
-                    geometry_point_maps = _coalesce_point_maps(point_maps)
+                    geometry_point_maps = None
+                    if geometry_spatial_features is not None:
+                        pi3x_geometry = self._decode_pi3x_geometry_outputs_for_projection(
+                            geometry_spatial_features,
+                            device=image_features.device,
+                            force=True,
+                        )
+                        if pi3x_geometry is not None:
+                            geometry_point_maps = _coalesce_point_maps(
+                                pi3x_geometry.get("point_map", pi3x_geometry.get("points"))
+                            )
+
+                    if geometry_point_maps is None:
+                        geometry_point_maps = _coalesce_point_maps(point_maps)
                     if geometry_point_maps is None and isinstance(loaded_spatial_features, dict):
                         point_map_keys = (
                             "point_maps",
@@ -1560,14 +1628,15 @@ class LlavaMetaForCausalLM(ABC):
                                 break
                     if geometry_point_maps is None:
                         raise RuntimeError(
-                            "svf_geo_rope_fusion requires point_maps from CUT3R/Pi3X. "
-                            "Expected one of: point_maps, point_maps_ref, point_maps_cam, "
-                            "pts3d_in_other_view, pts3d_in_self_view."
+                            f"{fusion_block_type} requires point_maps from CUT3R or "
+                            "geometry_spatial_features decoded from PI3X. Expected one of: "
+                            "geometry_spatial_features, point_maps, point_maps_ref, "
+                            "point_maps_cam, pts3d_in_other_view, pts3d_in_self_view."
                         )
 
                     if geometry_point_maps.shape[0] != image_features.shape[0]:
                         raise RuntimeError(
-                            "svf_geo_rope_fusion point_maps batch/frame count must match image_features, "
+                            f"{fusion_block_type} point_maps batch/frame count must match image_features, "
                             f"got point_maps={tuple(geometry_point_maps.shape)} and "
                             f"image_features={tuple(image_features.shape)}"
                         )
@@ -1706,7 +1775,7 @@ class LlavaMetaForCausalLM(ABC):
         image_feature = image_feature.permute(1, 2, 0).contiguous()
         return image_feature
 
-    def prepare_inputs_labels_for_multimodal(self, input_ids, position_ids, attention_mask, past_key_values, labels, images, spatial_features=None, point_maps=None, modalities=["image"], image_sizes=None, return_visual_metadata=False, geometry_outputs=None):
+    def prepare_inputs_labels_for_multimodal(self, input_ids, position_ids, attention_mask, past_key_values, labels, images, spatial_features=None, point_maps=None, modalities=["image"], image_sizes=None, return_visual_metadata=False, geometry_outputs=None, geometry_spatial_features=None):
         vision_tower = self.get_vision_tower()
         # rank_print(modalities)
         if vision_tower is None or images is None or input_ids.shape[1] == 1:
@@ -1740,6 +1809,7 @@ class LlavaMetaForCausalLM(ABC):
             encoded_image_features = self.encode_images(
                 concat_images,
                 spatial_features=spatial_features,
+                geometry_spatial_features=geometry_spatial_features,
                 point_maps=point_maps,
                 geometry_outputs=geometry_outputs,
                 split_sizes=split_sizes,
@@ -2008,6 +2078,7 @@ class LlavaMetaForCausalLM(ABC):
             image_features = self.encode_images(
                 images,
                 spatial_features=spatial_features,
+                geometry_spatial_features=geometry_spatial_features,
                 point_maps=point_maps,
                 geometry_outputs=geometry_outputs,
                 split_sizes=split_sizes,

@@ -94,6 +94,7 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
         output_hidden_states: Optional[bool] = None,
         images: Optional[torch.FloatTensor] = None,
         spatial_features: Optional[Dict[str, torch.FloatTensor]] = None,
+        geometry_spatial_features: Optional[Dict[str, torch.FloatTensor]] = None,
         point_maps: Optional[torch.FloatTensor] = None,
         geometry_outputs: Optional[Dict[str, torch.FloatTensor]] = None,
         image_sizes: Optional[List[List[int]]] = None,
@@ -136,6 +137,7 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
                 image_sizes,
                 return_visual_metadata=spatial_rank_enabled or metadata_requested,
                 geometry_outputs=geometry_outputs,
+                geometry_spatial_features=geometry_spatial_features,
             )
             if spatial_rank_enabled or metadata_requested:
                 (input_ids, position_ids, attention_mask, past_key_values, inputs_embeds, labels, visual_metadata) = prepared
@@ -270,6 +272,7 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
         inputs: Optional[torch.Tensor] = None,
         images: Optional[torch.Tensor] = None,
         spatial_features: Optional[torch.Tensor] = None,
+        geometry_spatial_features: Optional[torch.Tensor] = None,
         point_maps: Optional[torch.Tensor] = None,
         geometry_outputs: Optional[Dict[str, torch.Tensor]] = None,
         image_sizes: Optional[torch.Tensor] = None,
@@ -294,6 +297,7 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
                 modalities,
                 image_sizes=image_sizes,
                 geometry_outputs=geometry_outputs,
+                geometry_spatial_features=geometry_spatial_features,
             )
         else:
             inputs_embeds = self.get_model().embed_tokens(inputs)
@@ -303,12 +307,15 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
     def prepare_inputs_for_generation(self, input_ids, past_key_values=None, inputs_embeds=None, **kwargs):
         images = kwargs.pop("images", None)
         geometry_outputs = kwargs.pop("geometry_outputs", None)
+        geometry_spatial_features = kwargs.pop("geometry_spatial_features", None)
         image_sizes = kwargs.pop("image_sizes", None)
         inputs = super().prepare_inputs_for_generation(input_ids, past_key_values=past_key_values, inputs_embeds=inputs_embeds, **kwargs)
         if images is not None:
             inputs["images"] = images
         if geometry_outputs is not None:
             inputs["geometry_outputs"] = geometry_outputs
+        if geometry_spatial_features is not None:
+            inputs["geometry_spatial_features"] = geometry_spatial_features
         if image_sizes is not None:
             inputs["image_sizes"] = image_sizes
         return inputs

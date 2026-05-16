@@ -193,6 +193,11 @@ class ModelArguments:
     )
     vggt_image_size: Optional[int] = field(default=518, metadata={"help": "VGGT input image size."})
     vggt_patch_size: Optional[int] = field(default=14, metadata={"help": "VGGT patch size."})
+    pi3x_weights_path: Optional[str] = field(
+        default=None,
+        metadata={"help": "Local directory/checkpoint for PI3X weights used by geometry-only GeoRoPE decoding."},
+    )
+    pi3x_input_size: Optional[int] = field(default=518, metadata={"help": "PI3X input size for decoded-feature metadata/head compatibility."})
     tune_spatial_tower: bool = field(default=False)
     ## fusion block
     fusion_block: Optional[str] = field(
@@ -323,6 +328,10 @@ class DataArguments:
     spatial_tower_type: Optional[str] = field(default=None, metadata={"help": "Spatial tower type (e.g. cut3r, vggt, pi3x). Set automatically from model_args. Controls whether .pt files are loaded."})
     spatial_features_root: Optional[str] = field(default=None, metadata={"help": "Root directory used to locate pre-extracted spatial features. If unset, video_folder is used."})
     spatial_features_subdir: Optional[str] = field(default="spatial_features", metadata={"help": "Subdirectory used to locate pre-extracted spatial features relative to video paths (default: spatial_features)."})
+    geometry_spatial_tower_type: Optional[str] = field(default=None, metadata={"help": "Optional geometry-only spatial tower type. Use pi3x to load decoded-feature sidecars for GeoRoPE positions while keeping the main spatial tower unchanged."})
+    geometry_spatial_features_root: Optional[str] = field(default=None, metadata={"help": "Root directory for geometry-only pre-extracted spatial features."})
+    geometry_spatial_features_subdir: Optional[str] = field(default=None, metadata={"help": "Subdirectory for geometry-only spatial features. Use '.' when files live directly under root/dataset."})
+    require_geometry_spatial_features: Optional[bool] = field(default=False, metadata={"help": "If True, raise when a requested geometry_spatial_features sidecar is missing."})
 
 
 @dataclass
@@ -1556,6 +1565,48 @@ class LazySupervisedDataset(Dataset):
                 length_list.append(-cur_len)
         return length_list
 
+    def _resolve_video_feature_path(self, video_rel_path, features_root, features_subdir, video_folder=None):
+        video_pt_path = os.path.splitext(video_rel_path)[0] + '.pt'
+        normalized_video_pt_path = video_pt_path.lstrip('/\\')
+        path_parts = list(pathlib.PurePosixPath(normalized_video_pt_path).parts)
+
+        path_parts_with_subdir = list(path_parts)
+        if features_subdir in (None, ""):
+            path_parts_with_subdir = list(path_parts)
+        elif "videos" in path_parts_with_subdir:
+            path_parts_with_subdir[path_parts_with_subdir.index("videos")] = features_subdir
+        elif path_parts_with_subdir:
+            path_parts_with_subdir = [features_subdir] + path_parts_with_subdir
+
+        candidate_relative_paths = []
+        for parts in (path_parts_with_subdir, path_parts):
+            if not parts:
+                continue
+            rel_path = os.path.join(*parts)
+            if rel_path not in candidate_relative_paths:
+                candidate_relative_paths.append(rel_path)
+
+        candidate_roots = []
+        for root in (features_root, video_folder):
+            if root and root not in candidate_roots:
+                candidate_roots.append(root)
+
+        candidate_paths = []
+        for root in candidate_roots:
+            for rel_path in candidate_relative_paths:
+                candidate_paths.append(os.path.join(root, rel_path))
+
+        if os.path.isabs(video_pt_path):
+            if features_subdir in (None, ""):
+                abs_candidates = (video_pt_path,)
+            else:
+                abs_candidates = (video_pt_path.replace('/videos/', f'/{features_subdir}/', 1), video_pt_path)
+            for abs_path in abs_candidates:
+                if abs_path not in candidate_paths:
+                    candidate_paths.append(abs_path)
+
+        return next((p for p in candidate_paths if os.path.exists(p)), None)
+
     def process_image(self, image_file, overwrite_image_aspect_ratio=None):
         image_folder = self.data_args.image_folder
         processor = self.data_args.image_processor
@@ -2124,46 +2175,41 @@ class LazySupervisedDataset(Dataset):
             spatial_features_root = getattr(self.data_args, 'spatial_features_root', None) or video_folder or "."
             spatial_features_subdir = getattr(self.data_args, 'spatial_features_subdir', 'spatial_features') or 'spatial_features'
             video_rel_path = self.list_data_dict[i]['video']
-            video_pt_path = os.path.splitext(video_rel_path)[0] + '.pt'
-
-            normalized_video_pt_path = video_pt_path.lstrip('/\\')
-            path_parts = list(pathlib.PurePosixPath(normalized_video_pt_path).parts)
-            path_parts_with_subdir = list(path_parts)
-            if "videos" in path_parts_with_subdir:
-                path_parts_with_subdir[path_parts_with_subdir.index("videos")] = spatial_features_subdir
-            elif path_parts_with_subdir:
-                path_parts_with_subdir = [spatial_features_subdir] + path_parts_with_subdir
-
-            candidate_relative_paths = []
-            for parts in (path_parts_with_subdir, path_parts):
-                if not parts:
-                    continue
-                rel_path = os.path.join(*parts)
-                if rel_path not in candidate_relative_paths:
-                    candidate_relative_paths.append(rel_path)
-
-            candidate_roots = []
-            for root in (spatial_features_root, video_folder):
-                if root and root not in candidate_roots:
-                    candidate_roots.append(root)
-
-            candidate_paths = []
-            for root in candidate_roots:
-                for rel_path in candidate_relative_paths:
-                    candidate_paths.append(os.path.join(root, rel_path))
-
-            if os.path.isabs(video_pt_path):
-                replaced_abs = video_pt_path.replace('/videos/', f'/{spatial_features_subdir}/', 1)
-                for abs_path in (replaced_abs, video_pt_path):
-                    if abs_path not in candidate_paths:
-                        candidate_paths.append(abs_path)
-
-            spatial_features_path = next((p for p in candidate_paths if os.path.exists(p)), None)
+            spatial_features_path = self._resolve_video_feature_path(
+                video_rel_path,
+                spatial_features_root,
+                spatial_features_subdir,
+                video_folder=video_folder,
+            )
             if spatial_features_path is not None:
                 spatial_features = torch.load(spatial_features_path)
                 if self.data_args.zero_spatial_features:
                     spatial_features = zero_nested_tensors(spatial_features)
                 data_dict["spatial_features"] = spatial_features
+
+        geometry_spatial_tower_type = getattr(self.data_args, 'geometry_spatial_tower_type', None)
+        use_geometry_features = (
+            geometry_spatial_tower_type is not None
+            and 'pi3' in str(geometry_spatial_tower_type).lower()
+        )
+        if use_geometry_features and "video" in self.list_data_dict[i]:
+            video_folder = self.data_args.video_folder
+            geometry_features_root = getattr(self.data_args, 'geometry_spatial_features_root', None) or "."
+            geometry_features_subdir = getattr(self.data_args, 'geometry_spatial_features_subdir', None)
+            video_rel_path = self.list_data_dict[i]['video']
+            geometry_features_path = self._resolve_video_feature_path(
+                video_rel_path,
+                geometry_features_root,
+                geometry_features_subdir,
+                video_folder=None,
+            )
+            if geometry_features_path is not None:
+                data_dict["geometry_spatial_features"] = torch.load(geometry_features_path)
+            elif getattr(self.data_args, 'require_geometry_spatial_features', False):
+                raise FileNotFoundError(
+                    "Missing geometry_spatial_features sidecar for "
+                    f"{video_rel_path} under root={geometry_features_root}, subdir={geometry_features_subdir}"
+                )
 
         # add point cloud
         if "_with_depth" in self.list_data_dict[i] and self.list_data_dict[i]["_with_depth"]:
@@ -2232,6 +2278,9 @@ class DataCollatorForSupervisedDataset(object):
             else:
                  # If features are not tensors or mixed types, pass as a list
                  batch['spatial_features'] = spatial_features
+
+        if "geometry_spatial_features" in instances[0]:
+            batch["geometry_spatial_features"] = [instance["geometry_spatial_features"] for instance in instances]
 
         # add point maps
         if "point_maps" in instances[0]:
@@ -2319,6 +2368,10 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
             overwrite_config["vggt_image_size"] = model_args.vggt_image_size
         if model_args.vggt_patch_size is not None:
             overwrite_config["vggt_patch_size"] = model_args.vggt_patch_size
+    if model_args.pi3x_weights_path is not None:
+        overwrite_config["pi3x_weights_path"] = model_args.pi3x_weights_path
+    if model_args.pi3x_input_size is not None:
+        overwrite_config["pi3x_input_size"] = model_args.pi3x_input_size
 
     if model_args.fusion_block is not None:
         overwrite_config["fusion_block"] = model_args.fusion_block
@@ -2621,6 +2674,18 @@ def train(attn_implementation=None):
         model.config.vggt_image_size = model_args.vggt_image_size
         model.config.vggt_patch_size = model_args.vggt_patch_size
         data_args.spatial_tower_type = model_args.spatial_tower
+    if model_args.pi3x_weights_path is not None:
+        model.config.pi3x_weights_path = model_args.pi3x_weights_path
+    model.config.pi3x_input_size = model_args.pi3x_input_size
+
+    if data_args.geometry_spatial_tower_type is not None:
+        model.config.geometry_spatial_tower_type = data_args.geometry_spatial_tower_type
+        model.config.geometry_spatial_features_root = data_args.geometry_spatial_features_root
+        model.config.geometry_spatial_features_subdir = data_args.geometry_spatial_features_subdir
+        if "pi3" in str(data_args.geometry_spatial_tower_type).lower():
+            model.get_model().initialize_pi3x_geometry_tower(model_args=model_args, fsdp=training_args.fsdp)
+            pi3x_geometry_tower = model.get_model().get_pi3x_geometry_tower()
+            pi3x_geometry_tower.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
 
     if model_args.fusion_block is not None:
         model.config.fusion_block = model_args.fusion_block
