@@ -361,10 +361,15 @@ class Cut3rEncoder(nn.Module):
                 (state_feat, state_pos, init_state_feat, mem, init_mem)
             )
 
-            # add camera token
-            camera_tokens.append(dec[-1][:, :1].clone())
-            # add patch features
-            patch_features.append(dec[-1][:, 1:].clone())
+            selected_layer = int(self.config.spatial_tower_select_layer)
+            if selected_layer < -len(dec) or selected_layer >= len(dec):
+                raise ValueError(
+                    f"spatial_tower_select_layer={selected_layer} is out of range "
+                    f"for CUT3R decoder outputs with {len(dec)} layers."
+                )
+            selected_dec = dec[selected_layer]
+            camera_tokens.append(selected_dec[:, :1].clone())
+            patch_features.append(selected_dec[:, 1:].clone())
 
         # # for debug - Modified for batch processing
         # if not ress: # Handle empty ress case
