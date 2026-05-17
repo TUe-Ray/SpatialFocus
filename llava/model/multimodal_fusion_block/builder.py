@@ -70,21 +70,41 @@ class CrossAttentionFusion(nn.Module):
 
 
 class GeoRoPEFusionRotary(nn.Module):
-    def __init__(self, head_dim, mode="spherical", theta=10000, max_depth=10.0, group_split=None):
+    def __init__(
+        self,
+        head_dim,
+        mode="spherical",
+        theta=10000,
+        max_depth=10.0,
+        group_split=None,
+        train_max_depth=None,
+        eval_max_depth=None,
+        ntk_scaling=False,
+    ):
         super().__init__()
         if mode not in {"depth", "xyz", "spherical"}:
             raise ValueError(f"Unexpected geo_rope_fusion_mode: {mode}")
 
         self.head_dim = int(head_dim)
         self.mode = mode
-        self.theta = theta
+        self.theta = float(theta)
         self.max_depth = float(max_depth)
         if self.max_depth <= 0:
             raise ValueError(f"geo_rope_fusion_max_depth must be positive, got {max_depth}")
+        self.train_max_depth = float(self.max_depth if train_max_depth is None else train_max_depth)
+        if self.train_max_depth <= 0:
+            raise ValueError(f"geo_rope_fusion_train_max_depth must be positive, got {train_max_depth}")
+        self.eval_max_depth = None if eval_max_depth in (None, "") else float(eval_max_depth)
+        if self.eval_max_depth is not None and self.eval_max_depth <= 0:
+            raise ValueError(f"geo_rope_fusion_eval_max_depth must be positive, got {eval_max_depth}")
+        if isinstance(ntk_scaling, str):
+            ntk_scaling = ntk_scaling.lower() in {"1", "true", "yes", "y", "on"}
+        self.ntk_scaling = bool(ntk_scaling)
 
         weights, self.group_split = self._parse_group_split(group_split, mode)
         group_dims = self._split_even_dims(self.head_dim, weights=weights)
         self.group_dims = group_dims
+        self.depth_group_index = 0 if mode == "depth" else 2
 
         for idx, group_dim in enumerate(group_dims):
             inv_freq = self._build_inv_freq(group_dim)
@@ -124,30 +144,52 @@ class GeoRoPEFusionRotary(nn.Module):
             return torch.empty(0)
         return 1.0 / (self.theta ** (torch.arange(0, group_dim, 2).float() / group_dim))
 
+    def _effective_depth_limits(self):
+        if (not self.training) and self.eval_max_depth is not None:
+            return self.eval_max_depth, self.train_max_depth
+        return self.train_max_depth, self.train_max_depth
+
     def _position_values(self, pos):
-        pos = torch.nan_to_num(pos.float(), nan=0.0, posinf=self.max_depth, neginf=-self.max_depth)
+        clamp_max_depth, norm_max_depth = self._effective_depth_limits()
+        pos = torch.nan_to_num(pos.float(), nan=0.0, posinf=clamp_max_depth, neginf=-clamp_max_depth)
         x = pos[..., 0]
         y = pos[..., 1]
         z = pos[..., 2]
 
         if self.mode == "depth":
-            depth = z.clamp(min=0.0, max=self.max_depth)
-            return [torch.log1p(depth) / math.log1p(self.max_depth)]
+            depth = z.clamp(min=0.0, max=clamp_max_depth)
+            return [torch.log1p(depth) / math.log1p(norm_max_depth)]
 
         if self.mode == "xyz":
-            scale = max(self.max_depth, 1e-6)
+            scale = max(norm_max_depth, 1e-6)
             x = (x / scale).clamp(min=-1.0, max=1.0)
             y = (y / scale).clamp(min=-1.0, max=1.0)
-            z = z.clamp(min=0.0, max=self.max_depth)
-            z = torch.log1p(z) / math.log1p(self.max_depth)
+            z = z.clamp(min=0.0, max=clamp_max_depth)
+            z = torch.log1p(z) / math.log1p(norm_max_depth)
             return [x, y, z]
 
         radius_xz = torch.sqrt(x * x + z * z + 1e-6)
         r = torch.sqrt(x * x + y * y + z * z + 1e-6)
         azimuth = torch.atan2(x, z)
         elevation = torch.atan2(y, radius_xz)
-        log_r = torch.log1p(r.clamp(max=self.max_depth)) / math.log1p(self.max_depth)
+        log_r = torch.log1p(r.clamp(max=clamp_max_depth)) / math.log1p(norm_max_depth)
         return [azimuth, elevation, log_r]
+
+    def _inv_freq_for_group(self, idx, group_dim, device):
+        inv_freq = getattr(self, f"inv_freq_{idx}")
+        if (
+            self.training
+            or not self.ntk_scaling
+            or self.eval_max_depth is None
+            or idx != self.depth_group_index
+            or group_dim <= 2
+        ):
+            return inv_freq
+
+        alpha = math.log1p(self.eval_max_depth) / math.log1p(self.train_max_depth)
+        theta = self.theta * (alpha ** (group_dim / (group_dim - 2)))
+        arange = torch.arange(0, group_dim, 2, device=device, dtype=inv_freq.dtype)
+        return 1.0 / (theta ** (arange / group_dim))
 
     @staticmethod
     def _rotate_group(x_group, position_value, inv_freq):
@@ -189,7 +231,7 @@ class GeoRoPEFusionRotary(nn.Module):
         for idx, group_dim in enumerate(self.group_dims):
             end = start + group_dim
             x_group = x[..., start:end]
-            inv_freq = getattr(self, f"inv_freq_{idx}")
+            inv_freq = self._inv_freq_for_group(idx, group_dim, x.device)
             rotated_groups.append(self._rotate_group(x_group, position_values[idx], inv_freq))
             start = end
 
@@ -208,6 +250,9 @@ class GeoRoPEFusionCrossAttention(nn.Module):
         geo_rope_fusion_mode="spherical",
         max_depth=10.0,
         group_split=None,
+        train_max_depth=None,
+        eval_max_depth=None,
+        ntk_scaling=False,
         log_stats=False,
         dropout_rate=0.1,
     ):
@@ -238,6 +283,9 @@ class GeoRoPEFusionCrossAttention(nn.Module):
             mode=geo_rope_fusion_mode,
             max_depth=max_depth,
             group_split=group_split,
+            train_max_depth=train_max_depth,
+            eval_max_depth=eval_max_depth,
+            ntk_scaling=ntk_scaling,
         )
         self.geo_rope_fusion_gate_q = nn.Parameter(torch.zeros(()))
         self.geo_rope_fusion_gate_k = nn.Parameter(torch.zeros(()))
@@ -249,6 +297,9 @@ class GeoRoPEFusionCrossAttention(nn.Module):
         self.last_geo_rope_fusion_stats = {
             "group_split": self.geo_rope_fusion.group_split,
             "group_dims": list(self.geo_rope_fusion.group_dims),
+            "train_max_depth": self.geo_rope_fusion.train_max_depth,
+            "eval_max_depth": self.geo_rope_fusion.eval_max_depth,
+            "ntk_scaling": self.geo_rope_fusion.ntk_scaling,
         }
 
     def _reset_attention_parameters(self):
@@ -288,6 +339,9 @@ class GeoRoPEFusionCrossAttention(nn.Module):
             "geo_rope_fusion_gate_k": float(self.geo_rope_fusion_gate_k.detach().float().item()),
             "group_split": self.geo_rope_fusion.group_split,
             "group_dims": list(self.geo_rope_fusion.group_dims),
+            "train_max_depth": self.geo_rope_fusion.train_max_depth,
+            "eval_max_depth": self.geo_rope_fusion.eval_max_depth,
+            "ntk_scaling": self.geo_rope_fusion.ntk_scaling,
         }
 
     def forward(self, clip_features, spatial_encoder_features, pos_clip, pos_spatial):
@@ -353,6 +407,9 @@ class PostHocGeoRoPEPatchCrossAttention(nn.Module):
         geo_rope_fusion_mode="spherical",
         max_depth=10.0,
         group_split=None,
+        train_max_depth=None,
+        eval_max_depth=None,
+        ntk_scaling=False,
         eval_lambda=0.0,
         eval_lambda_q=None,
         eval_lambda_k=None,
@@ -381,6 +438,9 @@ class PostHocGeoRoPEPatchCrossAttention(nn.Module):
             mode=geo_rope_fusion_mode,
             max_depth=max_depth,
             group_split=group_split,
+            train_max_depth=train_max_depth,
+            eval_max_depth=eval_max_depth,
+            ntk_scaling=ntk_scaling,
         )
         self.eval_lambda_q = float(eval_lambda if eval_lambda_q is None else eval_lambda_q)
         self.eval_lambda_k = float(eval_lambda if eval_lambda_k is None else eval_lambda_k)
@@ -390,6 +450,9 @@ class PostHocGeoRoPEPatchCrossAttention(nn.Module):
             "eval_lambda_k": self.eval_lambda_k,
             "group_split": self.geo_rope_fusion.group_split,
             "group_dims": list(self.geo_rope_fusion.group_dims),
+            "train_max_depth": self.geo_rope_fusion.train_max_depth,
+            "eval_max_depth": self.geo_rope_fusion.eval_max_depth,
+            "ntk_scaling": self.geo_rope_fusion.ntk_scaling,
         }
 
     def _reshape_to_heads(self, x):
@@ -418,6 +481,9 @@ class PostHocGeoRoPEPatchCrossAttention(nn.Module):
             "eval_lambda_k": self.eval_lambda_k,
             "group_split": self.geo_rope_fusion.group_split,
             "group_dims": list(self.geo_rope_fusion.group_dims),
+            "train_max_depth": self.geo_rope_fusion.train_max_depth,
+            "eval_max_depth": self.geo_rope_fusion.eval_max_depth,
+            "ntk_scaling": self.geo_rope_fusion.ntk_scaling,
         }
 
     def forward(self, clip_features, spatial_encoder_features, pos_clip, pos_spatial):
@@ -884,6 +950,47 @@ class ConcatSelfAttentionFusion(nn.Module):
 
         return fused_features
 
+
+def _config_first(config, names, default=None):
+    for name in names:
+        value = getattr(config, name, None)
+        if value is not None:
+            return value
+    return default
+
+
+def _config_bool(value):
+    if isinstance(value, str):
+        return value.lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
+def _geo_rope_depth_config(config):
+    max_depth = _config_first(
+        config,
+        ("geo_rope_fusion_max_depth", "geometry_rope_max_depth"),
+        10.0,
+    )
+    train_max_depth = _config_first(
+        config,
+        ("geo_rope_fusion_train_max_depth", "geometry_rope_train_max_depth"),
+        None,
+    )
+    eval_max_depth = _config_first(
+        config,
+        ("geo_rope_fusion_eval_max_depth", "geometry_rope_eval_max_depth"),
+        None,
+    )
+    ntk_scaling = _config_bool(
+        _config_first(
+            config,
+            ("geo_rope_fusion_ntk_scaling", "geometry_rope_ntk_scaling"),
+            False,
+        )
+    )
+    return max_depth, train_max_depth, eval_max_depth, ntk_scaling
+
+
 def build_multimodal_fusion_block(config, delay_load=False, **kwargs):
     fusion_block_type = getattr(config, "fusion_block", "cross_attention")
     geo_rope_fusion_mode_aliases = {
@@ -996,7 +1103,7 @@ def build_multimodal_fusion_block(config, delay_load=False, **kwargs):
         log_stats = getattr(config, "geo_rope_fusion_log_stats", False) or getattr(config, "geometry_rope_log_stats", False)
         if isinstance(log_stats, str):
             log_stats = log_stats.lower() in {"1", "true", "yes", "y", "on"}
-        max_depth = getattr(config, "geo_rope_fusion_max_depth", None) or getattr(config, "geometry_rope_max_depth", 10.0)
+        max_depth, train_max_depth, eval_max_depth, ntk_scaling = _geo_rope_depth_config(config)
         group_split = getattr(config, "geo_rope_fusion_group_split", None) or getattr(config, "geometry_rope_group_split", None)
         eval_lambda = getattr(config, "geo_rope_fusion_eval_lambda", None)
         if eval_lambda is None:
@@ -1011,6 +1118,9 @@ def build_multimodal_fusion_block(config, delay_load=False, **kwargs):
             geo_rope_fusion_mode=geo_rope_fusion_mode,
             max_depth=max_depth,
             group_split=group_split,
+            train_max_depth=train_max_depth,
+            eval_max_depth=eval_max_depth,
+            ntk_scaling=ntk_scaling,
             eval_lambda=eval_lambda,
             eval_lambda_q=eval_lambda_q,
             eval_lambda_k=eval_lambda_k,
@@ -1030,7 +1140,7 @@ def build_multimodal_fusion_block(config, delay_load=False, **kwargs):
         if isinstance(log_stats, str):
             log_stats = log_stats.lower() in {"1", "true", "yes", "y", "on"}
         # Accept both new and old config key names for max_depth and group_split.
-        max_depth = getattr(config, "geo_rope_fusion_max_depth", None) or getattr(config, "geometry_rope_max_depth", 10.0)
+        max_depth, train_max_depth, eval_max_depth, ntk_scaling = _geo_rope_depth_config(config)
         group_split = getattr(config, "geo_rope_fusion_group_split", None) or getattr(config, "geometry_rope_group_split", None)
         return GeoRoPEFusionCrossAttention(
             d_clip=d_clip,
@@ -1040,6 +1150,9 @@ def build_multimodal_fusion_block(config, delay_load=False, **kwargs):
             geo_rope_fusion_mode=geo_rope_fusion_mode,
             max_depth=max_depth,
             group_split=group_split,
+            train_max_depth=train_max_depth,
+            eval_max_depth=eval_max_depth,
+            ntk_scaling=ntk_scaling,
             log_stats=log_stats,
         )
     elif fusion_block_type == "svf_cat_feat":

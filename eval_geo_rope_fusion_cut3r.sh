@@ -58,6 +58,9 @@ MODEL_SPATIAL_TOWER_SELECT_FEATURE="${MODEL_SPATIAL_TOWER_SELECT_FEATURE:-all_to
 MODEL_FUSION_BLOCK="${MODEL_FUSION_BLOCK:-svf_geo_rope_fusion}"
 MODEL_GEO_ROPE_FUSION_MODE="${MODEL_GEO_ROPE_FUSION_MODE:-spherical}"
 MODEL_GEO_ROPE_FUSION_MAX_DEPTH="${MODEL_GEO_ROPE_FUSION_MAX_DEPTH:-10.0}"
+MODEL_GEO_ROPE_FUSION_TRAIN_MAX_DEPTH="${MODEL_GEO_ROPE_FUSION_TRAIN_MAX_DEPTH:-}"
+MODEL_GEO_ROPE_FUSION_EVAL_MAX_DEPTH="${MODEL_GEO_ROPE_FUSION_EVAL_MAX_DEPTH:-}"
+MODEL_GEO_ROPE_FUSION_NTK_SCALING="${MODEL_GEO_ROPE_FUSION_NTK_SCALING:-False}"
 MODEL_GEO_ROPE_FUSION_GROUP_SPLIT="${MODEL_GEO_ROPE_FUSION_GROUP_SPLIT:-2,1,2}"
 MODEL_GEO_ROPE_FUSION_LOG_STATS="${MODEL_GEO_ROPE_FUSION_LOG_STATS:-False}"
 
@@ -99,6 +102,9 @@ echo "MODEL_SPATIAL_TOWER_SELECT_FEATURE=$MODEL_SPATIAL_TOWER_SELECT_FEATURE"
 echo "MODEL_FUSION_BLOCK=$MODEL_FUSION_BLOCK"
 echo "MODEL_GEO_ROPE_FUSION_MODE=$MODEL_GEO_ROPE_FUSION_MODE"
 echo "MODEL_GEO_ROPE_FUSION_MAX_DEPTH=$MODEL_GEO_ROPE_FUSION_MAX_DEPTH"
+echo "MODEL_GEO_ROPE_FUSION_TRAIN_MAX_DEPTH=$MODEL_GEO_ROPE_FUSION_TRAIN_MAX_DEPTH"
+echo "MODEL_GEO_ROPE_FUSION_EVAL_MAX_DEPTH=$MODEL_GEO_ROPE_FUSION_EVAL_MAX_DEPTH"
+echo "MODEL_GEO_ROPE_FUSION_NTK_SCALING=$MODEL_GEO_ROPE_FUSION_NTK_SCALING"
 echo "MODEL_GEO_ROPE_FUSION_GROUP_SPLIT=$MODEL_GEO_ROPE_FUSION_GROUP_SPLIT"
 echo "MODEL_GEO_ROPE_FUSION_LOG_STATS=$MODEL_GEO_ROPE_FUSION_LOG_STATS"
 echo "=================="
@@ -288,7 +294,7 @@ prepare_runtime_pretrained() {
   done
 
   cp "$PRETRAINED_LOCAL/config.json" "$runtime_dir/config.json"
-  python - "$runtime_dir/config.json" "$SIGLIP_LOCAL" "$MODEL_SPATIAL_TOWER" "$MODEL_SPATIAL_FEATURE_DIM" "$MODEL_SPATIAL_TOWER_SELECT_FEATURE" "$MODEL_FUSION_BLOCK" "$MODEL_GEO_ROPE_FUSION_MODE" "$MODEL_GEO_ROPE_FUSION_MAX_DEPTH" "$MODEL_GEO_ROPE_FUSION_GROUP_SPLIT" "$MODEL_GEO_ROPE_FUSION_LOG_STATS" <<'PY'
+  python - "$runtime_dir/config.json" "$SIGLIP_LOCAL" "$MODEL_SPATIAL_TOWER" "$MODEL_SPATIAL_FEATURE_DIM" "$MODEL_SPATIAL_TOWER_SELECT_FEATURE" "$MODEL_FUSION_BLOCK" "$MODEL_GEO_ROPE_FUSION_MODE" "$MODEL_GEO_ROPE_FUSION_MAX_DEPTH" "$MODEL_GEO_ROPE_FUSION_TRAIN_MAX_DEPTH" "$MODEL_GEO_ROPE_FUSION_EVAL_MAX_DEPTH" "$MODEL_GEO_ROPE_FUSION_NTK_SCALING" "$MODEL_GEO_ROPE_FUSION_GROUP_SPLIT" "$MODEL_GEO_ROPE_FUSION_LOG_STATS" <<'PY'
 import json
 import sys
 
@@ -300,8 +306,11 @@ spatial_tower_select_feature = sys.argv[5]
 fusion_block = sys.argv[6]
 geo_rope_fusion_mode = sys.argv[7]
 geo_rope_fusion_max_depth = float(sys.argv[8])
-geo_rope_fusion_group_split = sys.argv[9]
-geo_rope_fusion_log_stats = sys.argv[10].lower() in {"1", "true", "yes", "y", "on"}
+geo_rope_fusion_train_max_depth = None if sys.argv[9] == "" else float(sys.argv[9])
+geo_rope_fusion_eval_max_depth = None if sys.argv[10] == "" else float(sys.argv[10])
+geo_rope_fusion_ntk_scaling = sys.argv[11].lower() in {"1", "true", "yes", "y", "on"}
+geo_rope_fusion_group_split = sys.argv[12]
+geo_rope_fusion_log_stats = sys.argv[13].lower() in {"1", "true", "yes", "y", "on"}
 
 with open(cfg_path, "r", encoding="utf-8") as f:
     cfg = json.load(f)
@@ -317,6 +326,29 @@ cfg["geo_rope_fusion_mode"] = geo_rope_fusion_mode
 cfg["geo_rope_fusion_max_depth"] = geo_rope_fusion_max_depth
 cfg["geo_rope_fusion_group_split"] = geo_rope_fusion_group_split
 cfg["geo_rope_fusion_log_stats"] = geo_rope_fusion_log_stats
+cfg["geo_rope_fusion_ntk_scaling"] = geo_rope_fusion_ntk_scaling
+
+# Backward-compatible aliases for old checkpoints whose configs use
+# svf_depth_rope / svf_xyz_rope / svf_spherical_rope.
+cfg["geometry_rope_mode"] = geo_rope_fusion_mode
+cfg["geometry_rope_max_depth"] = geo_rope_fusion_max_depth
+cfg["geometry_rope_group_split"] = geo_rope_fusion_group_split
+cfg["geometry_rope_log_stats"] = geo_rope_fusion_log_stats
+cfg["geometry_rope_ntk_scaling"] = geo_rope_fusion_ntk_scaling
+
+if geo_rope_fusion_train_max_depth is not None:
+    cfg["geo_rope_fusion_train_max_depth"] = geo_rope_fusion_train_max_depth
+    cfg["geometry_rope_train_max_depth"] = geo_rope_fusion_train_max_depth
+else:
+    cfg.pop("geo_rope_fusion_train_max_depth", None)
+    cfg.pop("geometry_rope_train_max_depth", None)
+
+if geo_rope_fusion_eval_max_depth is not None:
+    cfg["geo_rope_fusion_eval_max_depth"] = geo_rope_fusion_eval_max_depth
+    cfg["geometry_rope_eval_max_depth"] = geo_rope_fusion_eval_max_depth
+else:
+    cfg.pop("geo_rope_fusion_eval_max_depth", None)
+    cfg.pop("geometry_rope_eval_max_depth", None)
 
 with open(cfg_path, "w", encoding="utf-8") as f:
     json.dump(cfg, f, indent=2)

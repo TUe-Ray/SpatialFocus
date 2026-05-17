@@ -100,8 +100,14 @@ class Vlm3r(lmms):
         fusion_block: str = None,
         geometry_rope_mode: str = None,
         geometry_rope_max_depth: Optional[Union[float, str]] = None,
+        geometry_rope_train_max_depth: Optional[Union[float, str]] = None,
+        geometry_rope_eval_max_depth: Optional[Union[float, str]] = None,
+        geometry_rope_ntk_scaling: Union[bool, str] = False,
         geometry_rope_group_split: str = None,
         geometry_rope_log_stats: Union[bool, str] = False,
+        geo_rope_fusion_train_max_depth: Optional[Union[float, str]] = None,
+        geo_rope_fusion_eval_max_depth: Optional[Union[float, str]] = None,
+        geo_rope_fusion_ntk_scaling: Union[bool, str] = False,
         spatial_features_root: str = None,
         spatial_features_subdir: str = "spatial_features_points",
         **kwargs,
@@ -145,8 +151,14 @@ class Vlm3r(lmms):
         self.fusion_block = fusion_block or None
         self.geometry_rope_mode = geometry_rope_mode or None
         self.geometry_rope_max_depth = float(geometry_rope_max_depth) if geometry_rope_max_depth not in (None, "") else None
+        self.geometry_rope_train_max_depth = float(geometry_rope_train_max_depth) if geometry_rope_train_max_depth not in (None, "") else None
+        self.geometry_rope_eval_max_depth = float(geometry_rope_eval_max_depth) if geometry_rope_eval_max_depth not in (None, "") else None
+        self.geometry_rope_ntk_scaling = _str_to_bool(geometry_rope_ntk_scaling)
         self.geometry_rope_group_split = geometry_rope_group_split or None
         self.geometry_rope_log_stats = _str_to_bool(geometry_rope_log_stats)
+        self.geo_rope_fusion_train_max_depth = float(geo_rope_fusion_train_max_depth) if geo_rope_fusion_train_max_depth not in (None, "") else None
+        self.geo_rope_fusion_eval_max_depth = float(geo_rope_fusion_eval_max_depth) if geo_rope_fusion_eval_max_depth not in (None, "") else None
+        self.geo_rope_fusion_ntk_scaling = _str_to_bool(geo_rope_fusion_ntk_scaling)
         self.spatial_features_root = Path(spatial_features_root) if spatial_features_root not in (None, "") else None
         self.spatial_features_subdir = spatial_features_subdir or "spatial_features_points"
 
@@ -173,6 +185,16 @@ class Vlm3r(lmms):
                 overwrite_config["geometry_rope_mode"] = self.geometry_rope_mode
             if self.geometry_rope_max_depth is not None:
                 overwrite_config["geometry_rope_max_depth"] = self.geometry_rope_max_depth
+            if self.geometry_rope_train_max_depth is not None:
+                overwrite_config["geometry_rope_train_max_depth"] = self.geometry_rope_train_max_depth
+            if self.geometry_rope_eval_max_depth is not None:
+                overwrite_config["geometry_rope_eval_max_depth"] = self.geometry_rope_eval_max_depth
+            overwrite_config["geometry_rope_ntk_scaling"] = self.geometry_rope_ntk_scaling
+            if self.geo_rope_fusion_train_max_depth is not None:
+                overwrite_config["geo_rope_fusion_train_max_depth"] = self.geo_rope_fusion_train_max_depth
+            if self.geo_rope_fusion_eval_max_depth is not None:
+                overwrite_config["geo_rope_fusion_eval_max_depth"] = self.geo_rope_fusion_eval_max_depth
+            overwrite_config["geo_rope_fusion_ntk_scaling"] = self.geo_rope_fusion_ntk_scaling
             if self.geometry_rope_group_split is not None:
                 overwrite_config["geometry_rope_group_split"] = self.geometry_rope_group_split
             overwrite_config["geometry_rope_log_stats"] = self.geometry_rope_log_stats
@@ -265,11 +287,14 @@ class Vlm3r(lmms):
         )
         eval_logger.info("[ABLATION][EVAL] zero_spatial_features={}", self.zero_spatial_features)
         eval_logger.info(
-            "[ROPE][EVAL] fusion_block={}, geometry_rope_mode={}, group_split={}, max_depth={}, log_stats={}, eval_lambda={}",
+            "[ROPE][EVAL] fusion_block={}, geometry_rope_mode={}, group_split={}, max_depth={}, train_max_depth={}, eval_max_depth={}, ntk_scaling={}, log_stats={}, eval_lambda={}",
             getattr(self._config, "fusion_block", None),
             getattr(self._config, "geometry_rope_mode", None),
             getattr(self._config, "geometry_rope_group_split", None),
             getattr(self._config, "geometry_rope_max_depth", None),
+            getattr(self._config, "geometry_rope_train_max_depth", None),
+            getattr(self._config, "geometry_rope_eval_max_depth", None),
+            getattr(self._config, "geometry_rope_ntk_scaling", None),
             getattr(self._config, "geometry_rope_log_stats", None),
             getattr(self._config, "geo_rope_fusion_eval_lambda", None),
         )

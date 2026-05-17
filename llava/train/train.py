@@ -214,6 +214,18 @@ class ModelArguments:
         default=None,
         metadata={"help": "Maximum depth/radius used to normalize GeoRoPE Fusion positions."},
     )
+    geo_rope_fusion_train_max_depth: Optional[float] = field(
+        default=None,
+        metadata={"help": "Training-time depth/radius normalization scale for GeoRoPE Fusion. Defaults to geo_rope_fusion_max_depth."},
+    )
+    geo_rope_fusion_eval_max_depth: Optional[float] = field(
+        default=None,
+        metadata={"help": "Optional eval-time depth/radius clamp for GeoRoPE Fusion while preserving train normalization."},
+    )
+    geo_rope_fusion_ntk_scaling: bool = field(
+        default=False,
+        metadata={"help": "If True, apply eval-time NTK-style theta scaling to the depth-bearing GeoRoPE Fusion group."},
+    )
     geo_rope_fusion_group_split: Optional[str] = field(
         default=None,
         metadata={
@@ -2379,6 +2391,11 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
         overwrite_config["geo_rope_fusion_mode"] = model_args.geo_rope_fusion_mode
     if model_args.geo_rope_fusion_max_depth is not None:
         overwrite_config["geo_rope_fusion_max_depth"] = model_args.geo_rope_fusion_max_depth
+    if model_args.geo_rope_fusion_train_max_depth is not None:
+        overwrite_config["geo_rope_fusion_train_max_depth"] = model_args.geo_rope_fusion_train_max_depth
+    if model_args.geo_rope_fusion_eval_max_depth is not None:
+        overwrite_config["geo_rope_fusion_eval_max_depth"] = model_args.geo_rope_fusion_eval_max_depth
+    overwrite_config["geo_rope_fusion_ntk_scaling"] = model_args.geo_rope_fusion_ntk_scaling
     if model_args.geo_rope_fusion_group_split is not None:
         overwrite_config["geo_rope_fusion_group_split"] = model_args.geo_rope_fusion_group_split
     overwrite_config["geo_rope_fusion_log_stats"] = model_args.geo_rope_fusion_log_stats
@@ -2693,6 +2710,11 @@ def train(attn_implementation=None):
             model.config.geo_rope_fusion_mode = model_args.geo_rope_fusion_mode
         if model_args.geo_rope_fusion_max_depth is not None:
             model.config.geo_rope_fusion_max_depth = model_args.geo_rope_fusion_max_depth
+        if model_args.geo_rope_fusion_train_max_depth is not None:
+            model.config.geo_rope_fusion_train_max_depth = model_args.geo_rope_fusion_train_max_depth
+        if model_args.geo_rope_fusion_eval_max_depth is not None:
+            model.config.geo_rope_fusion_eval_max_depth = model_args.geo_rope_fusion_eval_max_depth
+        model.config.geo_rope_fusion_ntk_scaling = model_args.geo_rope_fusion_ntk_scaling
         if model_args.geo_rope_fusion_group_split is not None:
             model.config.geo_rope_fusion_group_split = model_args.geo_rope_fusion_group_split
         model.config.geo_rope_fusion_log_stats = model_args.geo_rope_fusion_log_stats
@@ -2705,6 +2727,11 @@ def train(attn_implementation=None):
             model.config.geo_rope_fusion_mode = model_args.geo_rope_fusion_mode
         if model_args.geo_rope_fusion_max_depth is not None:
             model.config.geo_rope_fusion_max_depth = model_args.geo_rope_fusion_max_depth
+        if model_args.geo_rope_fusion_train_max_depth is not None:
+            model.config.geo_rope_fusion_train_max_depth = model_args.geo_rope_fusion_train_max_depth
+        if model_args.geo_rope_fusion_eval_max_depth is not None:
+            model.config.geo_rope_fusion_eval_max_depth = model_args.geo_rope_fusion_eval_max_depth
+        model.config.geo_rope_fusion_ntk_scaling = model_args.geo_rope_fusion_ntk_scaling
         if model_args.geo_rope_fusion_group_split is not None:
             model.config.geo_rope_fusion_group_split = model_args.geo_rope_fusion_group_split
         model.config.geo_rope_fusion_log_stats = model_args.geo_rope_fusion_log_stats

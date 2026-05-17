@@ -75,6 +75,135 @@ def expect_value_error(fn):
     raise AssertionError("Expected ValueError")
 
 
+def check_default_depth_extension_matches_original():
+    torch.manual_seed(11)
+    x = torch.randn(2, 3, 5, 36)
+    pos = torch.randn(2, 5, 3) * 4.0
+
+    original = GeoRoPEFusionRotary(
+        head_dim=36,
+        mode="spherical",
+        max_depth=10.0,
+        group_split="2,1,2",
+    )
+    explicit_default = GeoRoPEFusionRotary(
+        head_dim=36,
+        mode="spherical",
+        max_depth=10.0,
+        train_max_depth=10.0,
+        eval_max_depth=None,
+        ntk_scaling=False,
+        group_split="2,1,2",
+    )
+    original.eval()
+    explicit_default.eval()
+
+    out_original = original(x, pos)
+    out_default = explicit_default(x, pos)
+    assert torch.allclose(out_original, out_default, atol=0.0, rtol=0.0)
+
+
+def check_eval_max_depth_ignored_in_training_mode():
+    torch.manual_seed(12)
+    x = torch.randn(1, 2, 4, 36)
+    pos = torch.tensor(
+        [[[0.0, 0.0, 3.0], [1.0, 0.5, 8.0], [2.0, -1.0, 18.0], [0.0, 3.0, 30.0]]],
+        dtype=torch.float32,
+    )
+
+    baseline = GeoRoPEFusionRotary(
+        head_dim=36,
+        mode="spherical",
+        max_depth=10.0,
+        train_max_depth=10.0,
+        eval_max_depth=None,
+        group_split="2,1,2",
+    )
+    extended = GeoRoPEFusionRotary(
+        head_dim=36,
+        mode="spherical",
+        max_depth=10.0,
+        train_max_depth=10.0,
+        eval_max_depth=30.0,
+        ntk_scaling=True,
+        group_split="2,1,2",
+    )
+    baseline.train()
+    extended.train()
+
+    out_baseline = baseline(x, pos)
+    out_extended = extended(x, pos)
+    assert torch.allclose(out_baseline, out_extended, atol=0.0, rtol=0.0)
+
+
+def check_eval_max_depth_changes_far_eval_behavior():
+    torch.manual_seed(13)
+    x = torch.randn(1, 2, 4, 36)
+    pos = torch.tensor(
+        [[[0.0, 0.0, 4.0], [0.0, 0.0, 9.0], [0.0, 0.0, 15.0], [0.0, 0.0, 24.0]]],
+        dtype=torch.float32,
+    )
+
+    clamped = GeoRoPEFusionRotary(
+        head_dim=36,
+        mode="spherical",
+        max_depth=10.0,
+        train_max_depth=10.0,
+        eval_max_depth=None,
+        group_split="2,1,2",
+    )
+    extended = GeoRoPEFusionRotary(
+        head_dim=36,
+        mode="spherical",
+        max_depth=10.0,
+        train_max_depth=10.0,
+        eval_max_depth=30.0,
+        ntk_scaling=False,
+        group_split="2,1,2",
+    )
+    clamped.eval()
+    extended.eval()
+
+    out_clamped = clamped(x, pos)
+    out_extended = extended(x, pos)
+    assert not torch.allclose(out_clamped, out_extended, atol=1e-7, rtol=1e-7)
+
+
+def check_ntk_toggle_changes_eval_rotary_frequencies():
+    torch.manual_seed(14)
+    x = torch.randn(1, 2, 4, 36)
+    pos = torch.tensor(
+        [[[0.0, 0.0, 12.0], [1.0, 0.0, 20.0], [0.0, -1.0, 30.0], [2.0, 1.0, 35.0]]],
+        dtype=torch.float32,
+    )
+
+    no_ntk = GeoRoPEFusionRotary(
+        head_dim=36,
+        mode="spherical",
+        max_depth=10.0,
+        train_max_depth=10.0,
+        eval_max_depth=30.0,
+        ntk_scaling=False,
+        group_split="2,1,2",
+    )
+    with_ntk = GeoRoPEFusionRotary(
+        head_dim=36,
+        mode="spherical",
+        max_depth=10.0,
+        train_max_depth=10.0,
+        eval_max_depth=30.0,
+        ntk_scaling=True,
+        group_split="2,1,2",
+    )
+    no_ntk.eval()
+    with_ntk.eval()
+
+    assert no_ntk.depth_group_index == 2
+    out_no_ntk = no_ntk(x, pos)
+    out_with_ntk = with_ntk(x, pos)
+    assert not torch.allclose(out_no_ntk, out_with_ntk, atol=1e-7, rtol=1e-7)
+
+
 def main():
     point_maps = torch.randn(2, 8, 8, 3)
     token_pos = pool_point_map_to_tokens(point_maps, 16)
@@ -95,11 +224,17 @@ def main():
     for mode, group_split in valid_cases:
         check_mode(mode, group_split)
 
+    check_default_depth_extension_matches_original()
+    check_eval_max_depth_ignored_in_training_mode()
+    check_eval_max_depth_changes_far_eval_behavior()
+    check_ntk_toggle_changes_eval_rotary_frequencies()
+
     expect_value_error(lambda: GeoRoPEFusionRotary(head_dim=18, mode="depth", group_split="2,1,2"))
     expect_value_error(lambda: GeoRoPEFusionRotary(head_dim=18, mode="xyz", group_split="1"))
     expect_value_error(lambda: GeoRoPEFusionRotary(head_dim=18, mode="spherical", group_split="1,1"))
     expect_value_error(lambda: GeoRoPEFusionRotary(head_dim=18, mode="xyz", group_split="1,0,1"))
     expect_value_error(lambda: GeoRoPEFusionRotary(head_dim=18, mode="spherical", group_split="-1,1,1"))
+    expect_value_error(lambda: GeoRoPEFusionRotary(head_dim=18, mode="spherical", eval_max_depth=-1.0))
     print("GeoRoPE Fusion sanity checks passed.")
 
 
