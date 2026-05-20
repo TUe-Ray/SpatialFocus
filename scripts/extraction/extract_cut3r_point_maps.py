@@ -13,7 +13,7 @@ import torch.nn as nn
 import torch.multiprocessing as mp
 from PIL import ImageFile
 
-_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
@@ -26,7 +26,7 @@ from llava.utils import process_video_with_decord, rank0_print
 
 
 def _resolve_cut3r_root():
-    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    repo_root = _REPO_ROOT
     candidates = [
         os.path.join(repo_root, "third_party", "CUT3R"),
         os.path.join(repo_root, "CUT3R"),

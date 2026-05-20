@@ -22,7 +22,7 @@ import torch
 import torch.nn.functional as F
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 VGGT_ROOT = REPO_ROOT / "third_party" / "VGGT"
 if str(VGGT_ROOT) in sys.path:
     sys.path.remove(str(VGGT_ROOT))

@@ -143,8 +143,10 @@ from PIL import Image, ImageFile
 from pathlib import Path # For path manipulation
 import traceback # For error reporting in subprocesses
 
-# Assume necessary imports from llava are available in the PYTHONPATH
-# You might need to adjust imports based on your project structure
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from llava.utils import process_video_with_decord # Or other video processing functions used
 from llava.utils import rank0_print # Use rank0_print for controlled output
 #from llava.train.train import DataArguments # Re-use DataArguments for consistency

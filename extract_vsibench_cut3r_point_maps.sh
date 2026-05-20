@@ -133,7 +133,7 @@ for split in $SPLITS; do
   mkdir -p "$output_dir"
 
   cmd=(
-    python scripts/extract_cut3r_point_maps.py
+    python scripts/extraction/extract_cut3r_point_maps.py
     --cut3r-weights-path "$CUT3R_WEIGHTS"
     --input-dir "$input_dir"
     --output-dir "$output_dir"

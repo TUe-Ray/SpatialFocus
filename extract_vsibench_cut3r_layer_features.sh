@@ -126,7 +126,7 @@ for split in $SPLITS; do
   mkdir -p "$output_root"
 
   cmd=(
-    python scripts/extract_cut3r_layer_features.py
+    python scripts/extraction/extract_cut3r_layer_features.py
     --input-dir "$input_dir"
     --output-root "$output_root"
     --layers "$LAYERS"

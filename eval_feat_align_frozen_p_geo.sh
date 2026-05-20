@@ -104,7 +104,7 @@ if [[ ! -f "$SPATIAL_RANK_HEAD_PATH" ]]; then
     exit 1
   fi
 
-  python scripts/extract_spatial_rank_head.py \
+  python scripts/extraction/extract_spatial_rank_head.py \
     --checkpoint "$P_GEO_EXTRACT_SOURCE" \
     --output "$SPATIAL_RANK_HEAD_PATH"
 fi
