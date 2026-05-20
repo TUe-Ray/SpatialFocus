@@ -124,6 +124,10 @@ class MetricGroundedGeometryProjection(nn.Module):
             fixed_scene_scale=float(getattr(config, "geometry_fixed_scene_scale", 5.0)),
             detach_geometry_targets=_as_bool(getattr(config, "detach_geometry_targets", True), True),
             use_geometry_confidence_mask=_as_bool(getattr(config, "use_geometry_confidence_mask", True), True),
+            point_map_key=(
+                getattr(config, "geo_rope_point_map_key", None)
+                or getattr(config, "geometry_point_map_key", None)
+            ),
         )
         self.layers = nn.ModuleList([
             GeometryAwareProjectionBlock(

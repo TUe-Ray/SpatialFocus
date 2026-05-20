@@ -122,6 +122,12 @@ One .pt file is saved per video, with the following structure:
   align them with the 2D branch, annotations, or time-based metadata.
 - decoded_pos_template preserves token position layout for future decoder reconstruction or analysis.
 - Shared metadata is stored once per video to save disk space.
+
+7) GeoRoPE coordinate consistency
+- If these decoded sidecars are used to derive GeoRoPE positions, train and eval for the same
+  checkpoint must use this same geometry provider and coordinate definition.
+- Do not compare the same checkpoint against eval runs that silently switch to CUT3R
+  point_maps_ref or point_maps_cam.
 """
 
 import argparse

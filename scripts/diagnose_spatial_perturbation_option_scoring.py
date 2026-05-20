@@ -104,6 +104,10 @@ PATCH_KEYS = {
     "spatial_features",
     "last_hidden_state",
     "features",
+    # Coordinate consistency rule:
+    # point_maps_ref/pts3d_in_other_view is CUT3R reference/anchor-frame;
+    # point_maps_cam/pts3d_in_self_view is per-frame camera coordinates.
+    # Diagnostics should match the coordinate source used by train/eval.
     "point_maps",
     "point_map",
     "points",
@@ -753,9 +757,6 @@ def apply_perturbation(
 
 def load_sidecar(path: Path) -> Any:
     sidecar = torch.load(path, map_location="cpu")
-    if isinstance(sidecar, dict) and "point_maps_cam" in sidecar and "point_maps" not in sidecar:
-        sidecar = dict(sidecar)
-        sidecar["point_maps"] = sidecar["point_maps_cam"]
     return sidecar
 
 

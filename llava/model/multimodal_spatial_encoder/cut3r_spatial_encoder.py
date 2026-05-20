@@ -209,7 +209,10 @@ class Cut3rEncoder(nn.Module):
                     if item_output_dir:
                         os.makedirs(item_output_dir, exist_ok=True)
 
-                    # --- Combine data across frames for the current batch item --- 
+                    # --- Combine data across frames for the current batch item ---
+                    # pts3d_in_other_view is CUT3R reference/anchor-frame
+                    # coordinates. Do not mix it with per-frame camera
+                    # coordinates in comparable train/eval GeoRoPE runs.
                     for i in range(num_frames):
                         # Check if the tensors exist and have the expected batch dimension for this frame
                         if (i < len(ress) and 

@@ -123,6 +123,40 @@ def _coalesce_point_maps(point_maps):
     raise TypeError(f"point_maps must be a tensor or list/tuple of tensors, got {type(point_maps)}")
 
 
+def _normalize_point_map_key(key):
+    if key in (None, ""):
+        return None
+    normalized = str(key).strip().lower()
+    aliases = {
+        "ref": "point_maps_ref",
+        "reference": "point_maps_ref",
+        "anchor": "point_maps_ref",
+        "point_maps_ref": "point_maps_ref",
+        "pts3d_in_other_view": "point_maps_ref",
+        "cam": "point_maps_cam",
+        "camera": "point_maps_cam",
+        "self": "point_maps_cam",
+        "point_maps_cam": "point_maps_cam",
+        "pts3d_in_self_view": "point_maps_cam",
+    }
+    if normalized not in aliases:
+        raise ValueError(
+            "geo_rope_point_map_key must be one of ref/point_maps_ref/"
+            "pts3d_in_other_view or cam/point_maps_cam/pts3d_in_self_view, "
+            f"got {key!r}"
+        )
+    return aliases[normalized]
+
+
+def _point_map_key_candidates(key):
+    normalized = _normalize_point_map_key(key)
+    if normalized == "point_maps_ref":
+        return ("point_maps_ref", "pts3d_in_other_view")
+    if normalized == "point_maps_cam":
+        return ("point_maps_cam", "pts3d_in_self_view")
+    return ()
+
+
 class LlavaMetaModel:
 
     def __init__(self, config):
@@ -1028,7 +1062,17 @@ class LlavaMetaForCausalLM(ABC):
 
     def _canonical_geometry_outputs_for_projection(self, geometry_outputs, point_maps, spatial_features, device):
         pi3x_geometry = self._decode_pi3x_geometry_outputs_for_projection(spatial_features, device)
-        canonical = canonicalize_geometry_outputs(geometry_outputs, pi3x_geometry, spatial_features, point_maps=point_maps)
+        point_map_key = (
+            getattr(self.get_model().config, "geo_rope_point_map_key", None)
+            or getattr(self.get_model().config, "geometry_point_map_key", None)
+        )
+        canonical = canonicalize_geometry_outputs(
+            geometry_outputs,
+            pi3x_geometry,
+            spatial_features,
+            point_maps=point_maps,
+            point_map_key=point_map_key,
+        )
         moved = {}
         for key, value in canonical.items():
             if isinstance(value, torch.Tensor):
@@ -1612,20 +1656,46 @@ class LlavaMetaForCausalLM(ABC):
                     if geometry_point_maps is None:
                         geometry_point_maps = _coalesce_point_maps(point_maps)
                     if geometry_point_maps is None and isinstance(loaded_spatial_features, dict):
-                        point_map_keys = (
-                            "point_maps",
-                            "point_map",
-                            "points",
-                            "pts3d",
-                            "point_maps_ref",
-                            "pts3d_in_other_view",
-                            "point_maps_cam",
-                            "pts3d_in_self_view",
+                        # Coordinate consistency rule:
+                        # For CUT3R point-map sidecars, point_maps_ref /
+                        # pts3d_in_other_view are reference/anchor-frame
+                        # coordinates, while point_maps_cam /
+                        # pts3d_in_self_view are per-frame camera coordinates.
+                        # Train and eval for the same checkpoint must select
+                        # the same coordinate source; do not add eval-only
+                        # aliases that silently change this priority.
+                        requested_point_map_key = (
+                            getattr(self.get_model().config, "geo_rope_point_map_key", None)
+                            or getattr(self.get_model().config, "geometry_point_map_key", None)
                         )
-                        for point_key in point_map_keys:
-                            if point_key in loaded_spatial_features:
-                                geometry_point_maps = _coalesce_point_maps(loaded_spatial_features[point_key])
-                                break
+                        if requested_point_map_key:
+                            point_map_keys = _point_map_key_candidates(requested_point_map_key)
+                            missing_keys = ", ".join(point_map_keys)
+                            for point_key in point_map_keys:
+                                if point_key in loaded_spatial_features:
+                                    geometry_point_maps = _coalesce_point_maps(loaded_spatial_features[point_key])
+                                    break
+                            if geometry_point_maps is None:
+                                raise RuntimeError(
+                                    f"{fusion_block_type} requested geo_rope_point_map_key="
+                                    f"{requested_point_map_key!r}, but none of [{missing_keys}] "
+                                    "were found in the loaded CUT3R sidecar."
+                                )
+                        else:
+                            point_map_keys = (
+                                "point_maps",
+                                "point_map",
+                                "points",
+                                "pts3d",
+                                "point_maps_ref",
+                                "pts3d_in_other_view",
+                                "point_maps_cam",
+                                "pts3d_in_self_view",
+                            )
+                            for point_key in point_map_keys:
+                                if point_key in loaded_spatial_features:
+                                    geometry_point_maps = _coalesce_point_maps(loaded_spatial_features[point_key])
+                                    break
                     if geometry_point_maps is None:
                         raise RuntimeError(
                             f"{fusion_block_type} requires point_maps from CUT3R or "

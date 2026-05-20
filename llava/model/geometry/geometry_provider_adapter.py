@@ -11,6 +11,10 @@ POINT_MAP_ALIASES = (
     "point_maps",
     "points",
     "pts3d",
+    # Coordinate consistency is part of the GeoRoPE experiment contract:
+    # train and eval must use the same coordinate source. For CUT3R sidecars,
+    # point_maps_ref/pts3d_in_other_view is reference/anchor-frame, while
+    # point_maps_cam/pts3d_in_self_view is per-frame camera coordinates.
     "point_maps_ref",
     "pts3d_in_other_view",
     "point_maps_cam",
@@ -18,6 +22,31 @@ POINT_MAP_ALIASES = (
 )
 DEPTH_ALIASES = ("depth", "depth_map")
 CONFIDENCE_ALIASES = ("confidence", "conf", "depth_conf", "pts3d_conf")
+
+
+def _normalize_point_map_key(key):
+    if key in (None, ""):
+        return None
+    normalized = str(key).strip().lower()
+    aliases = {
+        "ref": ("point_maps_ref", "pts3d_in_other_view"),
+        "reference": ("point_maps_ref", "pts3d_in_other_view"),
+        "anchor": ("point_maps_ref", "pts3d_in_other_view"),
+        "point_maps_ref": ("point_maps_ref", "pts3d_in_other_view"),
+        "pts3d_in_other_view": ("pts3d_in_other_view", "point_maps_ref"),
+        "cam": ("point_maps_cam", "pts3d_in_self_view"),
+        "camera": ("point_maps_cam", "pts3d_in_self_view"),
+        "self": ("point_maps_cam", "pts3d_in_self_view"),
+        "point_maps_cam": ("point_maps_cam", "pts3d_in_self_view"),
+        "pts3d_in_self_view": ("pts3d_in_self_view", "point_maps_cam"),
+    }
+    if normalized not in aliases:
+        raise ValueError(
+            "geometry_point_map_key must be one of ref/point_maps_ref/"
+            "pts3d_in_other_view or cam/point_maps_cam/pts3d_in_self_view, "
+            f"got {key!r}"
+        )
+    return aliases[normalized]
 
 
 def _coalesce_tensor_sequence(value):
@@ -36,12 +65,14 @@ def _coalesce_tensor_sequence(value):
     return None
 
 
-def canonicalize_geometry_outputs(*sources, point_maps=None) -> Dict[str, torch.Tensor]:
+def canonicalize_geometry_outputs(*sources, point_maps=None, point_map_key=None) -> Dict[str, torch.Tensor]:
     canonical = {}
     if point_maps is not None:
         point_map = _coalesce_tensor_sequence(point_maps)
         if point_map is not None:
             canonical["point_map"] = point_map
+
+    requested_point_map_aliases = _normalize_point_map_key(point_map_key)
 
     def visit(source):
         if source is None:
@@ -57,7 +88,7 @@ def canonicalize_geometry_outputs(*sources, point_maps=None) -> Dict[str, torch.
                 return
             merged = {}
             for item in source:
-                item_canonical = canonicalize_geometry_outputs(item)
+                item_canonical = canonicalize_geometry_outputs(item, point_map_key=point_map_key)
                 for key, value in item_canonical.items():
                     merged.setdefault(key, []).append(value)
             for key, values in merged.items():
@@ -67,7 +98,7 @@ def canonicalize_geometry_outputs(*sources, point_maps=None) -> Dict[str, torch.
         if not isinstance(source, dict):
             return
         for out_key, aliases in (
-            ("point_map", POINT_MAP_ALIASES),
+            ("point_map", requested_point_map_aliases or POINT_MAP_ALIASES),
             ("depth", DEPTH_ALIASES),
             ("confidence", CONFIDENCE_ALIASES),
         ):
@@ -91,6 +122,7 @@ class GeometryProviderAdapter(nn.Module):
         fixed_scene_scale: float = 5.0,
         detach_geometry_targets: bool = True,
         use_geometry_confidence_mask: bool = True,
+        point_map_key: Optional[str] = None,
     ):
         super().__init__()
         if mode not in {"depth", "xyz", "spherical"}:
@@ -100,6 +132,7 @@ class GeometryProviderAdapter(nn.Module):
         self.fixed_scene_scale = float(fixed_scene_scale)
         self.detach_geometry_targets = bool(detach_geometry_targets)
         self.use_geometry_confidence_mask = bool(use_geometry_confidence_mask)
+        self.point_map_key = point_map_key
 
     @staticmethod
     def _flatten_frame_dim(x: torch.Tensor, channel_last_dim: Optional[int] = None):

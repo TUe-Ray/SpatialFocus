@@ -29,6 +29,11 @@ VSI_MEDIA_ROOT="${VSI_MEDIA_ROOT:-$HF_HOME/vsibench}"
 DATA_ROOT="${DATA_ROOT:-$FAST_ROOT/data/vlm3r}"
 SPATIAL_FEATURES_ROOT="${SPATIAL_FEATURES_ROOT:-$DATA_ROOT}"
 SPATIAL_FEATURES_SUBDIR="${SPATIAL_FEATURES_SUBDIR:-spatial_features_points}"
+# Coordinate consistency rule:
+# - Post-hoc GeoRoPE eval still needs an explicit coordinate choice.
+# - point_maps_ref/pts3d_in_other_view = CUT3R reference/anchor-frame.
+# - point_maps_cam/pts3d_in_self_view = per-frame camera coordinates.
+# - Keep this choice fixed across comparable eval runs.
 CHECK_SPATIAL_SIDECARS="${CHECK_SPATIAL_SIDECARS:-True}"
 
 MODEL_ROOT="${MODEL_ROOT:-/leonardo_work/EUHPC_D32_006/FAST/hf_models/VLM3R}"
@@ -58,6 +63,7 @@ MODEL_GEO_ROPE_FUSION_MODE="${MODEL_GEO_ROPE_FUSION_MODE:-spherical}"
 MODEL_GEO_ROPE_FUSION_MAX_DEPTH="${MODEL_GEO_ROPE_FUSION_MAX_DEPTH:-10.0}"
 MODEL_GEO_ROPE_FUSION_GROUP_SPLIT="${MODEL_GEO_ROPE_FUSION_GROUP_SPLIT:-2,1,2}"
 MODEL_GEO_ROPE_FUSION_LOG_STATS="${MODEL_GEO_ROPE_FUSION_LOG_STATS:-False}"
+MODEL_GEO_ROPE_POINT_MAP_KEY="${MODEL_GEO_ROPE_POINT_MAP_KEY:-point_maps_ref}"
 MODEL_GEO_ROPE_FUSION_EVAL_LAMBDA="${MODEL_GEO_ROPE_FUSION_EVAL_LAMBDA:-0.0}"
 MODEL_GEO_ROPE_FUSION_EVAL_LAMBDA_Q="${MODEL_GEO_ROPE_FUSION_EVAL_LAMBDA_Q:-}"
 MODEL_GEO_ROPE_FUSION_EVAL_LAMBDA_K="${MODEL_GEO_ROPE_FUSION_EVAL_LAMBDA_K:-}"
@@ -96,6 +102,7 @@ echo "MODEL_GEO_ROPE_FUSION_MODE=$MODEL_GEO_ROPE_FUSION_MODE"
 echo "MODEL_GEO_ROPE_FUSION_MAX_DEPTH=$MODEL_GEO_ROPE_FUSION_MAX_DEPTH"
 echo "MODEL_GEO_ROPE_FUSION_GROUP_SPLIT=$MODEL_GEO_ROPE_FUSION_GROUP_SPLIT"
 echo "MODEL_GEO_ROPE_FUSION_LOG_STATS=$MODEL_GEO_ROPE_FUSION_LOG_STATS"
+echo "MODEL_GEO_ROPE_POINT_MAP_KEY=$MODEL_GEO_ROPE_POINT_MAP_KEY"
 echo "MODEL_GEO_ROPE_FUSION_EVAL_LAMBDA=$MODEL_GEO_ROPE_FUSION_EVAL_LAMBDA"
 echo "MODEL_GEO_ROPE_FUSION_EVAL_LAMBDA_Q=$MODEL_GEO_ROPE_FUSION_EVAL_LAMBDA_Q"
 echo "MODEL_GEO_ROPE_FUSION_EVAL_LAMBDA_K=$MODEL_GEO_ROPE_FUSION_EVAL_LAMBDA_K"
@@ -288,9 +295,27 @@ prepare_runtime_pretrained() {
   done
 
   cp "$PRETRAINED_LOCAL/config.json" "$runtime_dir/config.json"
-  python - "$runtime_dir/config.json" "$SIGLIP_LOCAL" "$MODEL_SPATIAL_TOWER" "$MODEL_SPATIAL_FEATURE_DIM" "$MODEL_SPATIAL_TOWER_SELECT_FEATURE" "$MODEL_FUSION_BLOCK" "$MODEL_GEO_ROPE_FUSION_MODE" "$MODEL_GEO_ROPE_FUSION_MAX_DEPTH" "$MODEL_GEO_ROPE_FUSION_GROUP_SPLIT" "$MODEL_GEO_ROPE_FUSION_LOG_STATS" "$MODEL_GEO_ROPE_FUSION_EVAL_LAMBDA" "$MODEL_GEO_ROPE_FUSION_EVAL_LAMBDA_Q" "$MODEL_GEO_ROPE_FUSION_EVAL_LAMBDA_K" <<'PY'
+  python - "$runtime_dir/config.json" "$SIGLIP_LOCAL" "$MODEL_SPATIAL_TOWER" "$MODEL_SPATIAL_FEATURE_DIM" "$MODEL_SPATIAL_TOWER_SELECT_FEATURE" "$MODEL_FUSION_BLOCK" "$MODEL_GEO_ROPE_FUSION_MODE" "$MODEL_GEO_ROPE_FUSION_MAX_DEPTH" "$MODEL_GEO_ROPE_FUSION_GROUP_SPLIT" "$MODEL_GEO_ROPE_FUSION_LOG_STATS" "$MODEL_GEO_ROPE_FUSION_EVAL_LAMBDA" "$MODEL_GEO_ROPE_FUSION_EVAL_LAMBDA_Q" "$MODEL_GEO_ROPE_FUSION_EVAL_LAMBDA_K" "$MODEL_GEO_ROPE_POINT_MAP_KEY" <<'PY'
 import json
 import sys
+
+def normalize_point_map_key(value):
+    aliases = {
+        "ref": "point_maps_ref",
+        "reference": "point_maps_ref",
+        "anchor": "point_maps_ref",
+        "point_maps_ref": "point_maps_ref",
+        "pts3d_in_other_view": "point_maps_ref",
+        "cam": "point_maps_cam",
+        "camera": "point_maps_cam",
+        "self": "point_maps_cam",
+        "point_maps_cam": "point_maps_cam",
+        "pts3d_in_self_view": "point_maps_cam",
+    }
+    key = str(value).strip().lower()
+    if key not in aliases:
+        raise SystemExit(f"Unsupported MODEL_GEO_ROPE_POINT_MAP_KEY={value!r}")
+    return aliases[key]
 
 cfg_path = sys.argv[1]
 siglip_local = sys.argv[2]
@@ -305,9 +330,23 @@ geo_rope_fusion_log_stats = sys.argv[10].lower() in {"1", "true", "yes", "y", "o
 geo_rope_fusion_eval_lambda = float(sys.argv[11])
 geo_rope_fusion_eval_lambda_q = sys.argv[12]
 geo_rope_fusion_eval_lambda_k = sys.argv[13]
+geo_rope_point_map_key = normalize_point_map_key(sys.argv[14])
 
 with open(cfg_path, "r", encoding="utf-8") as f:
     cfg = json.load(f)
+
+training_point_map_key = (
+    cfg.get("geo_rope_training_point_map_key")
+    or cfg.get("geometry_training_point_map_key")
+    or cfg.get("geo_rope_point_map_key")
+    or cfg.get("geometry_point_map_key")
+)
+training_point_map_key = normalize_point_map_key(training_point_map_key) if training_point_map_key else None
+if training_point_map_key and training_point_map_key != geo_rope_point_map_key:
+    raise SystemExit(
+        "GeoRoPE point-map coordinate mismatch: checkpoint training used "
+        f"{training_point_map_key}, eval requested {geo_rope_point_map_key}."
+    )
 
 cfg["mm_vision_tower"] = siglip_local
 if "vision_tower" in cfg:
@@ -326,6 +365,9 @@ cfg["geometry_rope_group_split"] = geo_rope_fusion_group_split
 cfg["geometry_rope_log_stats"] = geo_rope_fusion_log_stats
 cfg["geo_rope_fusion_eval_lambda"] = geo_rope_fusion_eval_lambda
 cfg["geometry_rope_eval_lambda"] = geo_rope_fusion_eval_lambda
+cfg["geo_rope_training_point_map_key"] = training_point_map_key or geo_rope_point_map_key
+cfg["geo_rope_point_map_key"] = geo_rope_point_map_key
+cfg["geometry_point_map_key"] = geo_rope_point_map_key
 if geo_rope_fusion_eval_lambda_q:
     cfg["geo_rope_fusion_eval_lambda_q"] = float(geo_rope_fusion_eval_lambda_q)
 if geo_rope_fusion_eval_lambda_k:
@@ -349,6 +391,7 @@ if [[ -n "$MODEL_NAME" ]]; then
 fi
 MODEL_ARGS+=",conv_template=$CONV_TEMPLATE,max_frames_num=$MAX_FRAMES_NUM"
 MODEL_ARGS+=",spatial_features_root=$SPATIAL_FEATURES_ROOT,spatial_features_subdir=$SPATIAL_FEATURES_SUBDIR"
+MODEL_ARGS+=",geo_rope_point_map_key=$MODEL_GEO_ROPE_POINT_MAP_KEY"
 
 echo "Running post-hoc Geometry-RoPE offline evaluation"
 echo "PRETRAINED_RUNTIME=$PRETRAINED_RUNTIME"

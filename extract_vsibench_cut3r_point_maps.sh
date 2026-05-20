@@ -26,6 +26,11 @@ HF_HOME="${HF_HOME:-$FAST_ROOT/hf_cache}"
 INPUT_ROOT="${INPUT_ROOT:-$HF_HOME/vsibench}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$FAST_ROOT/data/vlm3r}"
 OUTPUT_SUBDIR="${OUTPUT_SUBDIR:-spatial_features_points}"
+# Coordinate consistency rule:
+# - Extracted sidecars intentionally store both coordinate frames:
+#   point_maps_ref/pts3d_in_other_view for CUT3R reference/anchor-frame and
+#   point_maps_cam/pts3d_in_self_view for per-frame camera coordinates.
+# - Training/eval wrappers must select the same one for a given checkpoint.
 
 MODEL_ROOT="${MODEL_ROOT:-/leonardo_work/EUHPC_D32_006/FAST/hf_models/VLM3R}"
 SIGLIP_LOCAL="${SIGLIP_LOCAL:-$MODEL_ROOT/siglip-so400m-patch14-384}"

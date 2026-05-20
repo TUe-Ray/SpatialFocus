@@ -29,6 +29,11 @@ VSI_MEDIA_ROOT="${VSI_MEDIA_ROOT:-$HF_HOME/vsibench}"
 DATA_ROOT="${DATA_ROOT:-$FAST_ROOT/data/vlm3r}"
 SPATIAL_FEATURES_ROOT="${SPATIAL_FEATURES_ROOT:-$DATA_ROOT}"
 SPATIAL_FEATURES_SUBDIR="${SPATIAL_FEATURES_SUBDIR:-spatial_features_points}"
+# Coordinate consistency rule:
+# - This eval must use the same CUT3R point-map coordinate source as training.
+# - point_maps_ref/pts3d_in_other_view = CUT3R reference/anchor-frame.
+# - point_maps_cam/pts3d_in_self_view = per-frame camera coordinates.
+# - Do not introduce eval-only aliases that change ref<->cam for a checkpoint.
 CHECK_SPATIAL_SIDECARS="${CHECK_SPATIAL_SIDECARS:-False}"
 RUN_RUNTIME_IMPORT_CHECKS="${RUN_RUNTIME_IMPORT_CHECKS:-True}"
 CUT3R_LAYER="${CUT3R_LAYER:--4}"
@@ -66,6 +71,7 @@ MODEL_GEO_ROPE_FUSION_MODE="${MODEL_GEO_ROPE_FUSION_MODE:-spherical}"
 MODEL_GEO_ROPE_FUSION_MAX_DEPTH="${MODEL_GEO_ROPE_FUSION_MAX_DEPTH:-10.0}"
 MODEL_GEO_ROPE_FUSION_GROUP_SPLIT="${MODEL_GEO_ROPE_FUSION_GROUP_SPLIT:-2,1,2}"
 MODEL_GEO_ROPE_FUSION_LOG_STATS="${MODEL_GEO_ROPE_FUSION_LOG_STATS:-False}"
+MODEL_GEO_ROPE_POINT_MAP_KEY="${MODEL_GEO_ROPE_POINT_MAP_KEY:-point_maps_ref}"
 FORCE_GEO_ROPE_GATE_ZERO="${FORCE_GEO_ROPE_GATE_ZERO:-False}"
 
 # Group split rules:
@@ -114,6 +120,7 @@ echo "MODEL_GEO_ROPE_FUSION_MODE=$MODEL_GEO_ROPE_FUSION_MODE"
 echo "MODEL_GEO_ROPE_FUSION_MAX_DEPTH=$MODEL_GEO_ROPE_FUSION_MAX_DEPTH"
 echo "MODEL_GEO_ROPE_FUSION_GROUP_SPLIT=$MODEL_GEO_ROPE_FUSION_GROUP_SPLIT"
 echo "MODEL_GEO_ROPE_FUSION_LOG_STATS=$MODEL_GEO_ROPE_FUSION_LOG_STATS"
+echo "MODEL_GEO_ROPE_POINT_MAP_KEY=$MODEL_GEO_ROPE_POINT_MAP_KEY"
 echo "FORCE_GEO_ROPE_GATE_ZERO=$FORCE_GEO_ROPE_GATE_ZERO"
 echo "=================="
 
@@ -310,9 +317,38 @@ prepare_runtime_pretrained() {
   done
 
   cp "$PRETRAINED_LOCAL/config.json" "$runtime_dir/config.json"
-  python - "$runtime_dir/config.json" "$SIGLIP_LOCAL" "$MODEL_SPATIAL_TOWER" "$MODEL_SPATIAL_FEATURE_DIM" "$MODEL_SPATIAL_TOWER_SELECT_FEATURE" "$CUT3R_LAYER" "$MODEL_FUSION_BLOCK" "$MODEL_GEO_ROPE_FUSION_MODE" "$MODEL_GEO_ROPE_FUSION_MAX_DEPTH" "$MODEL_GEO_ROPE_FUSION_GROUP_SPLIT" "$MODEL_GEO_ROPE_FUSION_LOG_STATS" <<'PY'
+  python - "$runtime_dir/config.json" "$SIGLIP_LOCAL" "$MODEL_SPATIAL_TOWER" "$MODEL_SPATIAL_FEATURE_DIM" "$MODEL_SPATIAL_TOWER_SELECT_FEATURE" "$CUT3R_LAYER" "$MODEL_FUSION_BLOCK" "$MODEL_GEO_ROPE_FUSION_MODE" "$MODEL_GEO_ROPE_FUSION_MAX_DEPTH" "$MODEL_GEO_ROPE_FUSION_GROUP_SPLIT" "$MODEL_GEO_ROPE_FUSION_LOG_STATS" "$MODEL_GEO_ROPE_POINT_MAP_KEY" <<'PY'
 import json
 import sys
+
+def normalize_point_map_key(value):
+    aliases = {
+        "ref": "point_maps_ref",
+        "reference": "point_maps_ref",
+        "anchor": "point_maps_ref",
+        "point_maps_ref": "point_maps_ref",
+        "pts3d_in_other_view": "point_maps_ref",
+        "cam": "point_maps_cam",
+        "camera": "point_maps_cam",
+        "self": "point_maps_cam",
+        "point_maps_cam": "point_maps_cam",
+        "pts3d_in_self_view": "point_maps_cam",
+    }
+    key = str(value).strip().lower()
+    if key not in aliases:
+        raise SystemExit(f"Unsupported MODEL_GEO_ROPE_POINT_MAP_KEY={value!r}")
+    return aliases[key]
+
+def infer_training_point_map_key(cfg):
+    for key in ("geo_rope_training_point_map_key", "geometry_training_point_map_key", "geo_rope_point_map_key", "geometry_point_map_key"):
+        if cfg.get(key):
+            return normalize_point_map_key(cfg[key])
+    geometry_tower_type = str(cfg.get("geometry_spatial_tower_type", "")).lower()
+    geometry_subdir = str(cfg.get("geometry_spatial_features_subdir", "")).lower()
+    spatial_subdir = str(cfg.get("spatial_features_subdir", "")).lower()
+    if "cut3r" in geometry_tower_type or "spatial_features_points" in geometry_subdir or "spatial_features_points" in spatial_subdir:
+        return "point_maps_ref"
+    return None
 
 cfg_path = sys.argv[1]
 siglip_local = sys.argv[2]
@@ -325,9 +361,17 @@ geo_rope_fusion_mode = sys.argv[8]
 geo_rope_fusion_max_depth = float(sys.argv[9])
 geo_rope_fusion_group_split = sys.argv[10]
 geo_rope_fusion_log_stats = sys.argv[11].lower() in {"1", "true", "yes", "y", "on"}
+geo_rope_point_map_key = normalize_point_map_key(sys.argv[12])
 
 with open(cfg_path, "r", encoding="utf-8") as f:
     cfg = json.load(f)
+
+training_point_map_key = infer_training_point_map_key(cfg)
+if training_point_map_key and training_point_map_key != geo_rope_point_map_key:
+    raise SystemExit(
+        "GeoRoPE point-map coordinate mismatch: checkpoint training used "
+        f"{training_point_map_key}, eval requested {geo_rope_point_map_key}."
+    )
 
 cfg["mm_vision_tower"] = siglip_local
 if "vision_tower" in cfg:
@@ -345,6 +389,9 @@ cfg["geometry_rope_mode"] = geo_rope_fusion_mode
 cfg["geometry_rope_max_depth"] = geo_rope_fusion_max_depth
 cfg["geometry_rope_group_split"] = geo_rope_fusion_group_split
 cfg["geometry_rope_log_stats"] = geo_rope_fusion_log_stats
+cfg["geo_rope_training_point_map_key"] = training_point_map_key or geo_rope_point_map_key
+cfg["geo_rope_point_map_key"] = geo_rope_point_map_key
+cfg["geometry_point_map_key"] = geo_rope_point_map_key
 
 with open(cfg_path, "w", encoding="utf-8") as f:
     json.dump(cfg, f, indent=2)
@@ -366,6 +413,7 @@ MODEL_ARGS+=",conv_template=$CONV_TEMPLATE,max_frames_num=$MAX_FRAMES_NUM"
 MODEL_ARGS+=",spatial_tower=$MODEL_SPATIAL_TOWER,spatial_feature_dim=$MODEL_SPATIAL_FEATURE_DIM,spatial_tower_select_feature=$MODEL_SPATIAL_TOWER_SELECT_FEATURE"
 MODEL_ARGS+=",spatial_features_root=$SPATIAL_FEATURES_ROOT,spatial_features_subdir=$SPATIAL_FEATURES_SUBDIR"
 MODEL_ARGS+=",geometry_rope_mode=$MODEL_GEO_ROPE_FUSION_MODE,geometry_rope_max_depth=$MODEL_GEO_ROPE_FUSION_MAX_DEPTH,geometry_rope_log_stats=$MODEL_GEO_ROPE_FUSION_LOG_STATS"
+MODEL_ARGS+=",geo_rope_point_map_key=$MODEL_GEO_ROPE_POINT_MAP_KEY"
 MODEL_ARGS+=",force_geo_rope_gate_zero=$FORCE_GEO_ROPE_GATE_ZERO"
 
 echo "Running Leonardo offline evaluation"

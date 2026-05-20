@@ -24,11 +24,18 @@ CONDA_ENV_NAME="vlm3r"
 MODEL_USE_GEOMETRY_AWARE_PROJECTION="True"
 MODEL_SPATIAL_ENCODER_TYPE="cut3r"
 MODEL_GEOMETRY_POSITION_MODE="spherical"
+MODEL_GEO_ROPE_POINT_MAP_KEY="${MODEL_GEO_ROPE_POINT_MAP_KEY:-point_maps_ref}"
 # geometry_position_mode:
 # depth [1]:      position = log_depth, 1D
 # xyz [2, 1, 2]:        position = normalized x,y,z, 3D
 # spherical [2,1,2]:  position = azimuth, elevation, log_distance, 3D
 #
+# Coordinate consistency rule:
+# - CUT3R sidecars expose point_maps_ref/pts3d_in_other_view
+#   (reference/anchor-frame) and point_maps_cam/pts3d_in_self_view
+#   (per-frame camera).
+# - Use the same coordinate source in training and evaluation; do not allow
+#   eval-only aliases to switch ref<->cam.
 
 
 MODEL_NUM_GEOMETRY_PROJECTION_LAYERS="1" #after 3D RoPE 有幾層 transformer layer
@@ -375,6 +382,7 @@ declare -A MODEL_ARGS=(
     [use_geometry_aware_projection]="$MODEL_USE_GEOMETRY_AWARE_PROJECTION"
     [spatial_encoder_type]="$MODEL_SPATIAL_ENCODER_TYPE"
     [geometry_position_mode]="$MODEL_GEOMETRY_POSITION_MODE"
+    [geo_rope_point_map_key]="$MODEL_GEO_ROPE_POINT_MAP_KEY"
     [num_geometry_projection_layers]="$MODEL_NUM_GEOMETRY_PROJECTION_LAYERS"
     [geometry_projection_num_heads]="$MODEL_GEOMETRY_PROJECTION_NUM_HEADS"
     [use_auxiliary_geometry_head]="$MODEL_USE_AUXILIARY_GEOMETRY_HEAD"

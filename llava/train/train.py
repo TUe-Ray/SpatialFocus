@@ -229,6 +229,16 @@ class ModelArguments:
         default=False,
         metadata={"help": "If True, record GeoRoPE Fusion tensor mean/std stats during each forward pass."},
     )
+    geo_rope_point_map_key: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": (
+                "CUT3R point-map coordinate source for GeoRoPE: ref/point_maps_ref/"
+                "pts3d_in_other_view or cam/point_maps_cam/pts3d_in_self_view. "
+                "Eval must use the same value."
+            )
+        },
+    )
     tune_fusion_block: bool = field(default=False)
     use_geometry_aware_projection: bool = field(
         default=False,
@@ -328,9 +338,9 @@ class DataArguments:
     spatial_tower_type: Optional[str] = field(default=None, metadata={"help": "Spatial tower type (e.g. cut3r, vggt, pi3x). Set automatically from model_args. Controls whether .pt files are loaded."})
     spatial_features_root: Optional[str] = field(default=None, metadata={"help": "Root directory used to locate pre-extracted spatial features. If unset, video_folder is used."})
     spatial_features_subdir: Optional[str] = field(default="spatial_features", metadata={"help": "Subdirectory used to locate pre-extracted spatial features relative to video paths (default: spatial_features)."})
-    geometry_spatial_tower_type: Optional[str] = field(default=None, metadata={"help": "Optional geometry-only spatial tower type. Use pi3x to load decoded-feature sidecars for GeoRoPE positions while keeping the main spatial tower unchanged."})
-    geometry_spatial_features_root: Optional[str] = field(default=None, metadata={"help": "Root directory for geometry-only pre-extracted spatial features."})
-    geometry_spatial_features_subdir: Optional[str] = field(default=None, metadata={"help": "Subdirectory for geometry-only spatial features. Use '.' when files live directly under root/dataset."})
+    geometry_spatial_tower_type: Optional[str] = field(default=None, metadata={"help": "Optional geometry-only spatial tower type. Use pi3x to load decoded-feature sidecars for GeoRoPE positions while keeping the main spatial tower unchanged. Train/eval must use the same coordinate source."})
+    geometry_spatial_features_root: Optional[str] = field(default=None, metadata={"help": "Root directory for geometry-only pre-extracted spatial features. CUT3R point-map sidecars contain ref and cam coordinate frames; keep train/eval consistent."})
+    geometry_spatial_features_subdir: Optional[str] = field(default=None, metadata={"help": "Subdirectory for geometry-only spatial features. Use '.' when files live directly under root/dataset. Do not switch point_maps_ref and point_maps_cam between train and eval."})
     require_geometry_spatial_features: Optional[bool] = field(default=False, metadata={"help": "If True, raise when a requested geometry_spatial_features sidecar is missing."})
 
 
@@ -2379,9 +2389,12 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
         overwrite_config["geo_rope_fusion_mode"] = model_args.geo_rope_fusion_mode
     if model_args.geo_rope_fusion_max_depth is not None:
         overwrite_config["geo_rope_fusion_max_depth"] = model_args.geo_rope_fusion_max_depth
-    if model_args.geo_rope_fusion_group_split is not None:
-        overwrite_config["geo_rope_fusion_group_split"] = model_args.geo_rope_fusion_group_split
-    overwrite_config["geo_rope_fusion_log_stats"] = model_args.geo_rope_fusion_log_stats
+        if model_args.geo_rope_fusion_group_split is not None:
+            overwrite_config["geo_rope_fusion_group_split"] = model_args.geo_rope_fusion_group_split
+        overwrite_config["geo_rope_fusion_log_stats"] = model_args.geo_rope_fusion_log_stats
+        if model_args.geo_rope_point_map_key is not None:
+            overwrite_config["geo_rope_point_map_key"] = model_args.geo_rope_point_map_key
+            overwrite_config["geometry_point_map_key"] = model_args.geo_rope_point_map_key
     if model_args.use_geometry_aware_projection:
         overwrite_config["use_geometry_aware_projection"] = model_args.use_geometry_aware_projection
         overwrite_config["spatial_encoder_type"] = model_args.spatial_encoder_type
@@ -2682,6 +2695,10 @@ def train(attn_implementation=None):
         model.config.geometry_spatial_tower_type = data_args.geometry_spatial_tower_type
         model.config.geometry_spatial_features_root = data_args.geometry_spatial_features_root
         model.config.geometry_spatial_features_subdir = data_args.geometry_spatial_features_subdir
+        if model_args.geo_rope_point_map_key is not None:
+            model.config.geo_rope_training_point_map_key = model_args.geo_rope_point_map_key
+            model.config.geo_rope_point_map_key = model_args.geo_rope_point_map_key
+            model.config.geometry_point_map_key = model_args.geo_rope_point_map_key
         if "pi3" in str(data_args.geometry_spatial_tower_type).lower():
             model.get_model().initialize_pi3x_geometry_tower(model_args=model_args, fsdp=training_args.fsdp)
             pi3x_geometry_tower = model.get_model().get_pi3x_geometry_tower()
@@ -2696,6 +2713,10 @@ def train(attn_implementation=None):
         if model_args.geo_rope_fusion_group_split is not None:
             model.config.geo_rope_fusion_group_split = model_args.geo_rope_fusion_group_split
         model.config.geo_rope_fusion_log_stats = model_args.geo_rope_fusion_log_stats
+        if model_args.geo_rope_point_map_key is not None:
+            model.config.geo_rope_training_point_map_key = model_args.geo_rope_point_map_key
+            model.config.geo_rope_point_map_key = model_args.geo_rope_point_map_key
+            model.config.geometry_point_map_key = model_args.geo_rope_point_map_key
         model.get_model().initialize_fusion_block(model_args=model_args, fsdp=training_args.fsdp)
         fusion_block = model.get_fusion_block()
         fusion_block.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
@@ -2708,6 +2729,10 @@ def train(attn_implementation=None):
         if model_args.geo_rope_fusion_group_split is not None:
             model.config.geo_rope_fusion_group_split = model_args.geo_rope_fusion_group_split
         model.config.geo_rope_fusion_log_stats = model_args.geo_rope_fusion_log_stats
+        if model_args.geo_rope_point_map_key is not None:
+            model.config.geo_rope_training_point_map_key = model_args.geo_rope_point_map_key
+            model.config.geo_rope_point_map_key = model_args.geo_rope_point_map_key
+            model.config.geometry_point_map_key = model_args.geo_rope_point_map_key
         model.config.fusion_block_lr = training_args.fusion_block_lr
 
     if model_args.use_geometry_aware_projection:

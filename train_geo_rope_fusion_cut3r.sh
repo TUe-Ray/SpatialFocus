@@ -27,11 +27,18 @@ MODEL_GEO_ROPE_FUSION_MODE="${MODEL_GEO_ROPE_FUSION_MODE:-spherical}"
 MODEL_GEO_ROPE_FUSION_MAX_DEPTH="${MODEL_GEO_ROPE_FUSION_MAX_DEPTH:-10.0}"
 MODEL_GEO_ROPE_FUSION_GROUP_SPLIT="${MODEL_GEO_ROPE_FUSION_GROUP_SPLIT:-2,1,2}"
 MODEL_GEO_ROPE_FUSION_LOG_STATS="${MODEL_GEO_ROPE_FUSION_LOG_STATS:-False}"
+MODEL_GEO_ROPE_POINT_MAP_KEY="${MODEL_GEO_ROPE_POINT_MAP_KEY:-point_maps_ref}"
 # Group split rules:
 # - svf_depth_geo_rope_fusion requires MODEL_GEO_ROPE_FUSION_GROUP_SPLIT="1"
 # - svf_xyz_geo_rope_fusion uses x,y,z split, e.g. "1,1,1" or "2,1,2"
 # - svf_spherical_geo_rope_fusion uses theta,phi,log_r split, e.g. "1,1,1", "2,1,2", or "3,1,3"
 # - svf_geo_rope_fusion uses MODEL_GEO_ROPE_FUSION_MODE to decide depth/xyz/spherical
+# Coordinate consistency rule:
+# - CUT3R point-map sidecars contain both point_maps_ref/pts3d_in_other_view
+#   (reference/anchor-frame coordinates) and point_maps_cam/pts3d_in_self_view
+#   (per-frame camera coordinates).
+# - Whatever coordinate source is used for training must also be used for eval.
+#   Do not let eval-only aliases silently switch ref<->cam.
 # Run matrix:
 #   baseline:  MODEL_FUSION_BLOCK="svf_patch_only"
 #   depth:     MODEL_FUSION_BLOCK="svf_depth_geo_rope_fusion"     MODEL_GEO_ROPE_FUSION_GROUP_SPLIT="1"
@@ -373,6 +380,7 @@ declare -A MODEL_ARGS=(
     [geo_rope_fusion_max_depth]="$MODEL_GEO_ROPE_FUSION_MAX_DEPTH"
     [geo_rope_fusion_group_split]="$MODEL_GEO_ROPE_FUSION_GROUP_SPLIT"
     [geo_rope_fusion_log_stats]="$MODEL_GEO_ROPE_FUSION_LOG_STATS"
+    [geo_rope_point_map_key]="$MODEL_GEO_ROPE_POINT_MAP_KEY"
     [tune_spatial_tower]="$MODEL_TUNE_SPATIAL_TOWER"
     [tune_fusion_block]="$MODEL_TUNE_FUSION_BLOCK"
     [tune_mm_mlp_adapter]="$MODEL_TUNE_MM_MLP_ADAPTER"

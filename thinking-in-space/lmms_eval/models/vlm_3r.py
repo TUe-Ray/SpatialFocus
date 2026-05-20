@@ -61,6 +61,129 @@ def _str_to_bool(value):
     return bool(value)
 
 
+def _normalize_geo_rope_point_map_key(value):
+    if value in (None, ""):
+        return None
+    normalized = str(value).strip().lower()
+    aliases = {
+        "ref": "point_maps_ref",
+        "reference": "point_maps_ref",
+        "anchor": "point_maps_ref",
+        "point_maps_ref": "point_maps_ref",
+        "pts3d_in_other_view": "point_maps_ref",
+        "cam": "point_maps_cam",
+        "camera": "point_maps_cam",
+        "self": "point_maps_cam",
+        "point_maps_cam": "point_maps_cam",
+        "pts3d_in_self_view": "point_maps_cam",
+    }
+    if normalized not in aliases:
+        raise ValueError(
+            "geo_rope_point_map_key must be one of ref/point_maps_ref/"
+            "pts3d_in_other_view or cam/point_maps_cam/pts3d_in_self_view, "
+            f"got {value!r}"
+        )
+    return aliases[normalized]
+
+
+def _infer_legacy_training_point_map_key(config):
+    configured = (
+        getattr(config, "geo_rope_training_point_map_key", None)
+        or getattr(config, "geometry_training_point_map_key", None)
+        or getattr(config, "geo_rope_point_map_key", None)
+        or getattr(config, "geometry_point_map_key", None)
+    )
+    normalized = _normalize_geo_rope_point_map_key(configured)
+    if normalized is not None:
+        return normalized
+
+    geometry_tower_type = str(getattr(config, "geometry_spatial_tower_type", "") or "").lower()
+    geometry_subdir = str(getattr(config, "geometry_spatial_features_subdir", "") or "").lower()
+    spatial_subdir = str(getattr(config, "spatial_features_subdir", "") or "").lower()
+    if "cut3r" in geometry_tower_type or "spatial_features_points" in geometry_subdir or "spatial_features_points" in spatial_subdir:
+        # Legacy CUT3R point-map checkpoints did not store this field. The
+        # model-side priority selected point_maps_ref before point_maps_cam.
+        return "point_maps_ref"
+    return None
+
+
+def _validate_eval_point_map_key(config, requested_eval_key):
+    eval_key = _normalize_geo_rope_point_map_key(
+        requested_eval_key
+        or getattr(config, "geo_rope_point_map_key", None)
+        or getattr(config, "geometry_point_map_key", None)
+    )
+    if eval_key is None:
+        return None
+
+    train_key = _infer_legacy_training_point_map_key(config)
+    if train_key is not None and train_key != eval_key:
+        raise RuntimeError(
+            "GeoRoPE point-map coordinate mismatch: checkpoint training used "
+            f"{train_key}, but this eval requested {eval_key}. Use the same "
+            "coordinate source for train and eval, or evaluate a checkpoint "
+            "trained with the requested source."
+        )
+    setattr(config, "geo_rope_point_map_key", eval_key)
+    if train_key is not None:
+        setattr(config, "geo_rope_training_point_map_key", train_key)
+    return eval_key
+
+
+def _format_gate_value(value: torch.Tensor) -> str:
+    flat = value.detach().float().cpu().reshape(-1)
+    if flat.numel() == 1:
+        return f"{flat.item():.4f}"
+    return "[" + ", ".join(f"{x:.4f}" for x in flat.tolist()) + "]"
+
+
+def _force_geo_rope_gates_zero(model: torch.nn.Module, checkpoint_path: str) -> None:
+    found = []
+    print("[Gate0 Ablation] FORCE_GEO_ROPE_GATE_ZERO=True", flush=True)
+    print(f"[Gate0 Ablation] checkpoint path: {checkpoint_path}", flush=True)
+
+    config = getattr(model, "config", None)
+    geometry_rope_mode = (
+        getattr(config, "geo_rope_fusion_mode", None)
+        or getattr(config, "geometry_rope_mode", None)
+    )
+    geometry_rope_max_depth = (
+        getattr(config, "geo_rope_fusion_max_depth", None)
+        or getattr(config, "geometry_rope_max_depth", None)
+    )
+    print(f"[Gate0 Ablation] geometry_rope_mode: {geometry_rope_mode}", flush=True)
+    print(f"[Gate0 Ablation] geometry_rope_max_depth: {geometry_rope_max_depth}", flush=True)
+
+    for module_name, module in model.named_modules():
+        gate_q = getattr(module, "geo_rope_fusion_gate_q", None)
+        gate_k = getattr(module, "geo_rope_fusion_gate_k", None)
+        if gate_q is None and gate_k is None:
+            continue
+        if not isinstance(gate_q, torch.Tensor) or not isinstance(gate_k, torch.Tensor):
+            raise RuntimeError(
+                f"[Gate0 Ablation] Module {module_name} has incomplete/non-tensor GeoRoPE gates: "
+                f"gate_q={type(gate_q)}, gate_k={type(gate_k)}"
+            )
+
+        found.append(module_name)
+        print(f"[Gate0 Ablation] Found module: {module_name}", flush=True)
+        print(f"gate_q before: {_format_gate_value(gate_q)}", flush=True)
+        print(f"gate_k before: {_format_gate_value(gate_k)}", flush=True)
+        with torch.no_grad():
+            gate_q.zero_()
+            gate_k.zero_()
+        print(f"gate_q after: {_format_gate_value(gate_q)}", flush=True)
+        print(f"gate_k after: {_format_gate_value(gate_k)}", flush=True)
+
+    if not found:
+        raise RuntimeError(
+            "[Gate0 Ablation] FORCE_GEO_ROPE_GATE_ZERO=True but no modules with "
+            "geo_rope_fusion_gate_q and geo_rope_fusion_gate_k were found."
+        )
+
+    print(f"[Gate0 Ablation] Zeroed GeoRoPE Q/K gates in {len(found)} module(s).", flush=True)
+
+
 @register_model("vlm_3r")
 class Vlm3r(lmms):
     """
@@ -102,6 +225,8 @@ class Vlm3r(lmms):
         geometry_rope_max_depth: Optional[Union[float, str]] = None,
         geometry_rope_group_split: str = None,
         geometry_rope_log_stats: Union[bool, str] = False,
+        geo_rope_point_map_key: str = None,
+        force_geo_rope_gate_zero: Union[bool, str] = False,
         spatial_features_root: str = None,
         spatial_features_subdir: str = "spatial_features_points",
         **kwargs,
@@ -147,6 +272,8 @@ class Vlm3r(lmms):
         self.geometry_rope_max_depth = float(geometry_rope_max_depth) if geometry_rope_max_depth not in (None, "") else None
         self.geometry_rope_group_split = geometry_rope_group_split or None
         self.geometry_rope_log_stats = _str_to_bool(geometry_rope_log_stats)
+        self.geo_rope_point_map_key = _normalize_geo_rope_point_map_key(geo_rope_point_map_key)
+        self.force_geo_rope_gate_zero = _str_to_bool(force_geo_rope_gate_zero)
         self.spatial_features_root = Path(spatial_features_root) if spatial_features_root not in (None, "") else None
         self.spatial_features_subdir = spatial_features_subdir or "spatial_features_points"
 
@@ -176,6 +303,9 @@ class Vlm3r(lmms):
             if self.geometry_rope_group_split is not None:
                 overwrite_config["geometry_rope_group_split"] = self.geometry_rope_group_split
             overwrite_config["geometry_rope_log_stats"] = self.geometry_rope_log_stats
+            if self.geo_rope_point_map_key is not None:
+                overwrite_config["geo_rope_point_map_key"] = self.geo_rope_point_map_key
+                overwrite_config["geometry_point_map_key"] = self.geo_rope_point_map_key
             # overwrite_config["attn_implementation"] = attn_implementation
 
             cfg_pretrained = AutoConfig.from_pretrained(self.pretrained)
@@ -253,7 +383,11 @@ class Vlm3r(lmms):
                 attn_implementation=self.attn_implementation,
             )
 
+        if self.force_geo_rope_gate_zero:
+            _force_geo_rope_gates_zero(self._model, self.pretrained)
+
         self._config = self._model.config
+        self.geo_rope_point_map_key = _validate_eval_point_map_key(self._config, self.geo_rope_point_map_key)
         setattr(self._config, "zero_spatial_features", self.zero_spatial_features)
         resolved_attn_implementation = getattr(self._config, "_attn_implementation", None)
         if resolved_attn_implementation is None:
@@ -264,12 +398,18 @@ class Vlm3r(lmms):
             resolved_attn_implementation,
         )
         eval_logger.info("[ABLATION][EVAL] zero_spatial_features={}", self.zero_spatial_features)
+        eval_logger.info("[ABLATION][EVAL] force_geo_rope_gate_zero={}", self.force_geo_rope_gate_zero)
+        eval_logger.info(
+            "[ROPE][EVAL] geo_rope_point_map_key={}, training_point_map_key={}",
+            getattr(self._config, "geo_rope_point_map_key", None),
+            getattr(self._config, "geo_rope_training_point_map_key", None),
+        )
         eval_logger.info(
             "[ROPE][EVAL] fusion_block={}, geometry_rope_mode={}, group_split={}, max_depth={}, log_stats={}, eval_lambda={}",
             getattr(self._config, "fusion_block", None),
-            getattr(self._config, "geometry_rope_mode", None),
-            getattr(self._config, "geometry_rope_group_split", None),
-            getattr(self._config, "geometry_rope_max_depth", None),
+            getattr(self._config, "geo_rope_fusion_mode", None) or getattr(self._config, "geometry_rope_mode", None),
+            getattr(self._config, "geo_rope_fusion_group_split", None) or getattr(self._config, "geometry_rope_group_split", None),
+            getattr(self._config, "geo_rope_fusion_max_depth", None) or getattr(self._config, "geometry_rope_max_depth", None),
             getattr(self._config, "geometry_rope_log_stats", None),
             getattr(self._config, "geo_rope_fusion_eval_lambda", None),
         )
@@ -502,9 +642,6 @@ class Vlm3r(lmms):
                 continue
 
             sidecar = torch.load(str(candidate), map_location="cpu")
-            if isinstance(sidecar, dict) and "point_maps_cam" in sidecar and "point_maps" not in sidecar:
-                sidecar = dict(sidecar)
-                sidecar["point_maps"] = sidecar["point_maps_cam"]
             return sidecar
 
         if self._requires_geometry_rope_sidecar():

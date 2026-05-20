@@ -3,6 +3,10 @@
 
 This mirrors VGGT's demo_colmap depth+camera branch, but writes a lightweight
 PLY and manifest that fit the presentation sample folders used in this repo.
+
+GeoRoPE coordinate consistency rule: point-cloud export is diagnostic, but any
+VGGT geometry used for train/eval must keep the same coordinate convention for
+the same checkpoint.
 """
 
 from __future__ import annotations

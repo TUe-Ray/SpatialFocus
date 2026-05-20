@@ -11,6 +11,11 @@ The output schema intentionally matches the existing VLM-3R CUT3R sidecars:
 
 Each requested layer is written into its own output subdirectory so training can
 switch layers by changing only spatial_features_subdir.
+
+Coordinate consistency rule: these token sidecars may be paired with CUT3R
+point-map geometry sidecars for GeoRoPE. The point-map coordinate source
+(`point_maps_ref` vs `point_maps_cam`) must stay identical between training and
+evaluation for a checkpoint.
 """
 
 from __future__ import annotations

@@ -32,6 +32,12 @@ MODEL_GEO_ROPE_FUSION_LOG_STATS="${MODEL_GEO_ROPE_FUSION_LOG_STATS:-False}"
 # - svf_xyz_geo_rope_fusion uses x,y,z split, e.g. "1,1,1" or "2,1,2"
 # - svf_spherical_geo_rope_fusion uses theta,phi,log_r split, e.g. "1,1,1", "2,1,2", or "3,1,3"
 # - svf_geo_rope_fusion uses MODEL_GEO_ROPE_FUSION_MODE to decide depth/xyz/spherical
+# Coordinate consistency rule:
+# - Train and eval must use the same geometry coordinate provider and frame.
+# - For CUT3R point maps, keep point_maps_ref/pts3d_in_other_view
+#   (reference/anchor-frame) and point_maps_cam/pts3d_in_self_view
+#   (per-frame camera) explicit; do not rely on eval-only aliases.
+# - For PI3X-decoded geometry, eval must use the same decoded provider.
 # Run matrix:
 #   baseline:  MODEL_FUSION_BLOCK="svf_patch_only"
 #   depth:     MODEL_FUSION_BLOCK="svf_depth_geo_rope_fusion"     MODEL_GEO_ROPE_FUSION_GROUP_SPLIT="1"

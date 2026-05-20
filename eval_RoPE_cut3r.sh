@@ -29,6 +29,12 @@ VSI_MEDIA_ROOT="${VSI_MEDIA_ROOT:-$HF_HOME/vsibench}"
 DATA_ROOT="${DATA_ROOT:-$FAST_ROOT/data/vlm3r}"
 SPATIAL_FEATURES_ROOT="${SPATIAL_FEATURES_ROOT:-$DATA_ROOT}"
 SPATIAL_FEATURES_SUBDIR="${SPATIAL_FEATURES_SUBDIR:-spatial_features_points}"
+# Coordinate consistency rule:
+# - This eval must use the same CUT3R point-map coordinate source as training.
+# - point_maps_ref/pts3d_in_other_view = CUT3R reference/anchor-frame.
+# - point_maps_cam/pts3d_in_self_view = per-frame camera coordinates.
+# - Do not introduce eval-only aliases that change ref<->cam for a checkpoint.
+MODEL_GEO_ROPE_POINT_MAP_KEY="${MODEL_GEO_ROPE_POINT_MAP_KEY:-point_maps_ref}"
 USE_RUNTIME_CUT3R_GEOMETRY="${USE_RUNTIME_CUT3R_GEOMETRY:-False}"
 CHECK_SPATIAL_SIDECARS="${CHECK_SPATIAL_SIDECARS:-True}"
 CUT3R_WEIGHTS="${CUT3R_WEIGHTS:-$REPO_DIR/third_party/CUT3R/src/cut3r_512_dpt_4_64.pth}"
@@ -90,6 +96,7 @@ echo "VSI_MEDIA_ROOT=$VSI_MEDIA_ROOT"
 echo "DATA_ROOT=$DATA_ROOT"
 echo "SPATIAL_FEATURES_ROOT=$SPATIAL_FEATURES_ROOT"
 echo "SPATIAL_FEATURES_SUBDIR=$SPATIAL_FEATURES_SUBDIR"
+echo "MODEL_GEO_ROPE_POINT_MAP_KEY=$MODEL_GEO_ROPE_POINT_MAP_KEY"
 echo "USE_RUNTIME_CUT3R_GEOMETRY=$USE_RUNTIME_CUT3R_GEOMETRY"
 echo "CHECK_SPATIAL_SIDECARS=$CHECK_SPATIAL_SIDECARS"
 echo "CUT3R_WEIGHTS=$CUT3R_WEIGHTS"
@@ -312,9 +319,27 @@ prepare_runtime_pretrained() {
   done
 
   cp "$PRETRAINED_LOCAL/config.json" "$runtime_dir/config.json"
-  python - "$runtime_dir/config.json" "$SIGLIP_LOCAL" "$CUT3R_WEIGHTS" "$USE_RUNTIME_CUT3R_GEOMETRY" "$MODEL_USE_GEOMETRY_AWARE_PROJECTION" "$MODEL_SPATIAL_ENCODER_TYPE" "$MODEL_SPATIAL_TOWER" "$MODEL_GEOMETRY_POSITION_MODE" "$MODEL_NUM_GEOMETRY_PROJECTION_LAYERS" "$MODEL_GEOMETRY_PROJECTION_NUM_HEADS" "$MODEL_USE_AUXILIARY_GEOMETRY_HEAD" "$MODEL_USE_AUXILIARY_GEOMETRY_LOSS" "$MODEL_AUX_GEOMETRY_TARGETS" "$MODEL_LAMBDA_GEO" "$MODEL_GEOMETRY_LOSS_TYPE" "$MODEL_DETACH_GEOMETRY_TARGETS" "$MODEL_GEOMETRY_GATE_INIT" "$MODEL_USE_GEOMETRY_CONFIDENCE_MASK" "$MODEL_ALLOW_MISSING_GEOMETRY_TARGETS" "$MODEL_GEOMETRY_POSITION_MAX_ABS" "$MODEL_GEOMETRY_FIXED_SCENE_SCALE" "$MODEL_GEOMETRY_PROJECTION_DROPOUT" "$MODEL_FUSION_BLOCK" <<'PY'
+  python - "$runtime_dir/config.json" "$SIGLIP_LOCAL" "$CUT3R_WEIGHTS" "$USE_RUNTIME_CUT3R_GEOMETRY" "$MODEL_USE_GEOMETRY_AWARE_PROJECTION" "$MODEL_SPATIAL_ENCODER_TYPE" "$MODEL_SPATIAL_TOWER" "$MODEL_GEOMETRY_POSITION_MODE" "$MODEL_NUM_GEOMETRY_PROJECTION_LAYERS" "$MODEL_GEOMETRY_PROJECTION_NUM_HEADS" "$MODEL_USE_AUXILIARY_GEOMETRY_HEAD" "$MODEL_USE_AUXILIARY_GEOMETRY_LOSS" "$MODEL_AUX_GEOMETRY_TARGETS" "$MODEL_LAMBDA_GEO" "$MODEL_GEOMETRY_LOSS_TYPE" "$MODEL_DETACH_GEOMETRY_TARGETS" "$MODEL_GEOMETRY_GATE_INIT" "$MODEL_USE_GEOMETRY_CONFIDENCE_MASK" "$MODEL_ALLOW_MISSING_GEOMETRY_TARGETS" "$MODEL_GEOMETRY_POSITION_MAX_ABS" "$MODEL_GEOMETRY_FIXED_SCENE_SCALE" "$MODEL_GEOMETRY_PROJECTION_DROPOUT" "$MODEL_FUSION_BLOCK" "$MODEL_GEO_ROPE_POINT_MAP_KEY" <<'PY'
 import json
 import sys
+
+def normalize_point_map_key(value):
+    aliases = {
+        "ref": "point_maps_ref",
+        "reference": "point_maps_ref",
+        "anchor": "point_maps_ref",
+        "point_maps_ref": "point_maps_ref",
+        "pts3d_in_other_view": "point_maps_ref",
+        "cam": "point_maps_cam",
+        "camera": "point_maps_cam",
+        "self": "point_maps_cam",
+        "point_maps_cam": "point_maps_cam",
+        "pts3d_in_self_view": "point_maps_cam",
+    }
+    key = str(value).strip().lower()
+    if key not in aliases:
+        raise SystemExit(f"Unsupported MODEL_GEO_ROPE_POINT_MAP_KEY={value!r}")
+    return aliases[key]
 
 cfg_path = sys.argv[1]
 siglip_local = sys.argv[2]
@@ -339,9 +364,25 @@ geometry_position_max_abs = float(sys.argv[20])
 geometry_fixed_scene_scale = float(sys.argv[21])
 geometry_projection_dropout = float(sys.argv[22])
 fusion_block = sys.argv[23]
+geo_rope_point_map_key = normalize_point_map_key(sys.argv[24])
 
 with open(cfg_path, "r", encoding="utf-8") as f:
     cfg = json.load(f)
+
+training_point_map_key = (
+    cfg.get("geo_rope_training_point_map_key")
+    or cfg.get("geometry_training_point_map_key")
+    or cfg.get("geo_rope_point_map_key")
+    or cfg.get("geometry_point_map_key")
+)
+training_point_map_key = normalize_point_map_key(training_point_map_key) if training_point_map_key else None
+if training_point_map_key is None and not use_runtime_cut3r_geometry:
+    training_point_map_key = "point_maps_ref"
+if training_point_map_key and training_point_map_key != geo_rope_point_map_key:
+    raise SystemExit(
+        "GeoRoPE point-map coordinate mismatch: checkpoint training used "
+        f"{training_point_map_key}, eval requested {geo_rope_point_map_key}."
+    )
 
 cfg["mm_vision_tower"] = siglip_local
 if "vision_tower" in cfg:
@@ -363,6 +404,9 @@ cfg["allow_missing_geometry_targets"] = allow_missing_geometry_targets
 cfg["geometry_position_max_abs"] = geometry_position_max_abs
 cfg["geometry_fixed_scene_scale"] = geometry_fixed_scene_scale
 cfg["geometry_projection_dropout"] = geometry_projection_dropout
+cfg["geo_rope_training_point_map_key"] = training_point_map_key or geo_rope_point_map_key
+cfg["geo_rope_point_map_key"] = geo_rope_point_map_key
+cfg["geometry_point_map_key"] = geo_rope_point_map_key
 cfg["cut3r_weights_path"] = cut3r_weights_path
 cfg["weights_path"] = cut3r_weights_path
 
@@ -402,6 +446,7 @@ if [[ "$USE_RUNTIME_CUT3R_GEOMETRY" == "True" ]]; then
 else
   MODEL_ARGS+=",spatial_features_root=$SPATIAL_FEATURES_ROOT,spatial_features_subdir=$SPATIAL_FEATURES_SUBDIR"
 fi
+MODEL_ARGS+=",geo_rope_point_map_key=$MODEL_GEO_ROPE_POINT_MAP_KEY"
 
 echo "Running Leonardo offline evaluation"
 echo "PRETRAINED_RUNTIME=$PRETRAINED_RUNTIME"

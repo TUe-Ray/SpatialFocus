@@ -173,6 +173,10 @@ def run_cut3r_pointmaps(cut3r, pixel_values):
         if missing:
             raise RuntimeError(f"CUT3R head output missing keys: {missing}")
 
+        # Coordinate contract for GeoRoPE experiments:
+        # point_maps_cam is per-frame camera coordinates; point_maps_ref is the
+        # CUT3R reference/anchor-frame coordinates. Train/eval must use the
+        # same key for a checkpoint.
         point_maps_cam.append(res["pts3d_in_self_view"])
         point_maps_ref.append(res["pts3d_in_other_view"])
         camera_poses.append(res["camera_pose"])

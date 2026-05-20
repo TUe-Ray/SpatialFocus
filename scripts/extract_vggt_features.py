@@ -25,6 +25,11 @@ from llava.model.multimodal_spatial_encoder.vggt_spatial_encoder import (
 )
 from llava.utils import process_video_with_decord, rank0_print
 
+# GeoRoPE coordinate consistency rule:
+# If VGGT-derived geometry is used for training, evaluation for that checkpoint
+# must use the same VGGT geometry provider and coordinate convention. Do not
+# compare against eval runs that silently switch to CUT3R ref/cam point maps.
+
 try:
     from decord import VideoReader, cpu
 except Exception:
