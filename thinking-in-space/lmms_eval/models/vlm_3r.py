@@ -227,6 +227,14 @@ class Vlm3r(lmms):
         geometry_rope_log_stats: Union[bool, str] = False,
         geo_rope_point_map_key: str = None,
         force_geo_rope_gate_zero: Union[bool, str] = False,
+        probe_geometry_shuffle: Union[bool, str] = False,
+        probe_geometry_shuffle_mode: str = "cyclic_shift",
+        probe_geometry_shuffle_shift: Optional[Union[int, str]] = 1,
+        probe_geometry_shuffle_seed: Optional[Union[int, str]] = 0,
+        probe_cross_frame_window: Optional[Union[int, str]] = 0,
+        probe_cross_frame_include_self: Union[bool, str] = True,
+        probe_cross_frame_mode: str = "sliding_window",
+        probe_intra_frame_pos_shuffle: Union[bool, str] = False,
         spatial_features_root: str = None,
         spatial_features_subdir: str = "spatial_features_points",
         **kwargs,
@@ -274,6 +282,14 @@ class Vlm3r(lmms):
         self.geometry_rope_log_stats = _str_to_bool(geometry_rope_log_stats)
         self.geo_rope_point_map_key = _normalize_geo_rope_point_map_key(geo_rope_point_map_key)
         self.force_geo_rope_gate_zero = _str_to_bool(force_geo_rope_gate_zero)
+        self.probe_geometry_shuffle = _str_to_bool(probe_geometry_shuffle)
+        self.probe_geometry_shuffle_mode = probe_geometry_shuffle_mode or "cyclic_shift"
+        self.probe_geometry_shuffle_shift = int(probe_geometry_shuffle_shift or 0)
+        self.probe_geometry_shuffle_seed = int(probe_geometry_shuffle_seed or 0)
+        self.probe_cross_frame_window = int(probe_cross_frame_window or 0)
+        self.probe_cross_frame_include_self = _str_to_bool(probe_cross_frame_include_self)
+        self.probe_cross_frame_mode = probe_cross_frame_mode or "sliding_window"
+        self.probe_intra_frame_pos_shuffle = _str_to_bool(probe_intra_frame_pos_shuffle)
         self.spatial_features_root = Path(spatial_features_root) if spatial_features_root not in (None, "") else None
         self.spatial_features_subdir = spatial_features_subdir or "spatial_features_points"
 
@@ -306,6 +322,14 @@ class Vlm3r(lmms):
             if self.geo_rope_point_map_key is not None:
                 overwrite_config["geo_rope_point_map_key"] = self.geo_rope_point_map_key
                 overwrite_config["geometry_point_map_key"] = self.geo_rope_point_map_key
+            overwrite_config["probe_geometry_shuffle"] = self.probe_geometry_shuffle
+            overwrite_config["probe_geometry_shuffle_mode"] = self.probe_geometry_shuffle_mode
+            overwrite_config["probe_geometry_shuffle_shift"] = self.probe_geometry_shuffle_shift
+            overwrite_config["probe_geometry_shuffle_seed"] = self.probe_geometry_shuffle_seed
+            overwrite_config["probe_cross_frame_window"] = self.probe_cross_frame_window
+            overwrite_config["probe_cross_frame_include_self"] = self.probe_cross_frame_include_self
+            overwrite_config["probe_cross_frame_mode"] = self.probe_cross_frame_mode
+            overwrite_config["probe_intra_frame_pos_shuffle"] = self.probe_intra_frame_pos_shuffle
             # overwrite_config["attn_implementation"] = attn_implementation
 
             cfg_pretrained = AutoConfig.from_pretrained(self.pretrained)
@@ -389,6 +413,14 @@ class Vlm3r(lmms):
         self._config = self._model.config
         self.geo_rope_point_map_key = _validate_eval_point_map_key(self._config, self.geo_rope_point_map_key)
         setattr(self._config, "zero_spatial_features", self.zero_spatial_features)
+        setattr(self._config, "probe_geometry_shuffle", self.probe_geometry_shuffle)
+        setattr(self._config, "probe_geometry_shuffle_mode", self.probe_geometry_shuffle_mode)
+        setattr(self._config, "probe_geometry_shuffle_shift", self.probe_geometry_shuffle_shift)
+        setattr(self._config, "probe_geometry_shuffle_seed", self.probe_geometry_shuffle_seed)
+        setattr(self._config, "probe_cross_frame_window", self.probe_cross_frame_window)
+        setattr(self._config, "probe_cross_frame_include_self", self.probe_cross_frame_include_self)
+        setattr(self._config, "probe_cross_frame_mode", self.probe_cross_frame_mode)
+        setattr(self._config, "probe_intra_frame_pos_shuffle", self.probe_intra_frame_pos_shuffle)
         resolved_attn_implementation = getattr(self._config, "_attn_implementation", None)
         if resolved_attn_implementation is None:
             resolved_attn_implementation = getattr(self._config, "attn_implementation", None)
@@ -399,6 +431,20 @@ class Vlm3r(lmms):
         )
         eval_logger.info("[ABLATION][EVAL] zero_spatial_features={}", self.zero_spatial_features)
         eval_logger.info("[ABLATION][EVAL] force_geo_rope_gate_zero={}", self.force_geo_rope_gate_zero)
+        eval_logger.info(
+            "[PROBE][EVAL] geometry_shuffle={}, mode={}, shift={}, seed={}",
+            self.probe_geometry_shuffle,
+            self.probe_geometry_shuffle_mode,
+            self.probe_geometry_shuffle_shift,
+            self.probe_geometry_shuffle_seed,
+        )
+        eval_logger.info(
+            "[PROBE][EVAL] cross_frame_window={}, include_self={}, mode={}",
+            self.probe_cross_frame_window,
+            self.probe_cross_frame_include_self,
+            self.probe_cross_frame_mode,
+        )
+        eval_logger.info("[PROBE][EVAL] intra_frame_pos_shuffle={}", self.probe_intra_frame_pos_shuffle)
         eval_logger.info(
             "[ROPE][EVAL] geo_rope_point_map_key={}, training_point_map_key={}",
             getattr(self._config, "geo_rope_point_map_key", None),

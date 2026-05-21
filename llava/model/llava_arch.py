@@ -123,6 +123,144 @@ def _coalesce_point_maps(point_maps):
     raise TypeError(f"point_maps must be a tensor or list/tuple of tensors, got {type(point_maps)}")
 
 
+def _probe_log_index(config, attr_name, limit=5):
+    count = int(getattr(config, attr_name, 0))
+    setattr(config, attr_name, count + 1)
+    return count if count < int(limit) else None
+
+
+def _maybe_shuffle_geometry_point_maps(config, geometry_point_maps, training):
+    if training or not _as_bool_config(getattr(config, "probe_geometry_shuffle", False)):
+        return geometry_point_maps
+
+    frame_count = int(geometry_point_maps.shape[0])
+    log_index = _probe_log_index(config, "_probe_geometry_shuffle_log_count", limit=5)
+    if frame_count <= 1:
+        if log_index is not None:
+            rank0_print("[Probe G-Shuffle] Skip shuffle because F <= 1")
+        return geometry_point_maps
+
+    mode = str(getattr(config, "probe_geometry_shuffle_mode", "cyclic_shift"))
+    device = geometry_point_maps.device
+    frame_ids = torch.arange(frame_count, device=device)
+
+    if mode == "cyclic_shift":
+        shift = int(getattr(config, "probe_geometry_shuffle_shift", 1))
+        shift = shift % frame_count
+        if shift == 0:
+            shift = 1
+        perm = torch.roll(frame_ids, shifts=shift, dims=0)
+    elif mode == "reverse":
+        perm = torch.arange(frame_count - 1, -1, -1, device=device)
+    elif mode == "random_derange":
+        seed = int(getattr(config, "probe_geometry_shuffle_seed", 0))
+        generator_device = device if device.type == "cuda" else "cpu"
+        g = torch.Generator(device=generator_device)
+        g.manual_seed(seed)
+        perm = torch.randperm(frame_count, generator=g, device=device)
+        if torch.equal(perm, frame_ids):
+            perm = torch.roll(perm, shifts=1, dims=0)
+    else:
+        raise ValueError(f"Unknown probe_geometry_shuffle_mode: {mode}")
+
+    if log_index is not None:
+        rank0_print(
+            "[Probe G-Shuffle] "
+            f"sample_log_index={log_index}, mode={mode}, F={frame_count}, "
+            f"perm={perm.detach().cpu().tolist()}"
+        )
+    elif int(getattr(config, "_probe_geometry_shuffle_log_count", 0)) == 6:
+        rank0_print("[Probe G-Shuffle] Further per-sample permutation logs suppressed.")
+
+    return geometry_point_maps[perm]
+
+
+def _maybe_apply_cross_frame_geo_rope_probe(config, fusion_block, image_features, patch_tokens, pos_clip, pos_spatial, dtype, training):
+    if training:
+        return None
+
+    window = int(getattr(config, "probe_cross_frame_window", 0) or 0)
+    if window <= 0:
+        return None
+
+    mode = str(getattr(config, "probe_cross_frame_mode", "sliding_window"))
+    if mode != "sliding_window":
+        raise ValueError(f"Unknown probe_cross_frame_mode: {mode}")
+
+    include_self = _as_bool_config(getattr(config, "probe_cross_frame_include_self", True), default=True)
+    frame_count = int(image_features.shape[0])
+    original_n_spatial = int(patch_tokens.shape[1])
+    outputs = []
+    frame_windows = []
+
+    patch_tokens = patch_tokens.to(device=image_features.device, dtype=dtype)
+    pos_clip = pos_clip.to(device=image_features.device, dtype=image_features.dtype)
+    pos_spatial = pos_spatial.to(device=image_features.device, dtype=image_features.dtype)
+
+    for frame_idx in range(frame_count):
+        start = max(0, frame_idx - window)
+        end = min(frame_count, frame_idx + window + 1)
+        frame_ids = list(range(start, end))
+        if not include_self:
+            frame_ids = [idx for idx in frame_ids if idx != frame_idx]
+        if len(frame_ids) == 0:
+            frame_ids = [frame_idx]
+
+        q_tokens = image_features[frame_idx:frame_idx + 1]
+        q_pos = pos_clip[frame_idx:frame_idx + 1]
+        kv_tokens = patch_tokens[frame_ids].reshape(1, -1, patch_tokens.shape[-1])
+        kv_pos = pos_spatial[frame_ids].reshape(1, -1, pos_spatial.shape[-1])
+
+        out_f, _ = fusion_block(q_tokens, kv_tokens, q_pos, kv_pos)
+        outputs.append(out_f)
+        frame_windows.append((frame_idx, frame_ids, int(kv_tokens.shape[1])))
+
+    log_index = _probe_log_index(config, "_probe_cross_frame_log_count", limit=3)
+    if log_index is not None:
+        rank0_print(
+            "[Probe X-Frame] "
+            f"sample_log_index={log_index}, mode={mode}, window={window}, "
+            f"include_self={include_self}, F={frame_count}, "
+            f"original_N_spatial={original_n_spatial}"
+        )
+        max_logged_frames = min(len(frame_windows), 8)
+        for frame_idx, frame_ids, kv_count in frame_windows[:max_logged_frames]:
+            rank0_print(
+                "[Probe X-Frame] "
+                f"query_frame={frame_idx}, kv_frame_ids={frame_ids}, expanded_N_spatial={kv_count}"
+            )
+        if len(frame_windows) > max_logged_frames:
+            rank0_print("[Probe X-Frame] Additional query-frame window logs suppressed for this sample.")
+    elif int(getattr(config, "_probe_cross_frame_log_count", 0)) == 4:
+        rank0_print("[Probe X-Frame] Further per-sample window logs suppressed.")
+
+    return torch.cat(outputs, dim=0), None
+
+
+def _maybe_apply_intra_frame_pos_shuffle_probe(config, pos_clip, pos_spatial, training):
+    if training or not _as_bool_config(getattr(config, "probe_intra_frame_pos_shuffle", False)):
+        return pos_clip, pos_spatial
+
+    frame_count = int(pos_clip.shape[0])
+    log_index = _probe_log_index(config, "_probe_intra_frame_pos_shuffle_log_count", limit=3)
+    for frame_idx in range(frame_count):
+        perm_clip = torch.randperm(pos_clip.shape[1], device=pos_clip.device)
+        perm_spatial = torch.randperm(pos_spatial.shape[1], device=pos_spatial.device)
+        pos_clip[frame_idx] = pos_clip[frame_idx, perm_clip]
+        pos_spatial[frame_idx] = pos_spatial[frame_idx, perm_spatial]
+
+        if log_index is not None and frame_idx == 0:
+            rank0_print(
+                "[Probe Intra-Frame Pos Shuffle] "
+                f"sample_log_index={log_index}, F={frame_count}, "
+                f"N_clip={pos_clip.shape[1]}, N_spatial={pos_spatial.shape[1]}"
+            )
+    if log_index is None and int(getattr(config, "_probe_intra_frame_pos_shuffle_log_count", 0)) == 4:
+        rank0_print("[Probe Intra-Frame Pos Shuffle] Further per-sample logs suppressed.")
+
+    return pos_clip, pos_spatial
+
+
 def _normalize_point_map_key(key):
     if key in (None, ""):
         return None
@@ -1711,14 +1849,38 @@ class LlavaMetaForCausalLM(ABC):
                             f"image_features={tuple(image_features.shape)}"
                         )
 
+                    geometry_point_maps = _maybe_shuffle_geometry_point_maps(
+                        self.get_model().config,
+                        geometry_point_maps,
+                        self.training,
+                    )
                     pos_clip = pool_point_map_to_tokens(geometry_point_maps, image_features.shape[1])
                     pos_spatial = pool_point_map_to_tokens(geometry_point_maps, patch_tokens.shape[1])
-                    image_features, attn_weights = self.get_model().get_fusion_block()(
-                        image_features,
-                        patch_tokens.to(self.dtype),
-                        pos_clip.to(device=image_features.device, dtype=image_features.dtype),
-                        pos_spatial.to(device=image_features.device, dtype=image_features.dtype),
+                    pos_clip, pos_spatial = _maybe_apply_intra_frame_pos_shuffle_probe(
+                        self.get_model().config,
+                        pos_clip,
+                        pos_spatial,
+                        self.training,
                     )
+                    cross_frame_result = _maybe_apply_cross_frame_geo_rope_probe(
+                        self.get_model().config,
+                        self.get_model().get_fusion_block(),
+                        image_features,
+                        patch_tokens,
+                        pos_clip,
+                        pos_spatial,
+                        self.dtype,
+                        self.training,
+                    )
+                    if cross_frame_result is not None:
+                        image_features, attn_weights = cross_frame_result
+                    else:
+                        image_features, attn_weights = self.get_model().get_fusion_block()(
+                            image_features,
+                            patch_tokens.to(self.dtype),
+                            pos_clip.to(device=image_features.device, dtype=image_features.dtype),
+                            pos_spatial.to(device=image_features.device, dtype=image_features.dtype),
+                        )
                     image_features = self.get_model().mm_projector(image_features)
 
                 elif fusion_block_type == 'svf_cat_feat':

@@ -68,6 +68,14 @@ MODEL_GEO_ROPE_FUSION_GROUP_SPLIT="${MODEL_GEO_ROPE_FUSION_GROUP_SPLIT:-2,1,2}"
 MODEL_GEO_ROPE_FUSION_LOG_STATS="${MODEL_GEO_ROPE_FUSION_LOG_STATS:-False}"
 MODEL_GEO_ROPE_POINT_MAP_KEY="${MODEL_GEO_ROPE_POINT_MAP_KEY:-point_maps_ref}"
 FORCE_GEO_ROPE_GATE_ZERO="${FORCE_GEO_ROPE_GATE_ZERO:-False}"
+PROBE_GEOMETRY_SHUFFLE="${PROBE_GEOMETRY_SHUFFLE:-False}"
+PROBE_GEOMETRY_SHUFFLE_MODE="${PROBE_GEOMETRY_SHUFFLE_MODE:-cyclic_shift}"
+PROBE_GEOMETRY_SHUFFLE_SHIFT="${PROBE_GEOMETRY_SHUFFLE_SHIFT:-1}"
+PROBE_GEOMETRY_SHUFFLE_SEED="${PROBE_GEOMETRY_SHUFFLE_SEED:-0}"
+PROBE_CROSS_FRAME_WINDOW="${PROBE_CROSS_FRAME_WINDOW:-0}"
+PROBE_CROSS_FRAME_INCLUDE_SELF="${PROBE_CROSS_FRAME_INCLUDE_SELF:-True}"
+PROBE_CROSS_FRAME_MODE="${PROBE_CROSS_FRAME_MODE:-sliding_window}"
+PROBE_INTRA_FRAME_POS_SHUFFLE="${PROBE_INTRA_FRAME_POS_SHUFFLE:-False}"
 
 # Group split rules:
 # - svf_depth_geo_rope_fusion requires MODEL_GEO_ROPE_FUSION_GROUP_SPLIT="1"
@@ -112,6 +120,14 @@ echo "MODEL_GEO_ROPE_FUSION_GROUP_SPLIT=$MODEL_GEO_ROPE_FUSION_GROUP_SPLIT"
 echo "MODEL_GEO_ROPE_FUSION_LOG_STATS=$MODEL_GEO_ROPE_FUSION_LOG_STATS"
 echo "MODEL_GEO_ROPE_POINT_MAP_KEY=$MODEL_GEO_ROPE_POINT_MAP_KEY"
 echo "FORCE_GEO_ROPE_GATE_ZERO=$FORCE_GEO_ROPE_GATE_ZERO"
+echo "PROBE_GEOMETRY_SHUFFLE=$PROBE_GEOMETRY_SHUFFLE"
+echo "PROBE_GEOMETRY_SHUFFLE_MODE=$PROBE_GEOMETRY_SHUFFLE_MODE"
+echo "PROBE_GEOMETRY_SHUFFLE_SHIFT=$PROBE_GEOMETRY_SHUFFLE_SHIFT"
+echo "PROBE_GEOMETRY_SHUFFLE_SEED=$PROBE_GEOMETRY_SHUFFLE_SEED"
+echo "PROBE_CROSS_FRAME_WINDOW=$PROBE_CROSS_FRAME_WINDOW"
+echo "PROBE_CROSS_FRAME_INCLUDE_SELF=$PROBE_CROSS_FRAME_INCLUDE_SELF"
+echo "PROBE_CROSS_FRAME_MODE=$PROBE_CROSS_FRAME_MODE"
+echo "PROBE_INTRA_FRAME_POS_SHUFFLE=$PROBE_INTRA_FRAME_POS_SHUFFLE"
 echo "=================="
 
 for path in "$REPO_DIR" "$SUBMODULE_DIR" "$TASK_DIR" "$PRETRAINED_LOCAL" "$MODEL_BASE_LOCAL" "$SIGLIP_LOCAL"; do
@@ -303,9 +319,14 @@ prepare_runtime_pretrained() {
   done
 
   cp "$PRETRAINED_LOCAL/config.json" "$runtime_dir/config.json"
-  python - "$runtime_dir/config.json" "$SIGLIP_LOCAL" "$MODEL_SPATIAL_TOWER" "$MODEL_SPATIAL_FEATURE_DIM" "$MODEL_SPATIAL_TOWER_SELECT_FEATURE" "$MODEL_FUSION_BLOCK" "$MODEL_GEO_ROPE_FUSION_MODE" "$MODEL_GEO_ROPE_FUSION_MAX_DEPTH" "$MODEL_GEO_ROPE_FUSION_GROUP_SPLIT" "$MODEL_GEO_ROPE_FUSION_LOG_STATS" "$MODEL_GEO_ROPE_POINT_MAP_KEY" <<'PY'
+  python - "$runtime_dir/config.json" "$SIGLIP_LOCAL" "$MODEL_SPATIAL_TOWER" "$MODEL_SPATIAL_FEATURE_DIM" "$MODEL_SPATIAL_TOWER_SELECT_FEATURE" "$MODEL_FUSION_BLOCK" "$MODEL_GEO_ROPE_FUSION_MODE" "$MODEL_GEO_ROPE_FUSION_MAX_DEPTH" "$MODEL_GEO_ROPE_FUSION_GROUP_SPLIT" "$MODEL_GEO_ROPE_FUSION_LOG_STATS" "$MODEL_GEO_ROPE_POINT_MAP_KEY" "$PROBE_GEOMETRY_SHUFFLE" "$PROBE_GEOMETRY_SHUFFLE_MODE" "$PROBE_GEOMETRY_SHUFFLE_SHIFT" "$PROBE_GEOMETRY_SHUFFLE_SEED" "$PROBE_CROSS_FRAME_WINDOW" "$PROBE_CROSS_FRAME_INCLUDE_SELF" "$PROBE_CROSS_FRAME_MODE" "$PROBE_INTRA_FRAME_POS_SHUFFLE" <<'PY'
 import json
 import sys
+
+def str_to_bool(value):
+    if isinstance(value, str):
+        return value.lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
 
 def normalize_point_map_key(value):
     aliases = {
@@ -347,6 +368,14 @@ geo_rope_fusion_max_depth = float(sys.argv[8])
 geo_rope_fusion_group_split = sys.argv[9]
 geo_rope_fusion_log_stats = sys.argv[10].lower() in {"1", "true", "yes", "y", "on"}
 geo_rope_point_map_key = normalize_point_map_key(sys.argv[11])
+probe_geometry_shuffle = str_to_bool(sys.argv[12])
+probe_geometry_shuffle_mode = sys.argv[13]
+probe_geometry_shuffle_shift = int(sys.argv[14])
+probe_geometry_shuffle_seed = int(sys.argv[15])
+probe_cross_frame_window = int(sys.argv[16])
+probe_cross_frame_include_self = str_to_bool(sys.argv[17])
+probe_cross_frame_mode = sys.argv[18]
+probe_intra_frame_pos_shuffle = str_to_bool(sys.argv[19])
 
 with open(cfg_path, "r", encoding="utf-8") as f:
     cfg = json.load(f)
@@ -376,6 +405,14 @@ cfg["geometry_rope_log_stats"] = geo_rope_fusion_log_stats
 cfg["geo_rope_training_point_map_key"] = training_point_map_key or geo_rope_point_map_key
 cfg["geo_rope_point_map_key"] = geo_rope_point_map_key
 cfg["geometry_point_map_key"] = geo_rope_point_map_key
+cfg["probe_geometry_shuffle"] = probe_geometry_shuffle
+cfg["probe_geometry_shuffle_mode"] = probe_geometry_shuffle_mode
+cfg["probe_geometry_shuffle_shift"] = probe_geometry_shuffle_shift
+cfg["probe_geometry_shuffle_seed"] = probe_geometry_shuffle_seed
+cfg["probe_cross_frame_window"] = probe_cross_frame_window
+cfg["probe_cross_frame_include_self"] = probe_cross_frame_include_self
+cfg["probe_cross_frame_mode"] = probe_cross_frame_mode
+cfg["probe_intra_frame_pos_shuffle"] = probe_intra_frame_pos_shuffle
 
 with open(cfg_path, "w", encoding="utf-8") as f:
     json.dump(cfg, f, indent=2)
@@ -398,6 +435,14 @@ MODEL_ARGS+=",spatial_features_root=$SPATIAL_FEATURES_ROOT,spatial_features_subd
 MODEL_ARGS+=",geometry_rope_mode=$MODEL_GEO_ROPE_FUSION_MODE,geometry_rope_max_depth=$MODEL_GEO_ROPE_FUSION_MAX_DEPTH,geometry_rope_log_stats=$MODEL_GEO_ROPE_FUSION_LOG_STATS"
 MODEL_ARGS+=",geo_rope_point_map_key=$MODEL_GEO_ROPE_POINT_MAP_KEY"
 MODEL_ARGS+=",force_geo_rope_gate_zero=$FORCE_GEO_ROPE_GATE_ZERO"
+MODEL_ARGS+=",probe_geometry_shuffle=$PROBE_GEOMETRY_SHUFFLE"
+MODEL_ARGS+=",probe_geometry_shuffle_mode=$PROBE_GEOMETRY_SHUFFLE_MODE"
+MODEL_ARGS+=",probe_geometry_shuffle_shift=$PROBE_GEOMETRY_SHUFFLE_SHIFT"
+MODEL_ARGS+=",probe_geometry_shuffle_seed=$PROBE_GEOMETRY_SHUFFLE_SEED"
+MODEL_ARGS+=",probe_cross_frame_window=$PROBE_CROSS_FRAME_WINDOW"
+MODEL_ARGS+=",probe_cross_frame_include_self=$PROBE_CROSS_FRAME_INCLUDE_SELF"
+MODEL_ARGS+=",probe_cross_frame_mode=$PROBE_CROSS_FRAME_MODE"
+MODEL_ARGS+=",probe_intra_frame_pos_shuffle=$PROBE_INTRA_FRAME_POS_SHUFFLE"
 
 echo "Running Leonardo offline evaluation"
 echo "PRETRAINED_RUNTIME=$PRETRAINED_RUNTIME"
