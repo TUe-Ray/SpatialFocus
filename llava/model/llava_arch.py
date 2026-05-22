@@ -1837,11 +1837,28 @@ class LlavaMetaForCausalLM(ABC):
                                     geometry_point_maps = _coalesce_point_maps(loaded_spatial_features[point_key])
                                     break
                     if geometry_point_maps is None:
+                        loaded_keys = (
+                            sorted(loaded_spatial_features.keys())
+                            if isinstance(loaded_spatial_features, dict)
+                            else None
+                        )
+                        requested_point_map_key = (
+                            getattr(self.get_model().config, "geo_rope_point_map_key", None)
+                            or getattr(self.get_model().config, "geometry_point_map_key", None)
+                        )
                         raise RuntimeError(
                             f"{fusion_block_type} requires point_maps from CUT3R or "
                             "geometry_spatial_features decoded from PI3X. Expected one of: "
                             "geometry_spatial_features, point_maps, point_maps_ref, "
-                            "point_maps_cam, pts3d_in_other_view, pts3d_in_self_view."
+                            "point_maps_cam, pts3d_in_other_view, pts3d_in_self_view. "
+                            f"Debug: requested_point_map_key={requested_point_map_key!r}, "
+                            f"spatial_features_type={type(spatial_features).__name__}, "
+                            f"loaded_spatial_features_type={type(loaded_spatial_features).__name__}, "
+                            f"loaded_spatial_features_keys={loaded_keys}, "
+                            f"point_maps_type={type(point_maps).__name__}, "
+                            f"geometry_spatial_features_type={type(geometry_spatial_features).__name__}, "
+                            f"modalities={locals().get('modalities', None)}, "
+                            f"split_sizes={split_sizes}."
                         )
 
                     if geometry_point_maps.shape[0] != image_features.shape[0]:
