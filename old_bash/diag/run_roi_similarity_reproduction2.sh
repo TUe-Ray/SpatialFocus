@@ -29,11 +29,14 @@ SPATIAL_FEATURE_DIR="${SPATIAL_FEATURE_DIR:-$DATA_ROOT/spatial_features}"
 RUN_NAME="${RUN_NAME:-reproduction2_$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_DIR="${OUTPUT_DIR:-/leonardo_scratch/fast/EUHPC_D32_006/diag/roi_similarity/$RUN_NAME}"
 NUM_SAMPLES="${NUM_SAMPLES:-3}"
+SAMPLE_OFFSET="${SAMPLE_OFFSET:-0}"
+MAX_VISUALIZED_SAMPLES="${MAX_VISUALIZED_SAMPLES:-$NUM_SAMPLES}"
 ANCHOR_MODE="${ANCHOR_MODE:-center}"
 SAMPLE_IDS="${SAMPLE_IDS:-}"
 FRAMES="${FRAMES:-}"
 EXCLUDE_REPRESENTATIONS="${EXCLUDE_REPRESENTATIONS:-}"
 LLM_LAYERS="${LLM_LAYERS:-1,4}"
+FRAMES_UPBOUND="${FRAMES_UPBOUND:-32}"
 
 mkdir -p "$REPO_DIR/logs/diag" "$OUTPUT_DIR"
 cd "$REPO_DIR"
@@ -75,11 +78,14 @@ echo "DATA_ROOT=$DATA_ROOT"
 echo "SPATIAL_FEATURE_DIR=$SPATIAL_FEATURE_DIR"
 echo "OUTPUT_DIR=$OUTPUT_DIR"
 echo "NUM_SAMPLES=$NUM_SAMPLES"
+echo "SAMPLE_OFFSET=$SAMPLE_OFFSET"
+echo "MAX_VISUALIZED_SAMPLES=$MAX_VISUALIZED_SAMPLES"
 echo "ANCHOR_MODE=$ANCHOR_MODE"
 echo "SAMPLE_IDS=$SAMPLE_IDS"
 echo "FRAMES=$FRAMES"
 echo "EXCLUDE_REPRESENTATIONS=$EXCLUDE_REPRESENTATIONS"
 echo "LLM_LAYERS=$LLM_LAYERS"
+echo "FRAMES_UPBOUND=$FRAMES_UPBOUND"
 
 nvidia-smi || true
 python -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'available', torch.cuda.is_available())"
@@ -95,6 +101,7 @@ python scripts/analysis/analyze_roi_similarity_maps.py \
   --spatial_feature_dir "$SPATIAL_FEATURE_DIR" \
   --output_dir "$OUTPUT_DIR" \
   --num_samples "$NUM_SAMPLES" \
+  --sample_offset "$SAMPLE_OFFSET" \
   --sample_ids "$SAMPLE_IDS" \
   --frames "$FRAMES" \
   --anchor_mode "$ANCHOR_MODE" \
@@ -102,8 +109,9 @@ python scripts/analysis/analyze_roi_similarity_maps.py \
   --llm_layers "$LLM_LAYERS" \
   --include_aligned_projection True \
   --save_raw True \
+  --max_visualized_samples "$MAX_VISUALIZED_SAMPLES" \
   --normalize_mode global_per_figure \
-  --frames_upbound 32 \
+  --frames_upbound "$FRAMES_UPBOUND" \
   --mm_spatial_pool_stride 2 \
   --pool_mode bilinear \
   --attn_implementation sdpa \

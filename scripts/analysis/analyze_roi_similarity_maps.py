@@ -14,6 +14,7 @@ import gc
 import inspect
 import json
 import math
+import os
 import random
 import sys
 from collections import defaultdict
@@ -99,7 +100,7 @@ def patch_runtime_checkpoint(
     if not (src / "config.json").exists():
         return checkpoint
     runtime_root = runtime_root or (REPO_ROOT / ".offline_runtime")
-    dst = runtime_root / f"{safe_id(src.name)}_roi_runtime"
+    dst = runtime_root / f"{safe_id(src.name)}_roi_runtime_{os.getpid()}"
     dst.mkdir(parents=True, exist_ok=True)
     for child in src.iterdir():
         target = dst / child.name
@@ -293,6 +294,7 @@ def select_samples(dataset: Any, collator: Any, args: argparse.Namespace) -> tup
     requested_ids = parse_str_list(args.sample_ids)
     selected = []
     skipped = []
+    matched = 0
     for idx, raw_item in enumerate(dataset.list_data_dict):
         sid = sample_identifier(raw_item, idx)
         category = extract_category(raw_item)
@@ -300,6 +302,10 @@ def select_samples(dataset: Any, collator: Any, args: argparse.Namespace) -> tup
             continue
         if categories is not None and category not in categories:
             continue
+        if matched < args.sample_offset:
+            matched += 1
+            continue
+        matched += 1
         try:
             item = dataset[idx]
             if not ensure_spatial_features(item, raw_item, args, sid):
@@ -676,6 +682,7 @@ def analyze_sample(
     batch: dict[str, Any],
     raw_item: dict[str, Any],
     sample_idx: int,
+    visualize: bool,
     device: torch.device,
     dtype: torch.dtype,
 ) -> tuple[list[dict[str, Any]], list[str], int]:
@@ -764,7 +771,8 @@ def analyze_sample(
             pool_records.add(f"{name}:{pool_used.get(name, 'metadata_direct')}")
 
         rgb = tensor_to_uint8_image(video_tensor[local_frame_idx], image_processor)
-        save_rgb_frame(frames_dir / f"{safe_id(sample_id)}_frame{frame_id}.png", rgb)
+        if visualize:
+            save_rgb_frame(frames_dir / f"{safe_id(sample_id)}_frame{frame_id}.png", rgb)
         for anchor in anchors:
             raw_maps = {
                 name: similarity_map(value, anchor["token_index"], grid_hw)
@@ -773,9 +781,10 @@ def analyze_sample(
             vis_maps = normalized_for_vis(raw_maps, args.normalize_mode)
             stem = f"{safe_id(sample_id)}_frame{frame_id}_anchor{anchor['anchor_id']}"
             figure_path = figures_dir / f"{stem}.png"
-            save_figure(figure_path, rgb, anchor, raw_maps, args.normalize_mode)
-            save_rgb_frame(frames_dir / f"{stem}_rgb_anchor.png", rgb, anchor)
-            figure_count += 1
+            if visualize:
+                save_figure(figure_path, rgb, anchor, raw_maps, args.normalize_mode)
+                save_rgb_frame(frames_dir / f"{stem}_rgb_anchor.png", rgb, anchor)
+                figure_count += 1
 
             if args.save_raw:
                 torch.save(
@@ -788,8 +797,12 @@ def analyze_sample(
                 )
 
             teacher_map = raw_maps["CUT3R teacher"]
+            siglip_map = raw_maps.get("SigLIP")
             for name, sim in raw_maps.items():
                 pearson, spearman = corr_values(sim, teacher_map)
+                siglip_pearson = siglip_spearman = float("nan")
+                if siglip_map is not None:
+                    siglip_pearson, siglip_spearman = corr_values(sim, siglip_map)
                 rows.append({
                     "sample_id": sample_id,
                     "category": extract_category(raw_item),
@@ -798,6 +811,13 @@ def analyze_sample(
                     "representation": name,
                     "pearson_with_cut3r": pearson,
                     "spearman_with_cut3r": spearman,
+                    "pearson_with_siglip_selected_m2": siglip_pearson,
+                    "spearman_with_siglip_selected_m2": siglip_spearman,
+                    "spearman_cut3r_minus_siglip": (
+                        spearman - siglip_spearman
+                        if not math.isnan(spearman) and not math.isnan(siglip_spearman)
+                        else float("nan")
+                    ),
                     "mean_similarity": float(sim.float().mean().item()),
                     "std_similarity": float(sim.float().std(unbiased=False).item()),
                 })
@@ -856,6 +876,9 @@ def write_summary(output_dir: Path, rows: list[dict[str, Any]]) -> dict[str, flo
         "representation",
         "pearson_with_cut3r",
         "spearman_with_cut3r",
+        "pearson_with_siglip_selected_m2",
+        "spearman_with_siglip_selected_m2",
+        "spearman_cut3r_minus_siglip",
         "mean_similarity",
         "std_similarity",
     ]
@@ -879,12 +902,14 @@ def main() -> None:
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--num_samples", type=int, required=True)
     parser.add_argument("--sample_ids", default=None)
+    parser.add_argument("--sample_offset", type=int, default=0)
     parser.add_argument("--categories", default=None)
     parser.add_argument("--frames", default=None)
     parser.add_argument("--anchor_mode", choices=["manual", "center", "object", "grid"], default="center")
     parser.add_argument("--anchor_coords", default=None)
     parser.add_argument("--include_aligned_projection", type=str2bool, default=False)
     parser.add_argument("--save_raw", type=str2bool, default=True)
+    parser.add_argument("--max_visualized_samples", type=int, default=-1)
     parser.add_argument("--normalize_mode", choices=["global_per_figure", "per_map"], default="global_per_figure")
     parser.add_argument("--exclude_representations", default=None)
     parser.add_argument(
@@ -940,10 +965,11 @@ def main() -> None:
 
     all_rows: list[dict[str, Any]] = []
     figure_count = 0
-    for sample_idx, item, batch, raw_item in samples:
+    for selected_ordinal, (sample_idx, item, batch, raw_item) in enumerate(samples):
         try:
+            visualize = args.max_visualized_samples < 0 or selected_ordinal < args.max_visualized_samples
             rows, sample_skips, count = analyze_sample(
-                args, model, image_processor, item, batch, raw_item, sample_idx, device, dtype
+                args, model, image_processor, item, batch, raw_item, sample_idx, visualize, device, dtype
             )
             all_rows.extend(rows)
             skipped.extend(sample_skips)

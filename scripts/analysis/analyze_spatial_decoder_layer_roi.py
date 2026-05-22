@@ -125,6 +125,7 @@ def select_samples(raw_items: list[dict[str, Any]], args: argparse.Namespace):
     requested_ids = parse_str_list(args.sample_ids)
     selected = []
     skipped = []
+    matched = 0
     for idx, raw_item in enumerate(raw_items):
         sid = sample_identifier(raw_item, idx)
         category = extract_category(raw_item)
@@ -132,6 +133,10 @@ def select_samples(raw_items: list[dict[str, Any]], args: argparse.Namespace):
             continue
         if categories is not None and category not in categories:
             continue
+        if matched < args.sample_offset:
+            matched += 1
+            continue
+        matched += 1
         try:
             if "video" not in raw_item:
                 skipped.append(f"{sid}: no video field")
@@ -192,6 +197,7 @@ def run_cut3r_decoder_layers(
     cut3r: torch.nn.Module,
     pixel_values: torch.Tensor,
     layer_indices: list[int],
+    head_layer_indices: list[int],
 ) -> dict[str, torch.Tensor]:
     from llava.model.multimodal_spatial_encoder.cut3r_spatial_encoder import prepare_input
 
@@ -203,6 +209,7 @@ def run_cut3r_decoder_layers(
     init_state_feat = state_feat.clone()
     init_mem = mem.clone()
     outputs = {layer: [] for layer in layer_indices}
+    head_outputs = {layer: [] for layer in head_layer_indices}
 
     for i in range(len(views)):
         feat_i = feat[i].to(pixel_values.dtype)
@@ -232,7 +239,18 @@ def run_cut3r_decoder_layers(
             update=views[i].get("update", None),
         )
         for layer in layer_indices:
-            outputs[layer].append(dec[layer][:, 1:].detach().float().cpu())
+            tokens = dec[layer]
+            if tokens.shape[1] == feat_i.shape[1] + 1:
+                tokens = tokens[:, 1:]
+            outputs[layer].append(tokens.detach().float().cpu())
+        for layer in head_layer_indices:
+            if layer == 0:
+                tokens = feat_i
+            else:
+                tokens = dec[layer]
+                if tokens.shape[1] == feat_i.shape[1] + 1:
+                    tokens = tokens[:, 1:]
+            head_outputs[layer].append(tokens.detach().float().cpu())
 
         if global_img_feat_i is not None:
             out_pose_feat_i = dec[-1][:, 0:1]
@@ -255,6 +273,8 @@ def run_cut3r_decoder_layers(
     for layer in layer_indices:
         # [F, B=1, T, D] -> [F, T, D]
         named[f"CUT3R dec {layer}"] = torch.cat(outputs[layer], dim=0)
+    for layer in head_layer_indices:
+        named[f"CUT3R head {layer}"] = torch.cat(head_outputs[layer], dim=0)
     return named
 
 
@@ -379,6 +399,7 @@ def run_vggt_aggregator_layers(
     vggt: torch.nn.Module,
     pixel_values: torch.Tensor,
     layer_indices: list[int],
+    dpt_layer_indices: list[int],
     image_size: int,
 ) -> dict[str, torch.Tensor]:
     views = prepare_vggt_input(pixel_values, image_size)
@@ -390,6 +411,10 @@ def run_vggt_aggregator_layers(
         # [B=1, F, camera/register/patch tokens, D] -> [F, patch tokens, D]
         tokens = aggregated_tokens_list[idx][0, :, patch_start_idx:, :].detach().float().cpu()
         named[f"VGGT agg {layer}"] = tokens
+    dpt_resolved = resolve_layer_indices(dpt_layer_indices, len(aggregated_tokens_list))
+    for layer, idx in dpt_resolved.items():
+        tokens = aggregated_tokens_list[idx][0, :, patch_start_idx:, :].detach().float().cpu()
+        named[f"VGGT DPT input {layer}"] = tokens
     return named
 
 
@@ -508,11 +533,15 @@ def analyze_sample(
         if siglip_ref is not None:
             layer_features["SigLIP selected (-2)"] = siglip_ref(pixel_values).detach().float().cpu()
         if cut3r is not None:
-            layer_features.update(run_cut3r_decoder_layers(cut3r, pixel_values, args.decoder_layers))
+            layer_features.update(
+                run_cut3r_decoder_layers(cut3r, pixel_values, args.decoder_layers, args.cut3r_head_layers)
+            )
         if pi3 is not None:
             layer_features.update(run_pi3_decoder_layers(pi3, pixel_values, args.decoder_layers, args.pi3x_input_size))
         if vggt is not None:
-            layer_features.update(run_vggt_aggregator_layers(vggt, pixel_values, args.vggt_layers, args.vggt_input_size))
+            layer_features.update(
+                run_vggt_aggregator_layers(vggt, pixel_values, args.vggt_layers, args.vggt_dpt_layers, args.vggt_input_size)
+            )
 
     rows = []
     figures_dir = Path(args.output_dir) / "figures"
@@ -707,8 +736,11 @@ def main() -> None:
     parser.add_argument("--save_individual_figures", type=str2bool, default=True)
     parser.add_argument("--max_visualized_samples", type=int, default=-1)
     parser.add_argument("--include_siglip_reference", type=str2bool, default=True)
-    parser.add_argument("--decoder_layers", type=parse_int_list, default="-3,-2,-1")
-    parser.add_argument("--vggt_layers", type=parse_int_list, default="-8,-6,-4,-2,-1")
+    parser.add_argument("--sample_offset", type=int, default=0)
+    parser.add_argument("--decoder_layers", type=parse_int_list, default=None)
+    parser.add_argument("--cut3r_head_layers", type=parse_int_list, default=None)
+    parser.add_argument("--vggt_layers", type=parse_int_list, default=None)
+    parser.add_argument("--vggt_dpt_layers", type=parse_int_list, default=None)
     parser.add_argument("--target_grid", default="14x14")
     parser.add_argument("--pool_mode", choices=["bilinear", "average", "max"], default="bilinear")
 
@@ -739,8 +771,12 @@ def main() -> None:
         raise RuntimeError("matplotlib is required for this script.")
     if args.decoder_layers is None:
         args.decoder_layers = [-3, -2, -1]
+    if args.cut3r_head_layers is None:
+        args.cut3r_head_layers = []
     if args.vggt_layers is None:
         args.vggt_layers = [-8, -6, -4, -2, -1]
+    if args.vggt_dpt_layers is None:
+        args.vggt_dpt_layers = [4, 11, 17, 23]
 
     random.seed(args.seed)
     np.random.seed(args.seed)
