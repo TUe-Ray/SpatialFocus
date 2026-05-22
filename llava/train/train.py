@@ -2403,20 +2403,20 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
 
     if model_args.fusion_block is not None:
         overwrite_config["fusion_block"] = model_args.fusion_block
-    if model_args.geo_rope_fusion_mode is not None:
-        overwrite_config["geo_rope_fusion_mode"] = model_args.geo_rope_fusion_mode
-    if model_args.geo_rope_fusion_max_depth is not None:
-        overwrite_config["geo_rope_fusion_max_depth"] = model_args.geo_rope_fusion_max_depth
-        if model_args.geo_rope_fusion_group_split is not None:
-            overwrite_config["geo_rope_fusion_group_split"] = model_args.geo_rope_fusion_group_split
         overwrite_config["geo_rope_fusion_log_stats"] = model_args.geo_rope_fusion_log_stats
         overwrite_config["geo_rope_fusion_log_attention_stats"] = model_args.geo_rope_fusion_log_attention_stats
         if model_args.geo_rope_gate_type is not None:
             overwrite_config["geo_rope_gate_type"] = model_args.geo_rope_gate_type
         overwrite_config["geo_rope_head_gate_init"] = model_args.geo_rope_head_gate_init
-        if model_args.geo_rope_point_map_key is not None:
-            overwrite_config["geo_rope_point_map_key"] = model_args.geo_rope_point_map_key
-            overwrite_config["geometry_point_map_key"] = model_args.geo_rope_point_map_key
+    if model_args.geo_rope_fusion_mode is not None:
+        overwrite_config["geo_rope_fusion_mode"] = model_args.geo_rope_fusion_mode
+    if model_args.geo_rope_fusion_max_depth is not None:
+        overwrite_config["geo_rope_fusion_max_depth"] = model_args.geo_rope_fusion_max_depth
+    if model_args.geo_rope_fusion_group_split is not None:
+        overwrite_config["geo_rope_fusion_group_split"] = model_args.geo_rope_fusion_group_split
+    if model_args.geo_rope_point_map_key is not None:
+        overwrite_config["geo_rope_point_map_key"] = model_args.geo_rope_point_map_key
+        overwrite_config["geometry_point_map_key"] = model_args.geo_rope_point_map_key
     if model_args.use_geometry_aware_projection:
         overwrite_config["use_geometry_aware_projection"] = model_args.use_geometry_aware_projection
         overwrite_config["spatial_encoder_type"] = model_args.spatial_encoder_type
