@@ -481,7 +481,8 @@ class LlavaMetaModel:
                 return "CrossAttentionFusion"
             if fusion_block_type == "svf_patch_only_geo_rope_eval":
                 return "PostHocGeoRoPEPatchCrossAttention"
-            if fusion_block_type in ["svf_geo_rope_fusion", "svf_depth_geo_rope_fusion", "svf_xyz_geo_rope_fusion", "svf_spherical_geo_rope_fusion",
+            if fusion_block_type in ["svf_geo_rope_fusion", "svf_geo_rope_fusion_forced", "svf_geo_rope_fusion_per_head_gate",
+                                      "svf_depth_geo_rope_fusion", "svf_xyz_geo_rope_fusion", "svf_spherical_geo_rope_fusion",
                                       "svf_depth_rope", "svf_xyz_rope", "svf_spherical_rope"]:
                 return "GeoRoPEFusionCrossAttention"
             if fusion_block_type == "svf_patch_cam_concat":
@@ -1777,7 +1778,8 @@ class LlavaMetaForCausalLM(ABC):
                     image_features = self.get_model().mm_projector(image_features)
 
                 elif fusion_block_type in ['svf_patch_only_geo_rope_eval',
-                                           'svf_geo_rope_fusion', 'svf_depth_geo_rope_fusion', 'svf_xyz_geo_rope_fusion', 'svf_spherical_geo_rope_fusion',
+                                           'svf_geo_rope_fusion', 'svf_geo_rope_fusion_forced', 'svf_geo_rope_fusion_per_head_gate',
+                                           'svf_depth_geo_rope_fusion', 'svf_xyz_geo_rope_fusion', 'svf_spherical_geo_rope_fusion',
                                            'svf_depth_rope', 'svf_xyz_rope', 'svf_spherical_rope']:
                     geometry_point_maps = None
                     if geometry_spatial_features is not None:

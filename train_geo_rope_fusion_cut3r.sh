@@ -14,7 +14,7 @@
 #SBATCH --exclusive
 
 SUFFIX="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
-NOTE="CUT3R GeoRoPE Fusion: svf_geo_rope_fusion with point-map-derived spherical positions, 100% training data"
+NOTE="${NOTE:-CUT3R GeoRoPE Fusion: svf_geo_rope_fusion with point-map-derived spherical positions, 100% training data}"
 
 TRAIN_DATA_PERCENTAGE="100"
 
@@ -22,11 +22,16 @@ MODEL_FUSION_BLOCK="${MODEL_FUSION_BLOCK:-svf_geo_rope_fusion}"
 # Fusion options for this GeoRoPE Fusion experiment:
 # - svf_patch_only
 # - svf_geo_rope_fusion
+# - svf_geo_rope_fusion_forced
+# - svf_geo_rope_fusion_per_head_gate
 # - svf_depth_geo_rope_fusion / svf_xyz_geo_rope_fusion / svf_spherical_geo_rope_fusion
 MODEL_GEO_ROPE_FUSION_MODE="${MODEL_GEO_ROPE_FUSION_MODE:-spherical}"
 MODEL_GEO_ROPE_FUSION_MAX_DEPTH="${MODEL_GEO_ROPE_FUSION_MAX_DEPTH:-10.0}"
 MODEL_GEO_ROPE_FUSION_GROUP_SPLIT="${MODEL_GEO_ROPE_FUSION_GROUP_SPLIT:-2,1,2}"
 MODEL_GEO_ROPE_FUSION_LOG_STATS="${MODEL_GEO_ROPE_FUSION_LOG_STATS:-False}"
+MODEL_GEO_ROPE_FUSION_LOG_ATTENTION_STATS="${MODEL_GEO_ROPE_FUSION_LOG_ATTENTION_STATS:-False}"
+MODEL_GEO_ROPE_GATE_TYPE="${MODEL_GEO_ROPE_GATE_TYPE:-}"
+MODEL_GEO_ROPE_HEAD_GATE_INIT="${MODEL_GEO_ROPE_HEAD_GATE_INIT:-0.99}"
 MODEL_GEO_ROPE_POINT_MAP_KEY="${MODEL_GEO_ROPE_POINT_MAP_KEY:-point_maps_ref}"
 # Group split rules:
 # - svf_depth_geo_rope_fusion requires MODEL_GEO_ROPE_FUSION_GROUP_SPLIT="1"
@@ -315,6 +320,8 @@ esac
 VALID_FUSION_BLOCKS=(
     "svf_patch_only"
     "svf_geo_rope_fusion"
+    "svf_geo_rope_fusion_forced"
+    "svf_geo_rope_fusion_per_head_gate"
     "svf_depth_geo_rope_fusion"
     "svf_xyz_geo_rope_fusion"
     "svf_spherical_geo_rope_fusion"
@@ -356,6 +363,12 @@ case "$MODEL_FUSION_BLOCK" in
     svf_geo_rope_fusion)
         echo "[FUSION] svf_geo_rope_fusion: GeoRoPE Fusion cross-attention, mode=$MODEL_GEO_ROPE_FUSION_MODE, split=$MODEL_GEO_ROPE_FUSION_GROUP_SPLIT"
         ;;
+    svf_geo_rope_fusion_forced)
+        echo "[FUSION] svf_geo_rope_fusion_forced: forced full GeoRoPE Q/K, mode=$MODEL_GEO_ROPE_FUSION_MODE, split=$MODEL_GEO_ROPE_FUSION_GROUP_SPLIT"
+        ;;
+    svf_geo_rope_fusion_per_head_gate)
+        echo "[FUSION] svf_geo_rope_fusion_per_head_gate: shared sigmoid per-head GeoRoPE gate, init=$MODEL_GEO_ROPE_HEAD_GATE_INIT, mode=$MODEL_GEO_ROPE_FUSION_MODE, split=$MODEL_GEO_ROPE_FUSION_GROUP_SPLIT"
+        ;;
     svf_depth_geo_rope_fusion)
         echo "[FUSION] svf_depth_geo_rope_fusion: GeoRoPE Fusion cross-attention, mode=depth, split=$MODEL_GEO_ROPE_FUSION_GROUP_SPLIT"
         ;;
@@ -380,6 +393,8 @@ declare -A MODEL_ARGS=(
     [geo_rope_fusion_max_depth]="$MODEL_GEO_ROPE_FUSION_MAX_DEPTH"
     [geo_rope_fusion_group_split]="$MODEL_GEO_ROPE_FUSION_GROUP_SPLIT"
     [geo_rope_fusion_log_stats]="$MODEL_GEO_ROPE_FUSION_LOG_STATS"
+    [geo_rope_fusion_log_attention_stats]="$MODEL_GEO_ROPE_FUSION_LOG_ATTENTION_STATS"
+    [geo_rope_head_gate_init]="$MODEL_GEO_ROPE_HEAD_GATE_INIT"
     [geo_rope_point_map_key]="$MODEL_GEO_ROPE_POINT_MAP_KEY"
     [tune_spatial_tower]="$MODEL_TUNE_SPATIAL_TOWER"
     [tune_fusion_block]="$MODEL_TUNE_FUSION_BLOCK"
@@ -406,6 +421,9 @@ declare -A MODEL_ARGS=(
     [force_sample]="$MODEL_FORCE_SAMPLE"
     [mm_spatial_pool_stride]="$MODEL_MM_SPATIAL_POOL_STRIDE"
 )
+if [[ -n "$MODEL_GEO_ROPE_GATE_TYPE" ]]; then
+    MODEL_ARGS[geo_rope_gate_type]="$MODEL_GEO_ROPE_GATE_TYPE"
+fi
 
 declare -A DATA_ARGS=(
     [data_path]="$DATA_PATH_YAML"

@@ -1,4 +1,5 @@
 import os
+import json
 import torch
 import torch.nn as nn
 import datetime
@@ -341,6 +342,71 @@ class LLaVATrainer(Trainer):
                 return metrics
         return None
 
+    @staticmethod
+    def _jsonable(value):
+        if isinstance(value, torch.Tensor):
+            if value.numel() == 1:
+                return float(value.detach().float().item())
+            return value.detach().float().cpu().tolist()
+        if isinstance(value, dict):
+            return {str(k): LLaVATrainer._jsonable(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [LLaVATrainer._jsonable(v) for v in value]
+        return value
+
+    @staticmethod
+    def _flatten_numeric(prefix, value, out):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                LLaVATrainer._flatten_numeric(f"{prefix}/{key}" if prefix else str(key), item, out)
+            return
+        if isinstance(value, torch.Tensor):
+            if value.numel() == 1:
+                out[prefix] = float(value.detach().float().item())
+            return
+        if isinstance(value, bool):
+            out[prefix] = float(value)
+            return
+        if isinstance(value, (int, float)) and value is not None:
+            out[prefix] = float(value)
+
+    def _geo_rope_fusion_stats(self):
+        for module in self.model.modules():
+            stats = getattr(module, "last_geo_rope_fusion_stats", None)
+            if not stats or "mean_abs_rope_delta_q" not in stats:
+                continue
+            stats = dict(stats)
+            grad_norm = getattr(module, "_last_head_gate_grad_norm", None)
+            if grad_norm is not None:
+                stats["gate_logit_grad_norm"] = grad_norm
+            return stats
+        return None
+
+    def _geo_rope_fusion_metrics(self):
+        stats = self._geo_rope_fusion_stats()
+        if not stats:
+            return None, None
+        metrics = {}
+        self._flatten_numeric("geo_rope", stats, metrics)
+        return metrics, self._jsonable(stats)
+
+    def _write_geo_rope_fusion_stats(self, stats):
+        if not stats or not self.is_world_process_zero():
+            return
+        step = int(getattr(self.state, "global_step", 0) or 0)
+        if getattr(self, "_last_geo_rope_stats_logged_step", None) == step:
+            return
+        self._last_geo_rope_stats_logged_step = step
+        payload = {"step": step, **stats}
+        line = json.dumps(payload, sort_keys=True)
+        rank0_print(f"[GEO_ROPE_STATS] {line}")
+        try:
+            os.makedirs(self.args.output_dir, exist_ok=True)
+            with open(os.path.join(self.args.output_dir, "geo_rope_fusion_stats.jsonl"), "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except OSError as exc:
+            rank0_print(f"[GEO_ROPE_STATS][WARN] failed to write JSONL: {exc}")
+
     def _maybe_log_save_evaluate(self, *args, **kwargs):
         if (
             torch.cuda.is_available()
@@ -355,9 +421,14 @@ class LLaVATrainer(Trainer):
 
     def log(self, logs, *args, **kwargs):
         metrics = self._spatial_rank_metrics()
+        geo_rope_metrics, geo_rope_stats = self._geo_rope_fusion_metrics()
         if metrics:
             logs = dict(logs)
             logs.update(metrics)
+        if geo_rope_metrics:
+            logs = dict(logs)
+            logs.update(geo_rope_metrics)
+            self._write_geo_rope_fusion_stats(geo_rope_stats)
         return super().log(logs, *args, **kwargs)
 
     def _build_sampler_generator(self):

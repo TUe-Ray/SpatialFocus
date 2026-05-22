@@ -204,6 +204,7 @@ class ModelArguments:
         default=None,
         metadata={
             "help": "Fusion strategy. New ablations: svf_baseline, svf_patch_cam_concat, svf_geometry_bridge, svf_geo_rope_fusion"
+            ", svf_geo_rope_fusion_forced, svf_geo_rope_fusion_per_head_gate"
         },
     )
     geo_rope_fusion_mode: Optional[str] = field(
@@ -228,6 +229,23 @@ class ModelArguments:
     geo_rope_fusion_log_stats: bool = field(
         default=False,
         metadata={"help": "If True, record GeoRoPE Fusion tensor mean/std stats during each forward pass."},
+    )
+    geo_rope_fusion_log_attention_stats: bool = field(
+        default=False,
+        metadata={"help": "If True, also record optional GeoRoPE attention-delta diagnostics."},
+    )
+    geo_rope_gate_type: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": (
+                "GeoRoPE gate variant override: scalar, forced, or per_head. "
+                "Normally inferred from fusion_block."
+            )
+        },
+    )
+    geo_rope_head_gate_init: float = field(
+        default=0.99,
+        metadata={"help": "Initial sigmoid gate value for per-head GeoRoPE gates."},
     )
     geo_rope_point_map_key: Optional[str] = field(
         default=None,
@@ -2392,6 +2410,10 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
         if model_args.geo_rope_fusion_group_split is not None:
             overwrite_config["geo_rope_fusion_group_split"] = model_args.geo_rope_fusion_group_split
         overwrite_config["geo_rope_fusion_log_stats"] = model_args.geo_rope_fusion_log_stats
+        overwrite_config["geo_rope_fusion_log_attention_stats"] = model_args.geo_rope_fusion_log_attention_stats
+        if model_args.geo_rope_gate_type is not None:
+            overwrite_config["geo_rope_gate_type"] = model_args.geo_rope_gate_type
+        overwrite_config["geo_rope_head_gate_init"] = model_args.geo_rope_head_gate_init
         if model_args.geo_rope_point_map_key is not None:
             overwrite_config["geo_rope_point_map_key"] = model_args.geo_rope_point_map_key
             overwrite_config["geometry_point_map_key"] = model_args.geo_rope_point_map_key
@@ -2713,6 +2735,10 @@ def train(attn_implementation=None):
         if model_args.geo_rope_fusion_group_split is not None:
             model.config.geo_rope_fusion_group_split = model_args.geo_rope_fusion_group_split
         model.config.geo_rope_fusion_log_stats = model_args.geo_rope_fusion_log_stats
+        model.config.geo_rope_fusion_log_attention_stats = model_args.geo_rope_fusion_log_attention_stats
+        if model_args.geo_rope_gate_type is not None:
+            model.config.geo_rope_gate_type = model_args.geo_rope_gate_type
+        model.config.geo_rope_head_gate_init = model_args.geo_rope_head_gate_init
         if model_args.geo_rope_point_map_key is not None:
             model.config.geo_rope_training_point_map_key = model_args.geo_rope_point_map_key
             model.config.geo_rope_point_map_key = model_args.geo_rope_point_map_key
@@ -2729,6 +2755,10 @@ def train(attn_implementation=None):
         if model_args.geo_rope_fusion_group_split is not None:
             model.config.geo_rope_fusion_group_split = model_args.geo_rope_fusion_group_split
         model.config.geo_rope_fusion_log_stats = model_args.geo_rope_fusion_log_stats
+        model.config.geo_rope_fusion_log_attention_stats = model_args.geo_rope_fusion_log_attention_stats
+        if model_args.geo_rope_gate_type is not None:
+            model.config.geo_rope_gate_type = model_args.geo_rope_gate_type
+        model.config.geo_rope_head_gate_init = model_args.geo_rope_head_gate_init
         if model_args.geo_rope_point_map_key is not None:
             model.config.geo_rope_training_point_map_key = model_args.geo_rope_point_map_key
             model.config.geo_rope_point_map_key = model_args.geo_rope_point_map_key

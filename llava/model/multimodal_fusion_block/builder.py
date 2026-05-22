@@ -199,6 +199,8 @@ class GeoRoPEFusionRotary(nn.Module):
 
 
 class GeoRoPEFusionCrossAttention(nn.Module):
+    GATE_TYPES = {"scalar", "forced", "per_head"}
+
     def __init__(
         self,
         d_clip,
@@ -209,15 +211,21 @@ class GeoRoPEFusionCrossAttention(nn.Module):
         max_depth=10.0,
         group_split=None,
         log_stats=False,
+        log_attention_stats=False,
+        gate_type="scalar",
+        head_gate_init=0.99,
         dropout_rate=0.1,
     ):
         super().__init__()
         if d_attn % num_heads != 0:
             raise ValueError(f"d_attn ({d_attn}) must be divisible by num_heads ({num_heads})")
+        if gate_type not in self.GATE_TYPES:
+            raise ValueError(f"Unexpected GeoRoPE Fusion gate_type: {gate_type}")
 
         self.d_attn = d_attn
         self.num_heads = num_heads
         self.head_dim = d_attn // num_heads
+        self.gate_type = gate_type
 
         self.clip_norm = nn.LayerNorm(d_clip)
         self.spatial_encoder_norm = nn.LayerNorm(d_spatial_encoder)
@@ -239,17 +247,32 @@ class GeoRoPEFusionCrossAttention(nn.Module):
             max_depth=max_depth,
             group_split=group_split,
         )
-        self.geo_rope_fusion_gate_q = nn.Parameter(torch.zeros(()))
-        self.geo_rope_fusion_gate_k = nn.Parameter(torch.zeros(()))
+        if gate_type == "scalar":
+            self.geo_rope_fusion_gate_q = nn.Parameter(torch.zeros(()))
+            self.geo_rope_fusion_gate_k = nn.Parameter(torch.zeros(()))
+        elif gate_type == "per_head":
+            init_gate = min(max(float(head_gate_init), 1e-6), 1.0 - 1e-6)
+            init_logit = math.log(init_gate / (1.0 - init_gate))
+            self.geo_rope_fusion_head_gate_logit = nn.Parameter(
+                torch.full((num_heads,), init_logit)
+            )
+            self._last_head_gate_grad_norm = None
+            self.geo_rope_fusion_head_gate_logit.register_hook(self._record_head_gate_grad_norm)
 
         self.out_proj = nn.Linear(d_attn, d_clip)
         self.out_norm = nn.LayerNorm(d_clip)
         self.dropout = nn.Dropout(dropout_rate)
         self.log_stats = log_stats
+        self.log_attention_stats = log_attention_stats
         self.last_geo_rope_fusion_stats = {
+            "gate_type": self.gate_type,
             "group_split": self.geo_rope_fusion.group_split,
             "group_dims": list(self.geo_rope_fusion.group_dims),
         }
+
+    def _record_head_gate_grad_norm(self, grad):
+        self._last_head_gate_grad_norm = float(grad.detach().float().norm().item())
+        return grad
 
     def _reset_attention_parameters(self):
         in_proj_weight = torch.empty(3 * self.d_attn, self.d_attn)
@@ -278,17 +301,57 @@ class GeoRoPEFusionCrossAttention(nn.Module):
             "std": x.std(unbiased=False).item(),
         }
 
-    def _record_stats(self, pos_clip, pos_spatial, q_delta, k_delta):
+    @staticmethod
+    def _mean_abs(x):
+        return x.detach().float().abs().mean().item()
+
+    @staticmethod
+    def _attention_entropy(attn):
+        attn = attn.detach().float().clamp_min(1e-12)
+        return float((-(attn * attn.log()).sum(dim=-1)).mean().item())
+
+    def _record_stats(self, pos_clip, pos_spatial, q_delta, k_delta, q_effective_delta, k_effective_delta, gate=None):
         self.last_geo_rope_fusion_stats = {
+            "gate_type": self.gate_type,
             "pos_clip": self._mean_std(pos_clip),
             "pos_spatial": self._mean_std(pos_spatial),
             "q_geo_rope_fusion_minus_q": self._mean_std(q_delta),
             "k_geo_rope_fusion_minus_k": self._mean_std(k_delta),
-            "geo_rope_fusion_gate_q": float(self.geo_rope_fusion_gate_q.detach().float().item()),
-            "geo_rope_fusion_gate_k": float(self.geo_rope_fusion_gate_k.detach().float().item()),
+            "mean_abs_rope_delta_q": self._mean_abs(q_delta),
+            "mean_abs_rope_delta_k": self._mean_abs(k_delta),
+            "effective_rope_delta_q": self._mean_abs(q_effective_delta),
+            "effective_rope_delta_k": self._mean_abs(k_effective_delta),
             "group_split": self.geo_rope_fusion.group_split,
             "group_dims": list(self.geo_rope_fusion.group_dims),
         }
+        if self.gate_type == "scalar":
+            self.last_geo_rope_fusion_stats.update({
+                "geo_rope_fusion_gate_q": float(self.geo_rope_fusion_gate_q.detach().float().item()),
+                "geo_rope_fusion_gate_k": float(self.geo_rope_fusion_gate_k.detach().float().item()),
+            })
+        elif self.gate_type == "per_head":
+            gate = gate.detach().float().reshape(-1)
+            self.last_geo_rope_fusion_stats.update({
+                "gate_mean": float(gate.mean().item()),
+                "gate_min": float(gate.min().item()),
+                "gate_max": float(gate.max().item()),
+                "gate_std": float(gate.std(unbiased=False).item()),
+                "gate_per_head_values": [float(value) for value in gate.tolist()],
+                "head_gate_shape": [1, self.num_heads, 1, 1],
+                "gate_logit_grad_norm": self._last_head_gate_grad_norm,
+            })
+
+    def _record_attention_stats(self, attn, q_plain, k_plain):
+        if not self.log_stats or not self.log_attention_stats:
+            return
+        with torch.no_grad():
+            attn_plain = torch.matmul(q_plain, k_plain.transpose(-2, -1)) / math.sqrt(self.head_dim)
+            attn_plain = F.softmax(attn_plain.float(), dim=-1).to(dtype=attn.dtype)
+            self.last_geo_rope_fusion_stats.update({
+                "attention_delta_mean_abs": self._mean_abs(attn - attn_plain),
+                "attention_entropy_rope": self._attention_entropy(attn),
+                "attention_entropy_plain": self._attention_entropy(attn_plain),
+            })
 
     def forward(self, clip_features, spatial_encoder_features, pos_clip, pos_spatial):
         """
@@ -315,19 +378,30 @@ class GeoRoPEFusionCrossAttention(nn.Module):
         q = self._reshape_to_heads(q)
         k = self._reshape_to_heads(k)
         v = self._reshape_to_heads(v)
+        q_plain = q
+        k_plain = k
 
         q_geo_rope_fusion = self.geo_rope_fusion(q, pos_clip)
         k_geo_rope_fusion = self.geo_rope_fusion(k, pos_spatial)
         q_delta = q_geo_rope_fusion - q
         k_delta = k_geo_rope_fusion - k
+        gate = None
+        if self.gate_type == "scalar":
+            q = q + self.geo_rope_fusion_gate_q * q_delta
+            k = k + self.geo_rope_fusion_gate_k * k_delta
+        elif self.gate_type == "forced":
+            q = q_geo_rope_fusion
+            k = k_geo_rope_fusion
+        elif self.gate_type == "per_head":
+            gate = torch.sigmoid(self.geo_rope_fusion_head_gate_logit).view(1, self.num_heads, 1, 1)
+            q = q + gate * q_delta
+            k = k + gate * k_delta
         if self.log_stats:
-            self._record_stats(pos_clip, pos_spatial, q_delta, k_delta)
-
-        q = q + self.geo_rope_fusion_gate_q * q_delta
-        k = k + self.geo_rope_fusion_gate_k * k_delta
+            self._record_stats(pos_clip, pos_spatial, q_delta, k_delta, q - q_plain, k - k_plain, gate=gate)
 
         attn = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
         attn = F.softmax(attn.float(), dim=-1).to(dtype=q.dtype)
+        self._record_attention_stats(attn, q_plain, k_plain)
         out = torch.matmul(attn, v)
 
         out = self._merge_heads(out)
@@ -1016,7 +1090,11 @@ def build_multimodal_fusion_block(config, delay_load=False, **kwargs):
             eval_lambda_k=eval_lambda_k,
             log_stats=log_stats,
         )
-    elif fusion_block_type == "svf_geo_rope_fusion" or fusion_block_type in geo_rope_fusion_mode_aliases:
+    elif fusion_block_type in {
+        "svf_geo_rope_fusion",
+        "svf_geo_rope_fusion_forced",
+        "svf_geo_rope_fusion_per_head_gate",
+    } or fusion_block_type in geo_rope_fusion_mode_aliases:
         if fusion_block_type in geo_rope_fusion_mode_aliases:
             # Explicit alias (new or old name) → mode is fully determined by the name.
             geo_rope_fusion_mode = geo_rope_fusion_mode_aliases[fusion_block_type]
@@ -1029,9 +1107,26 @@ def build_multimodal_fusion_block(config, delay_load=False, **kwargs):
         log_stats = getattr(config, "geo_rope_fusion_log_stats", False) or getattr(config, "geometry_rope_log_stats", False)
         if isinstance(log_stats, str):
             log_stats = log_stats.lower() in {"1", "true", "yes", "y", "on"}
+        log_attention_stats = (
+            getattr(config, "geo_rope_fusion_log_attention_stats", False)
+            or getattr(config, "geometry_rope_log_attention_stats", False)
+        )
+        if isinstance(log_attention_stats, str):
+            log_attention_stats = log_attention_stats.lower() in {"1", "true", "yes", "y", "on"}
         # Accept both new and old config key names for max_depth and group_split.
         max_depth = getattr(config, "geo_rope_fusion_max_depth", None) or getattr(config, "geometry_rope_max_depth", 10.0)
         group_split = getattr(config, "geo_rope_fusion_group_split", None) or getattr(config, "geometry_rope_group_split", None)
+        gate_type = getattr(config, "geo_rope_gate_type", None) or getattr(config, "geometry_rope_gate_type", None)
+        if fusion_block_type == "svf_geo_rope_fusion_forced":
+            gate_type = "forced"
+        elif fusion_block_type == "svf_geo_rope_fusion_per_head_gate":
+            gate_type = "per_head"
+        elif gate_type is None:
+            gate_type = "scalar"
+        head_gate_init = (
+            getattr(config, "geo_rope_head_gate_init", None)
+            or getattr(config, "geometry_rope_head_gate_init", 0.99)
+        )
         return GeoRoPEFusionCrossAttention(
             d_clip=d_clip,
             d_spatial_encoder=d_spatial_encoder,
@@ -1041,6 +1136,9 @@ def build_multimodal_fusion_block(config, delay_load=False, **kwargs):
             max_depth=max_depth,
             group_split=group_split,
             log_stats=log_stats,
+            log_attention_stats=log_attention_stats,
+            gate_type=gate_type,
+            head_gate_init=head_gate_init,
         )
     elif fusion_block_type == "svf_cat_feat":
         # Comparison 1: feature-dim concat of [camera, patch] as KV.
