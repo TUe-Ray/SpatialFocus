@@ -91,6 +91,9 @@ HUGGINGFACE_HUB_CACHE="$HF_HOME/hub"
 RESUME_MODE="fresh"                 # choices: fresh / continue
 RESUME_CHECKPOINT_PATH="none"       # e.g. /path/to/checkpoint-1000
 ZERO_SPATIAL_FEATURES="False"       # choices: False / True
+STRICT_VIDEO_LOADING="${STRICT_VIDEO_LOADING:-True}"
+REQUIRE_SPATIAL_FEATURES="${REQUIRE_SPATIAL_FEATURES:-True}"
+PREFLIGHT_TRAIN_ASSETS="${PREFLIGHT_TRAIN_ASSETS:-True}"
 SEED=42
 
 # ============================================================
@@ -430,8 +433,10 @@ declare -A DATA_ARGS=(
     [image_folder]="$DATA_ROOT"
     [video_folder]="$DATA_ROOT"
     [zero_spatial_features]="$ZERO_SPATIAL_FEATURES"
+    [strict_video_loading]="$STRICT_VIDEO_LOADING"
     [spatial_features_root]="$SPATIAL_FEATURES_ROOT"
     [spatial_features_subdir]="$SPATIAL_FEATURES_SUBDIR"
+    [require_spatial_features]="$REQUIRE_SPATIAL_FEATURES"
     [train_data_percentage]="$TRAIN_DATA_PERCENTAGE"
     [train_data_percentage_seed]="$TRAIN_DATA_PERCENTAGE_SEED"
     [train_data_shuffle]="$TRAIN_DATA_SHUFFLE"
@@ -518,7 +523,31 @@ for key in "${!TRAINING_ARGS[@]}"; do
     TORCHRUN_ARGS+=("${TRAINING_ARGS[$key]}")
 done
 
-srun --export=ALL torchrun \
+if [[ "$PREFLIGHT_TRAIN_ASSETS" == "True" ]]; then
+    echo "[PREFLIGHT] Checking training videos and spatial feature sidecars before launching DDP..."
+    python scripts/preflight_vlm3r_training_assets.py \
+        --data-yaml "$DATA_PATH_YAML" \
+        --video-root "$DATA_ROOT" \
+        --spatial-features-root "$SPATIAL_FEATURES_ROOT" \
+        --spatial-features-subdir "$SPATIAL_FEATURES_SUBDIR" \
+        --require-videos \
+        --require-spatial-features
+fi
+
+cleanup_on_signal() {
+    local status=$?
+    trap - EXIT TERM INT ERR
+    if [[ "$status" -ne 0 ]]; then
+        echo "[ERROR] Training command failed with status $status; canceling job ${SLURM_JOB_ID:-unknown} to avoid idle allocation."
+        if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+            scancel "$SLURM_JOB_ID" >/dev/null 2>&1 || true
+        fi
+    fi
+    exit "$status"
+}
+trap cleanup_on_signal EXIT TERM INT ERR
+
+srun --kill-on-bad-exit=1 --wait=30 --export=ALL torchrun \
         --nnodes="$NNODES" \
         --nproc_per_node="$NUM_GPUS_PER_NODE" \
         --rdzv_id="$SLURM_JOB_ID" \
@@ -526,6 +555,5 @@ srun --export=ALL torchrun \
         --rdzv_endpoint="$MASTER_ADDR:$MASTER_PORT" \
         llava/train/train_mem.py \
         "${TORCHRUN_ARGS[@]}"
-    2>&1 | tee "$LOG_DIR/${SUFFIX}.log"
 
 exit 0

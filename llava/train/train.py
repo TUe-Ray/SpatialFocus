@@ -353,9 +353,11 @@ class DataArguments:
         },
     )
     zero_spatial_features: Optional[bool] = field(default=False, metadata={"help": "If True, zero out all loaded spatial feature tensors from .pt files for ablation."})
+    strict_video_loading: Optional[bool] = field(default=False, metadata={"help": "If True, raise on missing/unreadable videos instead of silently advancing to the next sample."})
     spatial_tower_type: Optional[str] = field(default=None, metadata={"help": "Spatial tower type (e.g. cut3r, vggt, pi3x). Set automatically from model_args. Controls whether .pt files are loaded."})
     spatial_features_root: Optional[str] = field(default=None, metadata={"help": "Root directory used to locate pre-extracted spatial features. If unset, video_folder is used."})
     spatial_features_subdir: Optional[str] = field(default="spatial_features", metadata={"help": "Subdirectory used to locate pre-extracted spatial features relative to video paths (default: spatial_features)."})
+    require_spatial_features: Optional[bool] = field(default=False, metadata={"help": "If True, raise when a requested main spatial_features sidecar is missing."})
     geometry_spatial_tower_type: Optional[str] = field(default=None, metadata={"help": "Optional geometry-only spatial tower type. Use pi3x to load decoded-feature sidecars for GeoRoPE positions while keeping the main spatial tower unchanged. Train/eval must use the same coordinate source."})
     geometry_spatial_features_root: Optional[str] = field(default=None, metadata={"help": "Root directory for geometry-only pre-extracted spatial features. CUT3R point-map sidecars contain ref and cam coordinate frames; keep train/eval consistent."})
     geometry_spatial_features_subdir: Optional[str] = field(default=None, metadata={"help": "Subdirectory for geometry-only spatial features. Use '.' when files live directly under root/dataset. Do not switch point_maps_ref and point_maps_cam between train and eval."})
@@ -1884,7 +1886,10 @@ class LazySupervisedDataset(Dataset):
             video_file = os.path.join(video_folder, video_file)
             suffix = video_file.split(".")[-1]
             if not os.path.exists(video_file):
-                print("File {} not exist!".format(video_file))
+                message = "File {} not exist!".format(video_file)
+                print(message)
+                if getattr(self.data_args, "strict_video_loading", False):
+                    raise FileNotFoundError(message)
 
             try:
                 if "shareVideoGPTV" in video_file:
@@ -1932,6 +1937,11 @@ class LazySupervisedDataset(Dataset):
             except Exception as e:
                 print(f"Error: {e}")
                 print(f"Failed to read video file: {video_file}")
+                if getattr(self.data_args, "strict_video_loading", False):
+                    sample_id = self.list_data_dict[i].get("id", i)
+                    raise RuntimeError(
+                        f"Strict video loading failed for sample id={sample_id}, index={i}, video={video_file}"
+                    ) from e
                 return self._get_item(i + 1)
         
         elif "video" in sources[0] and data_item.get('_with_depth', False):
@@ -2214,6 +2224,11 @@ class LazySupervisedDataset(Dataset):
                 if self.data_args.zero_spatial_features:
                     spatial_features = zero_nested_tensors(spatial_features)
                 data_dict["spatial_features"] = spatial_features
+            elif getattr(self.data_args, 'require_spatial_features', False):
+                raise FileNotFoundError(
+                    "Missing spatial_features sidecar for "
+                    f"{video_rel_path} under root={spatial_features_root}, subdir={spatial_features_subdir}"
+                )
 
         geometry_spatial_tower_type = getattr(self.data_args, 'geometry_spatial_tower_type', None)
         use_geometry_features = (
