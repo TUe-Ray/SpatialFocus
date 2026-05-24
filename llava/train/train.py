@@ -1681,7 +1681,10 @@ class LazySupervisedDataset(Dataset):
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
         # TODO: define number of retries somewhere else
         num_base_retries = 3
-        num_final_retries = 300
+        fail_fast_loading = bool(
+            getattr(self.data_args, "strict_video_loading", False)
+            or getattr(self.data_args, "require_spatial_features", False)
+        )
 
         # try the current sample first
         for attempt_idx in range(num_base_retries):
@@ -1691,6 +1694,8 @@ class LazySupervisedDataset(Dataset):
             except Exception as e:
                 # sleep 1s in case it is a cloud disk issue
                 print(f"[Try #{attempt_idx}] Failed to fetch sample {i}. Exception:", e)
+                if fail_fast_loading:
+                    raise
                 time.sleep(1)
 
         # try other samples, in case it is file corruption issue

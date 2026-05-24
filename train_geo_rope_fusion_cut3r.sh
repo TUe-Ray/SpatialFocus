@@ -89,6 +89,7 @@ WANDB_CONFIG_DIR="$WORK/wandb_config"
 HF_HOME="/leonardo_scratch/fast/EUHPC_D32_006/hf_cache"
 HF_DATASETS_CACHE="$HF_HOME/datasets"
 HUGGINGFACE_HUB_CACHE="$HF_HOME/hub"
+DECORD_EOF_RETRY_MAX="${DECORD_EOF_RETRY_MAX:-20480}"
 
 # ============================================================
 # User-defined variables: Resume / Ablation
@@ -234,7 +235,9 @@ export HUGGINGFACE_HUB_CACHE="$HUGGINGFACE_HUB_CACHE"
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
+export DECORD_EOF_RETRY_MAX="$DECORD_EOF_RETRY_MAX"
 mkdir -p "$HF_HOME" "$HF_DATASETS_CACHE" "$HUGGINGFACE_HUB_CACHE"
+echo "DECORD_EOF_RETRY_MAX=$DECORD_EOF_RETRY_MAX"
 
 
 
