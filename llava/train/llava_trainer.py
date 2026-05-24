@@ -34,6 +34,7 @@ class ProgressLoggerCallback(TrainerCallback):
     def __init__(self):
         super().__init__()
         self.start_time = None
+        self.start_step = 0
 
     @staticmethod
     def _format_time(seconds):
@@ -47,6 +48,7 @@ class ProgressLoggerCallback(TrainerCallback):
         """Record the start time when training begins."""
         import time
         self.start_time = time.time()
+        self.start_step = int(state.global_step or 0)
 
     def on_log(self, args, state: TrainerState, control: TrainerControl, logs=None, **kwargs):
         if not state.is_world_process_zero or logs is None or self.start_time is None:
@@ -69,8 +71,10 @@ class ProgressLoggerCallback(TrainerCallback):
         loss = logs.get("loss", logs.get("train_loss"))
         lr = logs.get("learning_rate")
 
-        # Calculate timing
-        avg_time_per_step = elapsed / step
+        # Calculate timing from steps completed in this process. On resume,
+        # state.global_step includes checkpointed steps from the previous run.
+        completed_this_run = max(step - self.start_step, 1)
+        avg_time_per_step = elapsed / completed_this_run
         remaining_steps = max_steps - step
         eta_seconds = avg_time_per_step * remaining_steps
 
