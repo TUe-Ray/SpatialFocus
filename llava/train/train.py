@@ -336,6 +336,7 @@ class DataArguments:
     image_split_resolution: Optional[int] = field(default=None)
 
     video_folder: Optional[str] = field(default=None)
+    video_fallback_folder: Optional[str] = field(default=None, metadata={"help": "Optional fallback root for videos when video_folder is temporarily unavailable."})
     video_fps: Optional[int] = field(default=1)
     frames_upbound: Optional[int] = field(default=0)
     add_time_instruction: Optional[bool] = field(default=False)
@@ -356,6 +357,7 @@ class DataArguments:
     strict_video_loading: Optional[bool] = field(default=False, metadata={"help": "If True, raise on missing/unreadable videos instead of silently advancing to the next sample."})
     spatial_tower_type: Optional[str] = field(default=None, metadata={"help": "Spatial tower type (e.g. cut3r, vggt, pi3x). Set automatically from model_args. Controls whether .pt files are loaded."})
     spatial_features_root: Optional[str] = field(default=None, metadata={"help": "Root directory used to locate pre-extracted spatial features. If unset, video_folder is used."})
+    spatial_features_fallback_root: Optional[str] = field(default=None, metadata={"help": "Optional fallback root for pre-extracted spatial features when spatial_features_root is temporarily unavailable."})
     spatial_features_subdir: Optional[str] = field(default="spatial_features", metadata={"help": "Subdirectory used to locate pre-extracted spatial features relative to video paths (default: spatial_features)."})
     require_spatial_features: Optional[bool] = field(default=False, metadata={"help": "If True, raise when a requested main spatial_features sidecar is missing."})
     geometry_spatial_tower_type: Optional[str] = field(default=None, metadata={"help": "Optional geometry-only spatial tower type. Use pi3x to load decoded-feature sidecars for GeoRoPE positions while keeping the main spatial tower unchanged. Train/eval must use the same coordinate source."})
@@ -1637,6 +1639,29 @@ class LazySupervisedDataset(Dataset):
 
         return next((p for p in candidate_paths if os.path.exists(p)), None)
 
+    def _resolve_video_file_path(self, video_rel_path):
+        candidate_paths = []
+        for root in (
+            getattr(self.data_args, "video_folder", None),
+            getattr(self.data_args, "video_fallback_folder", None),
+        ):
+            if root:
+                candidate_path = os.path.join(root, video_rel_path)
+                if candidate_path not in candidate_paths:
+                    candidate_paths.append(candidate_path)
+
+        for candidate_path in candidate_paths:
+            if os.path.exists(candidate_path):
+                primary_path = candidate_paths[0] if candidate_paths else candidate_path
+                if candidate_path != primary_path:
+                    print(
+                        "[DATA FALLBACK] video primary unavailable; "
+                        f"using fallback for {video_rel_path}: {candidate_path}"
+                    )
+                return candidate_path
+
+        return candidate_paths[0] if candidate_paths else video_rel_path
+
     def process_image(self, image_file, overwrite_image_aspect_ratio=None):
         image_folder = self.data_args.image_folder
         processor = self.data_args.image_processor
@@ -1886,9 +1911,8 @@ class LazySupervisedDataset(Dataset):
             sources = preprocess_multimodal(copy.deepcopy([data_item["conversations"]]), self.data_args)
 
         elif "video" in sources[0] and not data_item.get('_with_depth', False):
-            video_file = self.list_data_dict[i]["video"]
-            video_folder = self.data_args.video_folder
-            video_file = os.path.join(video_folder, video_file)
+            video_rel_path = self.list_data_dict[i]["video"]
+            video_file = self._resolve_video_file_path(video_rel_path)
             suffix = video_file.split(".")[-1]
             if not os.path.exists(video_file):
                 message = "File {} not exist!".format(video_file)
@@ -2224,8 +2248,40 @@ class LazySupervisedDataset(Dataset):
                 spatial_features_subdir,
                 video_folder=video_folder,
             )
+            if spatial_features_path is None:
+                spatial_features_fallback_root = getattr(self.data_args, 'spatial_features_fallback_root', None)
+                video_fallback_folder = getattr(self.data_args, 'video_fallback_folder', None)
+                spatial_features_path = self._resolve_video_feature_path(
+                    video_rel_path,
+                    spatial_features_fallback_root,
+                    spatial_features_subdir,
+                    video_folder=video_fallback_folder,
+                )
+                if spatial_features_path is not None:
+                    print(
+                        "[DATA FALLBACK] spatial_features primary unavailable; "
+                        f"using fallback for {video_rel_path}: {spatial_features_path}"
+                    )
             if spatial_features_path is not None:
-                spatial_features = torch.load(spatial_features_path)
+                try:
+                    spatial_features = torch.load(spatial_features_path)
+                except Exception:
+                    spatial_features_fallback_root = getattr(self.data_args, 'spatial_features_fallback_root', None)
+                    fallback_path = None
+                    if spatial_features_fallback_root:
+                        fallback_path = self._resolve_video_feature_path(
+                            video_rel_path,
+                            spatial_features_fallback_root,
+                            spatial_features_subdir,
+                            video_folder=getattr(self.data_args, 'video_fallback_folder', None),
+                        )
+                    if fallback_path is None or fallback_path == spatial_features_path:
+                        raise
+                    print(
+                        "[DATA FALLBACK] spatial_features primary load failed; "
+                        f"using fallback for {video_rel_path}: {fallback_path}"
+                    )
+                    spatial_features = torch.load(fallback_path)
                 if self.data_args.zero_spatial_features:
                     spatial_features = zero_nested_tensors(spatial_features)
                 data_dict["spatial_features"] = spatial_features

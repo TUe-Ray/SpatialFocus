@@ -59,8 +59,10 @@ WORK_DATA_ROOT="${WORK_DATA_ROOT:-/leonardo_work/EUHPC_D32_006/train_data/vlm3r}
 FAST_DATA_ROOT="${FAST_DATA_ROOT:-/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r}"
 # DATA_ROOT="${DATA_ROOT:-$FAST_DATA_ROOT}"  # Switch back here when FAST is stable again.
 DATA_ROOT="${DATA_ROOT:-$WORK_DATA_ROOT}"
+DATA_FALLBACK_ROOT="${DATA_FALLBACK_ROOT:-}"
 # SPATIAL_FEATURES_ROOT="${SPATIAL_FEATURES_ROOT:-$FAST_DATA_ROOT}"  # FAST point-map sidecars.
 SPATIAL_FEATURES_ROOT="${SPATIAL_FEATURES_ROOT:-$DATA_ROOT}"
+SPATIAL_FEATURES_FALLBACK_ROOT="${SPATIAL_FEATURES_FALLBACK_ROOT:-$DATA_FALLBACK_ROOT}"
 SPATIAL_FEATURES_SUBDIR="spatial_features_points"
 CONDA_ENV_NAME="vlm3r"
 
@@ -94,8 +96,8 @@ DECORD_EOF_RETRY_MAX="${DECORD_EOF_RETRY_MAX:-20480}"
 # ============================================================
 # User-defined variables: Resume / Ablation
 # ============================================================
-RESUME_MODE="fresh"                 # choices: fresh / continue
-RESUME_CHECKPOINT_PATH="none"       # e.g. /path/to/checkpoint-1000
+RESUME_MODE="${RESUME_MODE:-fresh}"                 # choices: fresh / continue
+RESUME_CHECKPOINT_PATH="${RESUME_CHECKPOINT_PATH:-none}"       # e.g. /path/to/checkpoint-1000
 ZERO_SPATIAL_FEATURES="False"       # choices: False / True
 STRICT_VIDEO_LOADING="${STRICT_VIDEO_LOADING:-True}"
 REQUIRE_SPATIAL_FEATURES="${REQUIRE_SPATIAL_FEATURES:-True}"
@@ -441,9 +443,11 @@ declare -A DATA_ARGS=(
     [data_path]="$DATA_PATH_YAML"
     [image_folder]="$DATA_ROOT"
     [video_folder]="$DATA_ROOT"
+    [video_fallback_folder]="$DATA_FALLBACK_ROOT"
     [zero_spatial_features]="$ZERO_SPATIAL_FEATURES"
     [strict_video_loading]="$STRICT_VIDEO_LOADING"
     [spatial_features_root]="$SPATIAL_FEATURES_ROOT"
+    [spatial_features_fallback_root]="$SPATIAL_FEATURES_FALLBACK_ROOT"
     [spatial_features_subdir]="$SPATIAL_FEATURES_SUBDIR"
     [require_spatial_features]="$REQUIRE_SPATIAL_FEATURES"
     [train_data_percentage]="$TRAIN_DATA_PERCENTAGE"
