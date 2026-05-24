@@ -14,6 +14,19 @@
 #SBATCH --exclusive
 
 set -euo pipefail
+cleanup_on_training_failure() {
+    local status=$?
+    trap - EXIT TERM INT ERR
+    if [[ "$status" -ne 0 ]]; then
+        echo "[ERROR] Training script failed with status $status; canceling job ${SLURM_JOB_ID:-unknown} to avoid idle allocation."
+        if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+            scancel "$SLURM_JOB_ID" >/dev/null 2>&1 || true
+        fi
+    fi
+    exit "$status"
+}
+trap cleanup_on_training_failure EXIT TERM INT ERR
+SRUN_FAIL_FAST_ARGS=(--kill-on-bad-exit=1 --wait=30)
 
 # Edit this block directly for each experiment.
 TRAIN_DATA_PERCENTAGE="100"
@@ -110,9 +123,13 @@ MODEL_GEOMETRY_PROJECTION_DROPOUT="0.0"
 DATA_SPATIAL_TOWER_TYPE="cut3r"
 
 # ==============================================================================
-DATA_ROOT="/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r"
-#SPATIAL_FEATURES_ROOT="$DATA_ROOT"
-SPATIAL_FEATURES_ROOT="/leonardo_scratch/large/userexternal/shuang00/VLM_3R_cut3r_pointmaps"
+# Data source roots. Default to WORK mirror because FAST has shown compute-node I/O errors.
+WORK_DATA_ROOT="${WORK_DATA_ROOT:-/leonardo_work/EUHPC_D32_006/train_data/vlm3r}"
+FAST_DATA_ROOT="${FAST_DATA_ROOT:-/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r}"
+# DATA_ROOT="${DATA_ROOT:-$FAST_DATA_ROOT}"  # Switch back here when FAST is stable again.
+DATA_ROOT="${DATA_ROOT:-$WORK_DATA_ROOT}"
+# SPATIAL_FEATURES_ROOT="${SPATIAL_FEATURES_ROOT:-$FAST_DATA_ROOT}"  # FAST CUT3R point-map sidecars.
+SPATIAL_FEATURES_ROOT="${SPATIAL_FEATURES_ROOT:-$DATA_ROOT}"
 SPATIAL_FEATURES_SUBDIR="spatial_features_points"
 
 LOCAL_MODEL_BASE="/leonardo_work/EUHPC_D32_006/FAST/hf_models/VLM3R/LLaVA-NeXT-Video-7B-Qwen2"
@@ -180,7 +197,8 @@ MODEL_ADD_TIME_INSTRUCTION="True"
 MODEL_FORCE_SAMPLE="True"
 MODEL_MM_SPATIAL_POOL_STRIDE="2"
 
-DATA_PATH_YAML="scripts/VLM_3R/vsibench_data.yaml"
+# DATA_PATH_YAML="${DATA_PATH_YAML:-scripts/VLM_3R/vsibench_data.yaml}"  # FAST json_path entries.
+DATA_PATH_YAML="${DATA_PATH_YAML:-scripts/VLM_3R/vsibench_data_work.yaml}"
 DATA_GROUP_BY_MODALITY_LENGTH="True"
 TRAIN_DATA_PERCENTAGE_SEED="$SEED"
 TRAIN_DATA_SHUFFLE="True"
@@ -523,7 +541,7 @@ done
 
 case "$DDP_LAUNCH_MODE" in
     elastic)
-        srun --export=ALL torchrun \
+        srun "${SRUN_FAIL_FAST_ARGS[@]}" --export=ALL torchrun \
             --nnodes="$NNODES" \
             --nproc_per_node="$NUM_GPUS_PER_NODE" \
             --rdzv_id="$SLURM_JOB_ID" \
@@ -534,7 +552,7 @@ case "$DDP_LAUNCH_MODE" in
             | tee "$LOG_DIR/${SUFFIX}.log"
         ;;
     static)
-        srun --export=ALL bash -c '
+        srun "${SRUN_FAIL_FAST_ARGS[@]}" --export=ALL bash -c '
             echo "[DDP] host=$(hostname) SLURM_PROCID=${SLURM_PROCID:-NA} node_rank=${SLURM_NODEID:-NA} local_id=${SLURM_LOCALID:-NA}" >&2
             exec torchrun \
                 --nnodes="$NNODES" \

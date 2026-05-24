@@ -21,8 +21,13 @@ SPATIAL_RANK_LOSS_ENABLE="${SPATIAL_RANK_LOSS_ENABLE:-True}"
 # ============================================================
 NOTE="feature alignment experiment: cut3r 50% training data | LoRA(r=128,alpha=256) | Fusion=cross_attention | Features=all_tokens(768dim) | LambdaSim=0.01 | RankMargin=0.2 | Anchors=128 | Top=10%/Bottom=30%"
 
-DATA_ROOT="/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r"
-SPATIAL_FEATURES_ROOT="/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r"
+# Data source roots. Default to WORK mirror because FAST has shown compute-node I/O errors.
+WORK_DATA_ROOT="${WORK_DATA_ROOT:-/leonardo_work/EUHPC_D32_006/train_data/vlm3r}"
+FAST_DATA_ROOT="${FAST_DATA_ROOT:-/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r}"
+# DATA_ROOT="${DATA_ROOT:-$FAST_DATA_ROOT}"  # Switch back here when FAST is stable again.
+DATA_ROOT="${DATA_ROOT:-$WORK_DATA_ROOT}"
+# SPATIAL_FEATURES_ROOT="${SPATIAL_FEATURES_ROOT:-$FAST_DATA_ROOT}"  # FAST CUT3R token sidecars.
+SPATIAL_FEATURES_ROOT="${SPATIAL_FEATURES_ROOT:-$DATA_ROOT}"
 SPATIAL_FEATURES_SUBDIR="spatial_features"
 CONDA_ENV_NAME="vlm3r"
 
@@ -107,7 +112,8 @@ MODEL_ADD_TIME_INSTRUCTION="True"
 MODEL_FORCE_SAMPLE="True"
 MODEL_MM_SPATIAL_POOL_STRIDE="2"
 
-DATA_PATH_YAML="scripts/VLM_3R/vsibench_data.yaml"
+# DATA_PATH_YAML="${DATA_PATH_YAML:-scripts/VLM_3R/vsibench_data.yaml}"  # FAST json_path entries.
+DATA_PATH_YAML="${DATA_PATH_YAML:-scripts/VLM_3R/vsibench_data_work.yaml}"
 DATA_GROUP_BY_MODALITY_LENGTH="True"
 
 
@@ -157,6 +163,19 @@ echo "Output: $SLURM_STDOUT"
 echo "Error: $SLURM_STDERR"
 echo "Job Time Limit: $JOB_TIME_LIMIT"
 set -euo pipefail
+cleanup_on_training_failure() {
+    local status=$?
+    trap - EXIT TERM INT ERR
+    if [[ "$status" -ne 0 ]]; then
+        echo "[ERROR] Training script failed with status $status; canceling job ${SLURM_JOB_ID:-unknown} to avoid idle allocation."
+        if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+            scancel "$SLURM_JOB_ID" >/dev/null 2>&1 || true
+        fi
+    fi
+    exit "$status"
+}
+trap cleanup_on_training_failure EXIT TERM INT ERR
+SRUN_FAIL_FAST_ARGS=(--kill-on-bad-exit=1 --wait=30)
 
 
 # Cluster-specific environment setup (overridable via exported env vars)
@@ -457,7 +476,7 @@ done
 
 case "$DDP_LAUNCH_MODE" in
     elastic)
-        srun --export=ALL torchrun \
+        srun "${SRUN_FAIL_FAST_ARGS[@]}" --export=ALL torchrun \
             --nnodes="$NNODES" \
             --nproc_per_node="$NUM_GPUS_PER_NODE" \
             --rdzv_id="$SLURM_JOB_ID" \
@@ -468,7 +487,7 @@ case "$DDP_LAUNCH_MODE" in
             | tee "$LOG_DIR/${SUFFIX}.log"
         ;;
     static)
-        srun --export=ALL bash -c '
+        srun "${SRUN_FAIL_FAST_ARGS[@]}" --export=ALL bash -c '
             echo "[DDP] host=$(hostname) SLURM_PROCID=${SLURM_PROCID:-NA} node_rank=${SLURM_NODEID:-NA} local_id=${SLURM_LOCALID:-NA}" >&2
             exec torchrun \
                 --nnodes="$NNODES" \

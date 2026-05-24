@@ -18,7 +18,10 @@ set -euo pipefail
 REPO_DIR="${REPO_DIR:-/leonardo/home/userexternal/shuang00/VLM-3R}"
 CUT3R_LAYER="${CUT3R_LAYER:--2}"
 
-DATA_ROOT="${DATA_ROOT:-/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r}"
+WORK_DATA_ROOT="${WORK_DATA_ROOT:-/leonardo_work/EUHPC_D32_006/train_data/vlm3r}"
+FAST_DATA_ROOT="${FAST_DATA_ROOT:-/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r}"
+# DATA_ROOT="${DATA_ROOT:-$FAST_DATA_ROOT}"  # Switch back here when FAST is stable again.
+DATA_ROOT="${DATA_ROOT:-$WORK_DATA_ROOT}"
 MODEL_ROOT="${MODEL_ROOT:-/leonardo_work/EUHPC_D32_006/FAST/hf_models/VLM3R}"
 MODEL_FUSION_BLOCK="${MODEL_FUSION_BLOCK:-cross_attention}"
 
@@ -26,7 +29,8 @@ case "$CUT3R_LAYER" in
     -1|m1|dec_m1|spatial_features)
         CUT3R_LAYER="-1"
         LAYER_TAG="m1"
-        SPATIAL_FEATURES_ROOT="${SPATIAL_FEATURES_ROOT:-/leonardo_work/EUHPC_D32_006/FAST/train_data/vlm3r}"
+        # SPATIAL_FEATURES_ROOT="${SPATIAL_FEATURES_ROOT:-$FAST_DATA_ROOT}"  # FAST CUT3R token sidecars.
+        SPATIAL_FEATURES_ROOT="${SPATIAL_FEATURES_ROOT:-$DATA_ROOT}"
         SPATIAL_FEATURES_SUBDIR="${SPATIAL_FEATURES_SUBDIR:-spatial_features}"
         REQUIRED_DATASETS=("scannet" "scannetpp")
         ;;
