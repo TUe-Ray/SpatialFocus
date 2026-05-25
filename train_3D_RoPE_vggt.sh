@@ -10,7 +10,7 @@
 #SBATCH --output=logs/train/%x_%j.out
 #SBATCH --error=logs/train/%x_%j.err
 #SBATCH --mem=0
-#SBATCH --exclude=lrdn0249,lrdn0612,lrdn0568,lrdn2400,lrdn0288,lrdn0418,lrdn0119,lrdn0159,lrdn0080,lrdn0843
+#SBATCH --exclude=lrdn0249,lrdn0612,lrdn0568,lrdn2400,lrdn0288,lrdn0418,lrdn0119,lrdn0159,lrdn0080,lrdn0843,lrdn3322
 #SBATCH --exclusive
 
 set -euo pipefail
@@ -92,8 +92,8 @@ DATA_SPATIAL_TOWER_TYPE="cut3r"
 # ==============================================================================
 WORK_DATA_ROOT="${WORK_DATA_ROOT:-/leonardo_work/EUHPC_D32_006/train_data/vlm3r}"
 FAST_DATA_ROOT="${FAST_DATA_ROOT:-/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r}"
-# DATA_ROOT="${DATA_ROOT:-$FAST_DATA_ROOT}"  # Switch back here when FAST is stable again.
-DATA_ROOT="${DATA_ROOT:-$WORK_DATA_ROOT}"
+DATA_ROOT="${DATA_ROOT:-$FAST_DATA_ROOT}"
+# DATA_ROOT="${DATA_ROOT:-$WORK_DATA_ROOT}"  # WORK mirror fallback if FAST is unstable.
 SPATIAL_FEATURES_ROOT="${SPATIAL_FEATURES_ROOT:-$WORK/VLM_3R_vggt_features}"
 # Layout: ${SPATIAL_FEATURES_ROOT}/{dataset}/{video_id}.pt
 SPATIAL_FEATURES_SUBDIR="."
@@ -163,8 +163,8 @@ MODEL_ADD_TIME_INSTRUCTION="True"
 MODEL_FORCE_SAMPLE="True"
 MODEL_MM_SPATIAL_POOL_STRIDE="2"
 
-# DATA_PATH_YAML="${DATA_PATH_YAML:-scripts/VLM_3R/vsibench_data.yaml}"  # FAST json_path entries.
-DATA_PATH_YAML="${DATA_PATH_YAML:-scripts/VLM_3R/vsibench_data_work.yaml}"
+DATA_PATH_YAML="${DATA_PATH_YAML:-scripts/VLM_3R/vsibench_data.yaml}"  # FAST json_path entries.
+# DATA_PATH_YAML="${DATA_PATH_YAML:-scripts/VLM_3R/vsibench_data_work.yaml}"  # WORK mirror fallback.
 DATA_GROUP_BY_MODALITY_LENGTH="True"
 TRAIN_DATA_PERCENTAGE_SEED="$SEED"
 TRAIN_DATA_SHUFFLE="True"

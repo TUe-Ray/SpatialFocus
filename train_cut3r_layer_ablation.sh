@@ -10,7 +10,7 @@
 #SBATCH --output=logs/train/%x_%j.out
 #SBATCH --error=logs/train/%x_%j.err
 #SBATCH --mem=0
-#SBATCH --exclude=lrdn0249,lrdn0612,lrdn0568,lrdn2400,lrdn0288,lrdn0418,lrdn0119,lrdn0159,lrdn0080,lrdn0843
+#SBATCH --exclude=lrdn0249,lrdn0612,lrdn0568,lrdn2400,lrdn0288,lrdn0418,lrdn0119,lrdn0159,lrdn0080,lrdn0843,lrdn3322
 #SBATCH --exclusive
 
 set -euo pipefail
@@ -20,8 +20,8 @@ CUT3R_LAYER="${CUT3R_LAYER:--2}"
 
 WORK_DATA_ROOT="${WORK_DATA_ROOT:-/leonardo_work/EUHPC_D32_006/train_data/vlm3r}"
 FAST_DATA_ROOT="${FAST_DATA_ROOT:-/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r}"
-# DATA_ROOT="${DATA_ROOT:-$FAST_DATA_ROOT}"  # Switch back here when FAST is stable again.
-DATA_ROOT="${DATA_ROOT:-$WORK_DATA_ROOT}"
+DATA_ROOT="${DATA_ROOT:-$FAST_DATA_ROOT}"
+# DATA_ROOT="${DATA_ROOT:-$WORK_DATA_ROOT}"  # WORK mirror fallback if FAST is unstable.
 MODEL_ROOT="${MODEL_ROOT:-/leonardo_work/EUHPC_D32_006/FAST/hf_models/VLM3R}"
 MODEL_FUSION_BLOCK="${MODEL_FUSION_BLOCK:-cross_attention}"
 

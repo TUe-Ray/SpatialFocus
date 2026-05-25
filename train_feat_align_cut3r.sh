@@ -10,7 +10,7 @@
 #SBATCH --output=logs/train/%x_%j.out
 #SBATCH --error=logs/train/%x_%j.err
 #SBATCH --mem=0
-#SBATCH --exclude=lrdn0249,lrdn0612,lrdn0568,lrdn2400,lrdn0288,lrdn0418,lrdn0119,lrdn0159,lrdn0080,lrdn0843
+#SBATCH --exclude=lrdn0249,lrdn0612,lrdn0568,lrdn2400,lrdn0288,lrdn0418,lrdn0119,lrdn0159,lrdn0080,lrdn0843,lrdn3322
 #SBATCH --exclusive
 TRAIN_DATA_PERCENTAGE="50"
 SUFFIX="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
@@ -21,11 +21,11 @@ SPATIAL_RANK_LOSS_ENABLE="${SPATIAL_RANK_LOSS_ENABLE:-True}"
 # ============================================================
 NOTE="feature alignment experiment: cut3r 50% training data | LoRA(r=128,alpha=256) | Fusion=cross_attention | Features=all_tokens(768dim) | LambdaSim=0.01 | RankMargin=0.2 | Anchors=128 | Top=10%/Bottom=30%"
 
-# Data source roots. Default to WORK mirror because FAST has shown compute-node I/O errors.
+# Data source roots. Default to FAST; keep WORK mirror as fallback.
 WORK_DATA_ROOT="${WORK_DATA_ROOT:-/leonardo_work/EUHPC_D32_006/train_data/vlm3r}"
 FAST_DATA_ROOT="${FAST_DATA_ROOT:-/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r}"
-# DATA_ROOT="${DATA_ROOT:-$FAST_DATA_ROOT}"  # Switch back here when FAST is stable again.
-DATA_ROOT="${DATA_ROOT:-$WORK_DATA_ROOT}"
+DATA_ROOT="${DATA_ROOT:-$FAST_DATA_ROOT}"
+# DATA_ROOT="${DATA_ROOT:-$WORK_DATA_ROOT}"  # WORK mirror fallback if FAST is unstable.
 # SPATIAL_FEATURES_ROOT="${SPATIAL_FEATURES_ROOT:-$FAST_DATA_ROOT}"  # FAST CUT3R token sidecars.
 SPATIAL_FEATURES_ROOT="${SPATIAL_FEATURES_ROOT:-$DATA_ROOT}"
 SPATIAL_FEATURES_SUBDIR="spatial_features"
@@ -112,8 +112,8 @@ MODEL_ADD_TIME_INSTRUCTION="True"
 MODEL_FORCE_SAMPLE="True"
 MODEL_MM_SPATIAL_POOL_STRIDE="2"
 
-# DATA_PATH_YAML="${DATA_PATH_YAML:-scripts/VLM_3R/vsibench_data.yaml}"  # FAST json_path entries.
-DATA_PATH_YAML="${DATA_PATH_YAML:-scripts/VLM_3R/vsibench_data_work.yaml}"
+DATA_PATH_YAML="${DATA_PATH_YAML:-scripts/VLM_3R/vsibench_data.yaml}"  # FAST json_path entries.
+# DATA_PATH_YAML="${DATA_PATH_YAML:-scripts/VLM_3R/vsibench_data_work.yaml}"  # WORK mirror fallback.
 DATA_GROUP_BY_MODALITY_LENGTH="True"
 
 
