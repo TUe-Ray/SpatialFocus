@@ -394,10 +394,11 @@ def load_model(args: argparse.Namespace, device: torch.device, dtype: torch.dtyp
         args.siglip_path,
         args.cut3r_weights,
     )
-    load_zero_spatial = bool(args.skip_spatial_tower_load)
+    skip_spatial_tower_load = bool(args.skip_spatial_tower_load)
+    load_zero_spatial = bool(getattr(args, "zero_spatial_features", skip_spatial_tower_load))
 
     original_build_spatial_tower = None
-    if load_zero_spatial:
+    if skip_spatial_tower_load:
         import llava.model.llava_arch as llava_arch
 
         class Cut3rSidecarOnlySpatialTower(nn.Module):
@@ -408,7 +409,8 @@ def load_model(args: argparse.Namespace, device: torch.device, dtype: torch.dtyp
                 self.config = SimpleNamespace()
 
             def load_model(self, device_map=None):
-                raise RuntimeError("Runtime CUT3R tower loading was intentionally skipped.")
+                self.is_loaded = True
+                return self
 
         original_build_spatial_tower = llava_arch.build_spatial_tower
 
