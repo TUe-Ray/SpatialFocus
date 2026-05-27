@@ -295,6 +295,32 @@ def _point_map_key_candidates(key):
     return ()
 
 
+def _llm_visual_3d_rope_point_map_key(config):
+    return (
+        getattr(config, "llm_visual_3d_rope_geometry_source", None)
+        or getattr(config, "geo_rope_point_map_key", None)
+        or getattr(config, "geometry_point_map_key", None)
+        or "point_maps_ref"
+    )
+
+
+def _resolve_llm_geo_point_maps(config, loaded_spatial_features=None, point_maps=None):
+    requested_key = _llm_visual_3d_rope_point_map_key(config)
+    point_map_keys = _point_map_key_candidates(requested_key)
+    if isinstance(loaded_spatial_features, dict):
+        for point_key in point_map_keys:
+            if point_key in loaded_spatial_features:
+                return _coalesce_point_maps(loaded_spatial_features[point_key]), point_key
+        raise RuntimeError(
+            "LLM visual 3D RoPE requested geometry source "
+            f"{requested_key!r}, but none of {list(point_map_keys)} were found in the CUT3R sidecar. "
+            "Do not silently fall back to camera coordinates."
+        )
+    if point_maps is not None:
+        return _coalesce_point_maps(point_maps), "point_maps_argument"
+    return None, None
+
+
 class LlavaMetaModel:
 
     def __init__(self, config):
@@ -820,6 +846,11 @@ class LlavaMetaForCausalLM(ABC):
             if visual_keep_mask is not None:
                 frame_ids = frame_ids[visual_keep_mask]
             shifted["visual_frame_ids"] = frame_ids
+        if "visual_token_positions_3d" in metadata and isinstance(metadata["visual_token_positions_3d"], torch.Tensor):
+            positions_3d = metadata["visual_token_positions_3d"].clone()
+            if visual_keep_mask is not None:
+                positions_3d = positions_3d[visual_keep_mask]
+            shifted["visual_token_positions_3d"] = positions_3d
         device = None
         for value in shifted.values():
             if isinstance(value, torch.Tensor):
@@ -836,6 +867,154 @@ class LlavaMetaForCausalLM(ABC):
         shifted.setdefault("newline_token_indices", _empty_long(device))
         shifted.setdefault("camera_prefix_token_indices", _empty_long(device))
         return shifted
+
+    def _attach_llm_geo_positions_to_metadata(self, metadata, geometry_point_maps, geometry_source):
+        if metadata is None or geometry_point_maps is None:
+            return metadata
+        visual_indices = metadata.get("visual_token_indices", None)
+        frame_ids = metadata.get("visual_frame_ids", None)
+        if not isinstance(visual_indices, torch.Tensor) or visual_indices.numel() == 0:
+            return metadata
+        if not isinstance(frame_ids, torch.Tensor) or frame_ids.numel() != visual_indices.numel():
+            raise RuntimeError("LLM visual 3D RoPE metadata requires visual_frame_ids aligned to visual_token_indices.")
+
+        tokens_per_frame = metadata.get("tokens_per_frame", None)
+        if not tokens_per_frame:
+            raise RuntimeError("LLM visual 3D RoPE metadata requires tokens_per_frame.")
+        unique_counts = sorted({int(value) for value in tokens_per_frame})
+        if len(unique_counts) != 1:
+            raise RuntimeError(f"LLM visual 3D RoPE expects equal grid tokens per frame, got {tokens_per_frame}")
+        target_tokens = unique_counts[0]
+
+        geometry_point_maps = geometry_point_maps.to(device=visual_indices.device)
+        if int(geometry_point_maps.shape[0]) < len(tokens_per_frame):
+            raise RuntimeError(
+                "LLM visual 3D RoPE point-map frame count is smaller than visual frames: "
+                f"point_maps={tuple(geometry_point_maps.shape)}, tokens_per_frame={tokens_per_frame}"
+            )
+        pooled = pool_point_map_to_tokens(geometry_point_maps[: len(tokens_per_frame)], target_tokens)
+
+        frame_order = metadata.get("frame_order", list(range(len(tokens_per_frame))))
+        frame_to_local = {int(frame_id): local_idx for local_idx, frame_id in enumerate(frame_order)}
+        frame_offsets = {int(frame_id): 0 for frame_id in frame_ids.detach().cpu().tolist()}
+        positions = []
+        for frame_id in frame_ids.detach().cpu().tolist():
+            local_frame_id = int(frame_id)
+            if local_frame_id not in frame_to_local:
+                raise RuntimeError(f"LLM visual 3D RoPE frame id {local_frame_id} missing from frame_order={frame_order}")
+            token_offset = frame_offsets[local_frame_id]
+            if token_offset >= target_tokens:
+                raise RuntimeError(
+                    "LLM visual 3D RoPE visual token layout has more tokens for a frame than the pooled point map."
+                )
+            positions.append(pooled[frame_to_local[local_frame_id], token_offset])
+            frame_offsets[local_frame_id] = token_offset + 1
+
+        positions = torch.stack(positions, dim=0).to(device=visual_indices.device)
+        if positions.shape[0] != visual_indices.numel():
+            raise RuntimeError(
+                "LLM visual 3D RoPE position count must match visual token count, "
+                f"got positions={positions.shape[0]} visual={visual_indices.numel()}"
+            )
+        metadata["visual_token_positions_3d"] = positions
+        metadata["llm_geo_source"] = geometry_source
+        return metadata
+
+    def _build_llm_geo_tensors(self, visual_metadata_padded, batch_size, max_len, dtype, device):
+        llm_geo_pos = torch.zeros((batch_size, max_len, 3), dtype=dtype, device=device)
+        llm_geo_mask = torch.zeros((batch_size, max_len), dtype=torch.bool, device=device)
+        debug_samples = []
+
+        for batch_idx, metadata in enumerate(visual_metadata_padded):
+            visual_indices = metadata.get("visual_token_indices", _empty_long(device)).to(device=device)
+            positions_3d = metadata.get("visual_token_positions_3d", None)
+            if not isinstance(positions_3d, torch.Tensor) or visual_indices.numel() == 0:
+                debug_samples.append({
+                    "sample_id": int(batch_idx),
+                    "seq_len": int(max_len),
+                    "num_visual_tokens": int(visual_indices.numel()),
+                    "num_frames": int(len(metadata.get("tokens_per_frame", []) or [])),
+                    "llm_geo_mask_count": 0,
+                    "visual_token_indices_head": visual_indices[:16].detach().cpu().tolist(),
+                    "first_3d_positions": [],
+                    "geometry_source": metadata.get("llm_geo_source", None),
+                })
+                continue
+            positions_3d = positions_3d.to(device=device, dtype=dtype)
+            if positions_3d.shape[0] != visual_indices.numel():
+                raise RuntimeError(
+                    "LLM visual 3D RoPE dense metadata mismatch: "
+                    f"positions={positions_3d.shape[0]} visual_indices={visual_indices.numel()}"
+                )
+            keep = visual_indices < int(max_len)
+            visual_indices = visual_indices[keep]
+            positions_3d = positions_3d[keep]
+            finite = torch.isfinite(positions_3d).all(dim=-1)
+            visual_indices = visual_indices[finite]
+            positions_3d = positions_3d[finite]
+            if visual_indices.numel() > 0:
+                llm_geo_pos[batch_idx, visual_indices] = positions_3d
+                llm_geo_mask[batch_idx, visual_indices] = True
+
+            def overlap_count(key):
+                values = metadata.get(key, _empty_long(device))
+                if not isinstance(values, torch.Tensor) or values.numel() == 0 or visual_indices.numel() == 0:
+                    return 0
+                return int(torch.isin(visual_indices, values.to(device=device)).sum().item())
+
+            debug_samples.append({
+                "sample_id": int(batch_idx),
+                "seq_len": int(max_len),
+                "num_visual_tokens": int(metadata.get("visual_token_indices", _empty_long(device)).numel()),
+                "num_frames": int(len(metadata.get("tokens_per_frame", []) or [])),
+                "llm_geo_mask_count": int(llm_geo_mask[batch_idx].sum().item()),
+                "visual_token_indices_head": visual_indices[:16].detach().cpu().tolist(),
+                "newline_overlap": overlap_count("newline_token_indices"),
+                "prefix_overlap": overlap_count("camera_prefix_token_indices"),
+                "padding_overlap": overlap_count("padding_token_indices"),
+                "text_overlap": overlap_count("text_token_indices"),
+                "first_3d_positions": positions_3d[:5].detach().float().cpu().tolist(),
+                "geometry_source": metadata.get("llm_geo_source", None),
+            })
+
+        debug = {
+            "seq_len": int(max_len),
+            "num_valid_geo_tokens": int(llm_geo_mask.sum().item()),
+            "samples": debug_samples,
+            "shuffle_enabled": False,
+            "shuffle_seed": int(getattr(self.config, "llm_visual_3d_rope_shuffle_seed", 0) or 0),
+            "shuffle_mode": getattr(self.config, "llm_visual_3d_rope_shuffle_mode", "intra_sample_token_shuffle"),
+        }
+
+        if (
+            (not self.training)
+            and _as_bool_config(getattr(self.config, "llm_visual_3d_rope_shuffle", False), False)
+        ):
+            mode = str(getattr(self.config, "llm_visual_3d_rope_shuffle_mode", "intra_sample_token_shuffle"))
+            if mode != "intra_sample_token_shuffle":
+                raise ValueError(f"Unsupported llm_visual_3d_rope_shuffle_mode: {mode}")
+            seed = int(getattr(self.config, "llm_visual_3d_rope_shuffle_seed", 0) or 0)
+            debug["shuffle_enabled"] = True
+            debug["shuffle_permutations"] = []
+            for batch_idx in range(batch_size):
+                idx = torch.nonzero(llm_geo_mask[batch_idx], as_tuple=False).flatten()
+                if idx.numel() <= 1:
+                    continue
+                generator_device = device if device.type == "cuda" else "cpu"
+                generator = torch.Generator(device=generator_device)
+                generator.manual_seed(seed + batch_idx)
+                perm_order = torch.randperm(idx.numel(), generator=generator, device=device)
+                if torch.equal(perm_order, torch.arange(idx.numel(), device=device)):
+                    perm_order = torch.roll(perm_order, shifts=1, dims=0)
+                original = llm_geo_pos[batch_idx, idx].clone()
+                llm_geo_pos[batch_idx, idx] = original[perm_order]
+                debug["shuffle_permutations"].append({
+                    "sample_id": int(batch_idx),
+                    "token_indices_head": idx[:8].detach().cpu().tolist(),
+                    "permuted_from_head": idx[perm_order[:8]].detach().cpu().tolist(),
+                })
+
+        return llm_geo_pos, llm_geo_mask, debug
 
     def _pool_cut3r_teacher_to_student_grid(self, teacher_tokens, target_tokens, pool_mode):
         token_count = int(teacher_tokens.shape[0])
@@ -2039,13 +2218,18 @@ class LlavaMetaForCausalLM(ABC):
         image_feature = image_feature.permute(1, 2, 0).contiguous()
         return image_feature
 
-    def prepare_inputs_labels_for_multimodal(self, input_ids, position_ids, attention_mask, past_key_values, labels, images, spatial_features=None, point_maps=None, modalities=["image"], image_sizes=None, return_visual_metadata=False, geometry_outputs=None, geometry_spatial_features=None):
+    def prepare_inputs_labels_for_multimodal(self, input_ids, position_ids, attention_mask, past_key_values, labels, images, spatial_features=None, point_maps=None, modalities=["image"], image_sizes=None, return_visual_metadata=False, geometry_outputs=None, geometry_spatial_features=None, return_llm_geo_metadata=False):
         vision_tower = self.get_vision_tower()
         # rank_print(modalities)
         if vision_tower is None or images is None or input_ids.shape[1] == 1:
             result = (input_ids, position_ids, attention_mask, past_key_values, None, labels)
+            extras = []
             if return_visual_metadata:
-                return result + (None,)
+                extras.append(None)
+            if return_llm_geo_metadata:
+                extras.extend([None, None, {"skip_reason": "no_multimodal_prefill"}])
+            if extras:
+                return result + tuple(extras)
             return result
 
         if isinstance(modalities, str):
@@ -2099,6 +2283,25 @@ class LlavaMetaForCausalLM(ABC):
             # This is a list, each element is [num_images, patch * patch, dim]
             # rank_print(f"Concat images : {concat_images.shape}")
             encoded_image_features = torch.split(encoded_image_features, split_sizes)
+            llm_geo_point_maps_by_image = []
+            if return_llm_geo_metadata:
+                for geo_idx in range(len(images_list)):
+                    loaded_spatial_features = None
+                    if isinstance(spatial_features, (list, tuple)) and geo_idx < len(spatial_features):
+                        loaded_spatial_features = spatial_features[geo_idx]
+                    elif isinstance(spatial_features, dict):
+                        loaded_spatial_features = spatial_features
+                    geo_maps, geo_source = _resolve_llm_geo_point_maps(
+                        self.get_model().config,
+                        loaded_spatial_features=loaded_spatial_features,
+                        point_maps=point_maps,
+                    )
+                    if geo_maps is not None and int(geo_maps.shape[0]) != int(images_list[geo_idx].shape[0]):
+                        raise RuntimeError(
+                            "LLM visual 3D RoPE point-map frame count must match sampled frames, "
+                            f"got point_maps={tuple(geo_maps.shape)} images={tuple(images_list[geo_idx].shape)}"
+                        )
+                    llm_geo_point_maps_by_image.append((geo_maps, geo_source))
             image_features = []
             image_feature_layouts = []
             for idx, image_feat in enumerate(encoded_image_features):
@@ -2172,6 +2375,9 @@ class LlavaMetaForCausalLM(ABC):
                                 prefix_len=prefix_len,
                                 device=image_feature.device,
                             )
+                            if return_llm_geo_metadata and image_idx < len(llm_geo_point_maps_by_image):
+                                geo_maps, geo_source = llm_geo_point_maps_by_image[image_idx]
+                                metadata = self._attach_llm_geo_positions_to_metadata(metadata, geo_maps, geo_source)
                             image_feature = self.add_token_per_grid(image_feature)
                             if getattr(self.config, "add_faster_video", False):
                                 faster_video_feature = self.add_token_per_grid(all_faster_video_features[image_idx])
@@ -2214,6 +2420,9 @@ class LlavaMetaForCausalLM(ABC):
                             metadata["visual_frame_ids"] = metadata["visual_frame_ids"][keep_visual]
                             metadata["newline_token_indices"] = newline_positions
                             metadata["tokens_per_frame"] = [int(image_feature.shape[1]) - prefix_len for _ in range(int(image_feature.shape[0]))]
+                            if return_llm_geo_metadata and image_idx < len(llm_geo_point_maps_by_image):
+                                geo_maps, geo_source = llm_geo_point_maps_by_image[image_idx]
+                                metadata = self._attach_llm_geo_positions_to_metadata(metadata, geo_maps, geo_source)
                             image_feature = self.add_token_per_frame(image_feature)
 
                             new_image_features.append(image_feature.flatten(0, 1))
@@ -2232,6 +2441,9 @@ class LlavaMetaForCausalLM(ABC):
                                 prefix_len=prefix_len,
                                 device=image_feature.device,
                             )
+                            if return_llm_geo_metadata and image_idx < len(llm_geo_point_maps_by_image):
+                                geo_maps, geo_source = llm_geo_point_maps_by_image[image_idx]
+                                metadata = self._attach_llm_geo_positions_to_metadata(metadata, geo_maps, geo_source)
                             image_feature = image_feature.flatten(0, 1)
                             if 'unpad' in mm_patch_merge_type:
                                 image_feature = torch.cat((
@@ -2256,6 +2468,9 @@ class LlavaMetaForCausalLM(ABC):
                                 prefix_len=prefix_len,
                                 device=image_feature.device,
                             )
+                            if return_llm_geo_metadata and image_idx < len(llm_geo_point_maps_by_image):
+                                geo_maps, geo_source = llm_geo_point_maps_by_image[image_idx]
+                                metadata = self._attach_llm_geo_positions_to_metadata(metadata, geo_maps, geo_source)
                             new_image_features.append(image_feature.flatten(0, 1))
                             new_image_feature_metadata.append(metadata)
                         else:
@@ -2330,6 +2545,9 @@ class LlavaMetaForCausalLM(ABC):
                             prefix_len=prefix_len,
                             device=image_feature.device,
                         )
+                        if return_llm_geo_metadata and image_idx < len(llm_geo_point_maps_by_image):
+                            geo_maps, geo_source = llm_geo_point_maps_by_image[image_idx]
+                            metadata = self._attach_llm_geo_positions_to_metadata(metadata, geo_maps, geo_source)
                         image_feature = self.add_token_per_grid(image_feature)
                         new_image_features.append(image_feature)
                         new_image_feature_metadata.append(metadata)
@@ -2589,8 +2807,20 @@ class LlavaMetaForCausalLM(ABC):
         # import pdb; pdb.set_trace()
         # rank0_print("Finish preparing")
         result = (None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels)
+        extras = []
         if return_visual_metadata:
-            return result + (visual_metadata_padded,)
+            extras.append(visual_metadata_padded)
+        if return_llm_geo_metadata:
+            llm_geo_pos, llm_geo_mask, llm_geo_debug = self._build_llm_geo_tensors(
+                visual_metadata_padded,
+                batch_size=batch_size,
+                max_len=max_len,
+                dtype=new_input_embeds.dtype,
+                device=new_input_embeds.device,
+            )
+            extras.extend([llm_geo_pos, llm_geo_mask, llm_geo_debug])
+        if extras:
+            return result + tuple(extras)
         return result
 
     def initialize_vision_tokenizer(self, model_args, tokenizer):

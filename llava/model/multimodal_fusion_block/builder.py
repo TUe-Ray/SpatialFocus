@@ -99,9 +99,10 @@ class GeoRoPEFusionRotary(nn.Module):
 
         if group_split is None:
             group_split = "2,1,2"
+        group_split = str(group_split).replace("|", ",").replace(";", ",")
 
         try:
-            weights = [int(value.strip()) for value in str(group_split).split(",")]
+            weights = [int(value.strip()) for value in group_split.split(",")]
         except ValueError as exc:
             raise ValueError(f"{mode} mode group_split must contain integers: {group_split}") from exc
 
