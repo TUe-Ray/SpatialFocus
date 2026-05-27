@@ -16,7 +16,7 @@
 SUFFIX="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
 NOTE="${NOTE:-CUT3R GeoRoPE Fusion: svf_geo_rope_fusion with point-map-derived spherical positions, 100% training data}"
 
-TRAIN_DATA_PERCENTAGE="100"
+TRAIN_DATA_PERCENTAGE="${TRAIN_DATA_PERCENTAGE:-100}"
 
 MODEL_FUSION_BLOCK="${MODEL_FUSION_BLOCK:-svf_geo_rope_fusion}"
 # Fusion options for this GeoRoPE Fusion experiment:
@@ -156,20 +156,21 @@ DATA_PATH_YAML="${DATA_PATH_YAML:-scripts/VLM_3R/vsibench_data.yaml}"  # FAST js
 DATA_GROUP_BY_MODALITY_LENGTH="True"
 
 
-PER_DEVICE_TRAIN_BATCH_SIZE=1
-TARGET_GLOBAL_BATCH_SIZE=128
-NUM_TRAIN_EPOCHS="1"
-SAVE_TOTAL_LIMIT="2"
-SAVE_STRATEGY="steps"
-SAVE_STEPS="100"
+PER_DEVICE_TRAIN_BATCH_SIZE="${PER_DEVICE_TRAIN_BATCH_SIZE:-1}"
+TARGET_GLOBAL_BATCH_SIZE="${TARGET_GLOBAL_BATCH_SIZE:-128}"
+NUM_TRAIN_EPOCHS="${NUM_TRAIN_EPOCHS:-1}"
+MAX_STEPS="${MAX_STEPS:-}"
+SAVE_TOTAL_LIMIT="${SAVE_TOTAL_LIMIT:-2}"
+SAVE_STRATEGY="${SAVE_STRATEGY:-steps}"
+SAVE_STEPS="${SAVE_STEPS:-100}"
 LEARNING_RATE="2e-5"
 WEIGHT_DECAY="0."
 WARMUP_RATIO="0.03"
 LR_SCHEDULER_TYPE="cosine"
-LOGGING_STEPS="5"
-DATALOADER_NUM_WORKERS="6"
-REPORT_TO="wandb"
-DATALOADER_DROP_LAST="True"
+LOGGING_STEPS="${LOGGING_STEPS:-5}"
+DATALOADER_NUM_WORKERS="${DATALOADER_NUM_WORKERS:-6}"
+REPORT_TO="${REPORT_TO:-wandb}"
+DATALOADER_DROP_LAST="${DATALOADER_DROP_LAST:-True}"
 
 
 # ========================================================================================
@@ -509,6 +510,9 @@ declare -A TRAINING_ARGS=(
     [seed]="$SEED"
     [data_seed]="$SEED"
 )
+if [[ -n "$MAX_STEPS" ]]; then
+    TRAINING_ARGS[max_steps]="$MAX_STEPS"
+fi
 
 echo "========================================"
 echo " Training Configuration"
