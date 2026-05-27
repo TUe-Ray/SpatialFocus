@@ -279,6 +279,27 @@ class ModelArguments:
     allow_missing_geometry_targets: bool = field(default=False)
     geometry_projection_dropout: float = field(default=0.0)
     tune_geometry_aware_projection: bool = field(default=False)
+    use_bev_supervision: bool = field(
+        default=False,
+        metadata={"help": "Enable train-only BEV auxiliary spatial supervision."},
+    )
+    bev_head_source: str = field(
+        default="llm_output",
+        metadata={"help": "Hidden-state source for BEV head: llm_output, llm_layer_N, or fusion_output."},
+    )
+    lambda_bev: float = field(default=0.05, metadata={"help": "Weight for the auxiliary BEV loss."})
+    bev_coord_scale: float = field(default=10.0, metadata={"help": "Metric scale used to normalize BEV targets."})
+    bev_detach_hidden: bool = field(default=False, metadata={"help": "Diagnostic: detach BEV head inputs."})
+    bev_shuffle_target: bool = field(default=False, metadata={"help": "Diagnostic negative control: shuffle BEV targets across samples."})
+    bev_visualize_debug: bool = field(default=False, metadata={"help": "Enable explicit BEV debug visualization hooks."})
+    bev_point_map_key: str = field(
+        default="point_maps_ref",
+        metadata={"help": "CUT3R point-map key used for BEV targets; point_maps_cam is camera-space diagnostic only."},
+    )
+    bev_conf_threshold: float = field(
+        default=0.0,
+        metadata={"help": "Confidence threshold for BEV token validity when confidence maps are available."},
+    )
 
     unfreeze_mm_vision_tower: bool = field(default=False)
     unfreeze_language_model: bool = field(default=False)
@@ -486,7 +507,7 @@ def get_mm_adapter_state_maybe_zero_3(named_params, keys_to_match):
 def find_all_linear_names(model):
     cls = torch.nn.Linear
     lora_module_names = set()
-    multimodal_keywords = ['mm_projector', 'vision_tower', 'vision_resampler', 'spatial_tower', 'fusion_block', 'geometry_aware_projection']
+    multimodal_keywords = ['mm_projector', 'vision_tower', 'vision_resampler', 'spatial_tower', 'fusion_block', 'geometry_aware_projection', 'bev_head']
     for name, module in model.named_modules():
         if any(mm_keyword in name for mm_keyword in multimodal_keywords):
             continue
@@ -509,6 +530,19 @@ def find_spatial_rank_model(model):
     if hasattr(model, "initialize_spatial_rank_head"):
         return model
     raise RuntimeError("Could not find a VLM-3R module that can initialize spatial_rank_head/P_geo.")
+
+
+def find_bev_model(model):
+    for module in model.modules():
+        if (
+            hasattr(module, "initialize_bev_head")
+            and hasattr(module, "prepare_inputs_labels_for_multimodal")
+            and module.__class__.__name__.startswith("Llava")
+        ):
+            return module
+    if hasattr(model, "initialize_bev_head"):
+        return model
+    raise RuntimeError("Could not find a VLM-3R module that can initialize BEVHead.")
 
 
 def _normalize_optional_path(path):
@@ -620,7 +654,7 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: st
     rank0_print(f"Only save projectors: {check_only_save_mm_adapter_tunnable}")
     if check_only_save_mm_adapter_tunnable:
         # Only save Adapter
-        keys_to_match = ["mm_projector", "vision_resampler", "fusion_block", "geometry_aware_projection"] # save fusion_block and projectors
+        keys_to_match = ["mm_projector", "vision_resampler", "fusion_block", "geometry_aware_projection", "bev_head"] # save fusion_block and projectors
         if getattr(trainer.args, "use_im_start_end", False):
             keys_to_match.extend(["embed_tokens", "embed_in"])
 
@@ -2511,6 +2545,18 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
         overwrite_config["geometry_fixed_scene_scale"] = model_args.geometry_fixed_scene_scale
         overwrite_config["allow_missing_geometry_targets"] = model_args.allow_missing_geometry_targets
         overwrite_config["geometry_projection_dropout"] = model_args.geometry_projection_dropout
+    if model_args.use_bev_supervision or model_args.bev_visualize_debug:
+        if cfg_pretrained is None:
+            cfg_pretrained = AutoConfig.from_pretrained(model_args.model_name_or_path)
+        overwrite_config["use_bev_supervision"] = model_args.use_bev_supervision
+        overwrite_config["bev_head_source"] = model_args.bev_head_source
+        overwrite_config["lambda_bev"] = model_args.lambda_bev
+        overwrite_config["bev_coord_scale"] = model_args.bev_coord_scale
+        overwrite_config["bev_detach_hidden"] = model_args.bev_detach_hidden
+        overwrite_config["bev_shuffle_target"] = model_args.bev_shuffle_target
+        overwrite_config["bev_visualize_debug"] = model_args.bev_visualize_debug
+        overwrite_config["bev_point_map_key"] = model_args.bev_point_map_key
+        overwrite_config["bev_conf_threshold"] = model_args.bev_conf_threshold
 
     if overwrite_config:
         assert cfg_pretrained is not None, "cfg_pretrained is None"
@@ -2686,6 +2732,23 @@ def train(attn_implementation=None):
     model = get_model(model_args, training_args, bnb_model_from_pretrained_args)
     ensure_checkpoint_config_metadata(model, source_model_name_or_path=model_args.model_name_or_path)
     model.config.use_cache = False
+    for attr in (
+        "use_bev_supervision",
+        "bev_head_source",
+        "lambda_bev",
+        "bev_coord_scale",
+        "bev_detach_hidden",
+        "bev_shuffle_target",
+        "bev_visualize_debug",
+        "bev_point_map_key",
+        "bev_conf_threshold",
+    ):
+        setattr(model.config, attr, getattr(model_args, attr))
+    if model_args.use_bev_supervision:
+        find_bev_model(model).initialize_bev_head(
+            device=training_args.device,
+            dtype=compute_dtype,
+        )
     if model_args.rope_scaling_factor is not None and model_args.rope_scaling_type is not None:
         model.config.rope_scaling = {
             "factor": model_args.rope_scaling_factor,
@@ -2991,6 +3054,12 @@ def train(attn_implementation=None):
             if "geometry_aware_projection" in tunable_parts:
                 for p in model.get_geometry_aware_projection().parameters():
                     p.requires_grad = True
+
+        if model_args.use_bev_supervision:
+            find_bev_model(model).initialize_bev_head(
+                device=training_args.device,
+                dtype=compute_dtype,
+            )
 
         total_params = sum(p.ds_numel if hasattr(p, "ds_numel") else p.numel() for p in model.parameters())
         trainable_params = sum(p.ds_numel if hasattr(p, "ds_numel") else p.numel() for p in model.parameters() if p.requires_grad)

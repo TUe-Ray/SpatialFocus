@@ -91,6 +91,15 @@ class ProgressLoggerCallback(TrainerCallback):
             rank_str += f" | L_rank={rank_loss:.4f}"
         if isinstance(rank_acc, float):
             rank_str += f" | rank_acc={rank_acc:.3f}"
+        bev_loss = logs.get("loss_bev")
+        bev_mae = logs.get("bev_mae_meter")
+        bev_valid = logs.get("valid_bev_token_ratio")
+        if isinstance(bev_loss, float):
+            rank_str += f" | L_bev={bev_loss:.4f}"
+        if isinstance(bev_mae, float):
+            rank_str += f" | bev_mae={bev_mae:.3f}m"
+        if isinstance(bev_valid, float):
+            rank_str += f" | bev_valid={bev_valid:.3f}"
 
         print(f"[{bar}] {step}/{max_steps} ({pct:.1f}%) [{elapsed_str}<{eta_str}, {speed_str}] | epoch={epoch:.3f}{loss_str}{lr_str}{rank_str}", flush=True)
 
@@ -346,6 +355,13 @@ class LLaVATrainer(Trainer):
                 return metrics
         return None
 
+    def _bev_metrics(self):
+        for module in self.model.modules():
+            metrics = getattr(module, "_bev_last_metrics", None)
+            if metrics:
+                return metrics
+        return None
+
     @staticmethod
     def _jsonable(value):
         if isinstance(value, torch.Tensor):
@@ -425,10 +441,16 @@ class LLaVATrainer(Trainer):
 
     def log(self, logs, *args, **kwargs):
         metrics = self._spatial_rank_metrics()
+        bev_metrics = self._bev_metrics()
         geo_rope_metrics, geo_rope_stats = self._geo_rope_fusion_metrics()
         if metrics:
             logs = dict(logs)
             logs.update(metrics)
+        if bev_metrics:
+            numeric_bev_metrics = {}
+            self._flatten_numeric("", bev_metrics, numeric_bev_metrics)
+            logs = dict(logs)
+            logs.update(numeric_bev_metrics)
         if geo_rope_metrics:
             logs = dict(logs)
             logs.update(geo_rope_metrics)
@@ -683,7 +705,7 @@ class LLaVATrainer(Trainer):
             output_dir = os.path.join(run_dir, checkpoint_folder)
 
             # Only save Adapter
-            keys_to_match = ["mm_projector", "vision_resampler", "fusion_block"]
+            keys_to_match = ["mm_projector", "vision_resampler", "fusion_block", "bev_head"]
             if getattr(self.args, "use_im_start_end", False):
                 keys_to_match.extend(["embed_tokens", "embed_in"])
 
@@ -732,7 +754,7 @@ class LLaVADPOTrainer(DPOTrainer):
             output_dir = os.path.join(run_dir, checkpoint_folder)
 
             # Only save Adapter
-            keys_to_match = ["mm_projector", "vision_resampler"]
+            keys_to_match = ["mm_projector", "vision_resampler", "bev_head"]
             if getattr(self.args, "use_im_start_end", False):
                 keys_to_match.extend(["embed_tokens", "embed_in"])
 
