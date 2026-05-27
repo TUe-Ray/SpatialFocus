@@ -43,6 +43,9 @@ WANDB_ENABLE="${WANDB_ENABLE:-0}"
 WANDB_PROJECT="${WANDB_PROJECT:-vlm3r-depth-probes}"
 WANDB_DIR="${WANDB_DIR:-${WORK:-/leonardo_work/EUHPC_D32_006}/wandb}"
 WANDB_NAME="${WANDB_NAME:-depth-probes-${SLURM_JOB_ID:-manual}}"
+SKIP_EXISTING="${SKIP_EXISTING:-0}"
+FEATURE_LEVELS="${FEATURE_LEVELS:-}"
+TRAIN_EXTRA_ARGS="${TRAIN_EXTRA_ARGS:-}"
 
 mkdir -p logs
 
@@ -52,12 +55,24 @@ cmd=(python -u scripts/probing/train_depth_probes.py
   --model-labels "${MODEL_LABELS}" \
   --device "${DEVICE}")
 
+if [[ -n "$FEATURE_LEVELS" ]]; then
+  cmd+=(--feature-levels "$FEATURE_LEVELS")
+fi
+if [[ "$SKIP_EXISTING" == "1" || "$SKIP_EXISTING" == "true" ]]; then
+  cmd+=(--skip-existing)
+fi
+
 if [[ "$WANDB_ENABLE" == "1" || "$WANDB_ENABLE" == "true" ]]; then
   cmd+=(--wandb
     --wandb-project "${WANDB_PROJECT}"
     --wandb-dir "${WANDB_DIR}"
     --wandb-name "${WANDB_NAME}"
   )
+fi
+if [[ -n "$TRAIN_EXTRA_ARGS" ]]; then
+  # shellcheck disable=SC2206
+  extra_args=($TRAIN_EXTRA_ARGS)
+  cmd+=("${extra_args[@]}")
 fi
 
 "${cmd[@]}"

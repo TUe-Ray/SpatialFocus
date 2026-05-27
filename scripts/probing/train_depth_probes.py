@@ -289,6 +289,17 @@ def filter_existing_records(output_root: Path, model_label: str, feature_level: 
     return kept
 
 
+def load_existing_result(output_root: Path, model_label: str, feature_level: str) -> dict[str, Any] | None:
+    metrics_path = output_root / "probes" / model_label / feature_level / "metrics.json"
+    if not metrics_path.exists():
+        return None
+    with metrics_path.open("r", encoding="utf-8") as f:
+        payload = json.load(f)
+    if not isinstance(payload, dict):
+        raise TypeError(f"Expected metrics dict at {metrics_path}, got {type(payload)}")
+    return payload
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
@@ -302,6 +313,7 @@ def main() -> None:
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--allow-partial", action="store_true")
+    parser.add_argument("--skip-existing", action="store_true", help="Reuse probes that already have metrics.json.")
     parser.add_argument("--wandb", action="store_true", help="Log probe training to Weights & Biases.")
     parser.add_argument("--wandb-project", default=os.environ.get("WANDB_PROJECT", "vlm3r-depth-probes"))
     parser.add_argument("--wandb-entity", default=os.environ.get("WANDB_ENTITY"))
@@ -347,6 +359,18 @@ def main() -> None:
         for model_label in model_labels:
             levels = [part.strip() for part in args.feature_levels.split(",") if part.strip()] if args.feature_levels else available_feature_levels(model_label)
             for feature_level in levels:
+                if args.skip_existing:
+                    existing = load_existing_result(output_root, model_label, feature_level)
+                    if existing is not None:
+                        print(f"[INFO] Skipping existing probe {model_label}/{feature_level}", flush=True)
+                        all_results.append(existing)
+                        if wandb_run is not None:
+                            prefix = f"best/{model_label}/{feature_level}"
+                            wandb_run.summary[f"{prefix}/mae"] = existing.get("mae")
+                            wandb_run.summary[f"{prefix}/absrel"] = existing.get("absrel")
+                            wandb_run.summary[f"{prefix}/delta125"] = existing.get("delta125")
+                            wandb_run.summary[f"{prefix}/epoch"] = existing.get("best_epoch")
+                        continue
                 train_kept = filter_existing_records(output_root, model_label, feature_level, train_records)
                 val_kept = filter_existing_records(output_root, model_label, feature_level, val_records)
                 if not args.allow_partial and (len(train_kept) != len(train_records) or len(val_kept) != len(val_records)):
