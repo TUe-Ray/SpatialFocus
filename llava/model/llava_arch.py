@@ -688,6 +688,19 @@ class LlavaMetaForCausalLM(ABC):
         self._spatial_rank_grad_checked = False
         return self.spatial_rank_head
 
+    def initialize_bev_head(self, device=None, dtype=None):
+        from .geometry import BEVHead
+
+        hidden_size = int(getattr(self.config, "hidden_size"))
+        if getattr(self, "bev_head", None) is None:
+            self.bev_head = BEVHead(hidden_size)
+        if device is not None or dtype is not None:
+            self.bev_head.to(device=device, dtype=dtype)
+        for param in self.bev_head.parameters():
+            param.requires_grad = True
+        self.config.has_bev_head = True
+        return self.bev_head
+
     def _build_grid_metadata(
         self,
         num_frames,
