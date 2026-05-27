@@ -1,4 +1,5 @@
 import copy
+import json
 import math
 import os
 from pathlib import Path
@@ -235,6 +236,20 @@ class Vlm3r(lmms):
         probe_cross_frame_include_self: Union[bool, str] = True,
         probe_cross_frame_mode: str = "sliding_window",
         probe_intra_frame_pos_shuffle: Union[bool, str] = False,
+        llm_visual_3d_rope_enable: Union[bool, str] = False,
+        llm_visual_3d_rope_alpha: Optional[Union[float, str]] = 1.0,
+        llm_visual_3d_rope_mode: str = "spherical",
+        llm_visual_3d_rope_group_split: str = "2,1,2",
+        llm_visual_3d_rope_max_depth: Optional[Union[float, str]] = 10.0,
+        llm_visual_3d_rope_layers: str = "all",
+        llm_visual_3d_rope_geometry_source: str = "point_maps_ref",
+        llm_visual_3d_rope_shuffle: Union[bool, str] = False,
+        llm_visual_3d_rope_shuffle_mode: str = "intra_sample_token_shuffle",
+        llm_visual_3d_rope_shuffle_seed: Optional[Union[int, str]] = 0,
+        llm_visual_3d_rope_log_stats: Union[bool, str] = True,
+        llm_visual_3d_rope_log_layers: str = "first_middle_last",
+        llm_visual_3d_rope_force_eager_attention: Union[bool, str] = True,
+        llm_visual_3d_rope_stats_path: Optional[str] = None,
         spatial_features_root: str = None,
         spatial_features_subdir: str = "spatial_features_points",
         **kwargs,
@@ -290,6 +305,26 @@ class Vlm3r(lmms):
         self.probe_cross_frame_include_self = _str_to_bool(probe_cross_frame_include_self)
         self.probe_cross_frame_mode = probe_cross_frame_mode or "sliding_window"
         self.probe_intra_frame_pos_shuffle = _str_to_bool(probe_intra_frame_pos_shuffle)
+        self.llm_visual_3d_rope_enable = _str_to_bool(llm_visual_3d_rope_enable)
+        self.llm_visual_3d_rope_alpha = float(llm_visual_3d_rope_alpha)
+        self.llm_visual_3d_rope_mode = llm_visual_3d_rope_mode or "spherical"
+        self.llm_visual_3d_rope_group_split = (llm_visual_3d_rope_group_split or "2,1,2").replace("|", ",").replace(";", ",")
+        self.llm_visual_3d_rope_max_depth = float(llm_visual_3d_rope_max_depth)
+        self.llm_visual_3d_rope_layers = llm_visual_3d_rope_layers or "all"
+        self.llm_visual_3d_rope_geometry_source = _normalize_geo_rope_point_map_key(llm_visual_3d_rope_geometry_source)
+        self.llm_visual_3d_rope_shuffle = _str_to_bool(llm_visual_3d_rope_shuffle)
+        self.llm_visual_3d_rope_shuffle_mode = llm_visual_3d_rope_shuffle_mode or "intra_sample_token_shuffle"
+        self.llm_visual_3d_rope_shuffle_seed = int(llm_visual_3d_rope_shuffle_seed or 0)
+        self.llm_visual_3d_rope_log_stats = _str_to_bool(llm_visual_3d_rope_log_stats)
+        self.llm_visual_3d_rope_log_layers = llm_visual_3d_rope_log_layers or "first_middle_last"
+        self.llm_visual_3d_rope_force_eager_attention = _str_to_bool(llm_visual_3d_rope_force_eager_attention)
+        stats_path = llm_visual_3d_rope_stats_path or os.environ.get("LLM_VISUAL_3D_ROPE_STATS_PATH", "")
+        self.llm_visual_3d_rope_stats_path = Path(stats_path) if stats_path else None
+        self._llm_visual_3d_rope_eval_counter = 0
+        if self.llm_visual_3d_rope_enable and self.llm_visual_3d_rope_force_eager_attention:
+            self.attn_implementation = "eager"
+        elif self.llm_visual_3d_rope_enable and self.attn_implementation != "eager":
+            raise RuntimeError("LLM visual-token 3D RoPE eval requires attn_implementation=eager.")
         self.spatial_features_root = Path(spatial_features_root) if spatial_features_root not in (None, "") else None
         self.spatial_features_subdir = spatial_features_subdir or "spatial_features_points"
 
@@ -330,6 +365,25 @@ class Vlm3r(lmms):
             overwrite_config["probe_cross_frame_include_self"] = self.probe_cross_frame_include_self
             overwrite_config["probe_cross_frame_mode"] = self.probe_cross_frame_mode
             overwrite_config["probe_intra_frame_pos_shuffle"] = self.probe_intra_frame_pos_shuffle
+            overwrite_config["llm_visual_3d_rope_enable"] = self.llm_visual_3d_rope_enable
+            overwrite_config["llm_visual_3d_rope_alpha"] = self.llm_visual_3d_rope_alpha
+            overwrite_config["llm_visual_3d_rope_mode"] = self.llm_visual_3d_rope_mode
+            overwrite_config["llm_visual_3d_rope_group_split"] = self.llm_visual_3d_rope_group_split
+            overwrite_config["llm_visual_3d_rope_max_depth"] = self.llm_visual_3d_rope_max_depth
+            overwrite_config["llm_visual_3d_rope_layers"] = self.llm_visual_3d_rope_layers
+            overwrite_config["llm_visual_3d_rope_geometry_source"] = self.llm_visual_3d_rope_geometry_source
+            overwrite_config["llm_visual_3d_rope_shuffle"] = self.llm_visual_3d_rope_shuffle
+            overwrite_config["llm_visual_3d_rope_shuffle_mode"] = self.llm_visual_3d_rope_shuffle_mode
+            overwrite_config["llm_visual_3d_rope_shuffle_seed"] = self.llm_visual_3d_rope_shuffle_seed
+            overwrite_config["llm_visual_3d_rope_log_stats"] = self.llm_visual_3d_rope_log_stats
+            overwrite_config["llm_visual_3d_rope_log_layers"] = self.llm_visual_3d_rope_log_layers
+            overwrite_config["llm_visual_3d_rope_force_eager_attention"] = self.llm_visual_3d_rope_force_eager_attention
+            if self.llm_visual_3d_rope_enable:
+                overwrite_config["geo_rope_point_map_key"] = self.llm_visual_3d_rope_geometry_source
+                overwrite_config["geometry_point_map_key"] = self.llm_visual_3d_rope_geometry_source
+                overwrite_config["_attn_implementation"] = "eager"
+                overwrite_config["_attn_implementation_internal"] = "eager"
+                overwrite_config["attn_implementation"] = "eager"
             # overwrite_config["attn_implementation"] = attn_implementation
 
             cfg_pretrained = AutoConfig.from_pretrained(self.pretrained)
@@ -421,6 +475,32 @@ class Vlm3r(lmms):
         setattr(self._config, "probe_cross_frame_include_self", self.probe_cross_frame_include_self)
         setattr(self._config, "probe_cross_frame_mode", self.probe_cross_frame_mode)
         setattr(self._config, "probe_intra_frame_pos_shuffle", self.probe_intra_frame_pos_shuffle)
+        setattr(self._config, "llm_visual_3d_rope_enable", self.llm_visual_3d_rope_enable)
+        setattr(self._config, "llm_visual_3d_rope_alpha", self.llm_visual_3d_rope_alpha)
+        setattr(self._config, "llm_visual_3d_rope_mode", self.llm_visual_3d_rope_mode)
+        setattr(self._config, "llm_visual_3d_rope_group_split", self.llm_visual_3d_rope_group_split)
+        setattr(self._config, "llm_visual_3d_rope_max_depth", self.llm_visual_3d_rope_max_depth)
+        setattr(self._config, "llm_visual_3d_rope_layers", self.llm_visual_3d_rope_layers)
+        setattr(self._config, "llm_visual_3d_rope_geometry_source", self.llm_visual_3d_rope_geometry_source)
+        setattr(self._config, "llm_visual_3d_rope_shuffle", self.llm_visual_3d_rope_shuffle)
+        setattr(self._config, "llm_visual_3d_rope_shuffle_mode", self.llm_visual_3d_rope_shuffle_mode)
+        setattr(self._config, "llm_visual_3d_rope_shuffle_seed", self.llm_visual_3d_rope_shuffle_seed)
+        setattr(self._config, "llm_visual_3d_rope_log_stats", self.llm_visual_3d_rope_log_stats)
+        setattr(self._config, "llm_visual_3d_rope_log_layers", self.llm_visual_3d_rope_log_layers)
+        setattr(self._config, "llm_visual_3d_rope_force_eager_attention", self.llm_visual_3d_rope_force_eager_attention)
+        if self.llm_visual_3d_rope_enable:
+            setattr(self._config, "_attn_implementation", "eager")
+            setattr(self._config, "_attn_implementation_internal", "eager")
+            setattr(self._config, "attn_implementation", "eager")
+            base_model = self._model.get_model() if hasattr(self._model, "get_model") else getattr(self._model, "model", None)
+            first_attn = None
+            if base_model is not None and getattr(base_model, "layers", None):
+                first_attn = getattr(base_model.layers[0], "self_attn", None)
+            if first_attn is None or first_attn.__class__.__name__ != "Qwen2Visual3DRopeAttention":
+                raise RuntimeError(
+                    "LLM visual-token 3D RoPE eval requires Qwen2Visual3DRopeAttention eager layers, "
+                    f"got {first_attn.__class__.__name__ if first_attn is not None else None}."
+                )
         resolved_attn_implementation = getattr(self._config, "_attn_implementation", None)
         if resolved_attn_implementation is None:
             resolved_attn_implementation = getattr(self._config, "attn_implementation", None)
@@ -627,6 +707,7 @@ class Vlm3r(lmms):
 
             with torch.inference_mode():
                 outputs = self.model(input_ids=input_ids, labels=labels, images=videos, spatial_features=spatial_features, modalities="video")
+            self._write_llm_visual_3d_rope_eval_stats("loglikelihood")
 
             loss = outputs["loss"]
             # loss = torch.exp(loss)
@@ -647,7 +728,90 @@ class Vlm3r(lmms):
                 new_list.append(j)
         return new_list
 
+    def _jsonable(self, value):
+        if isinstance(value, torch.Tensor):
+            if value.numel() == 1:
+                return float(value.detach().float().item())
+            return value.detach().cpu().tolist()
+        if isinstance(value, dict):
+            return {str(key): self._jsonable(val) for key, val in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [self._jsonable(item) for item in value]
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return str(value)
+
+    def _collect_llm_visual_3d_rope_eval_stats(self):
+        base = self.model.get_model() if hasattr(self.model, "get_model") else self.model
+        prefill_stats = getattr(self.model, "_last_llm_visual_3d_rope_prefill_stats", None)
+        prefill_metadata = getattr(self.model, "_last_llm_geo_prefill_debug", None)
+        decode_stats = getattr(self.model, "_last_llm_visual_3d_rope_decode_stats", None)
+        decode_metadata = getattr(self.model, "_last_llm_geo_decode_debug", None)
+        stats = prefill_stats or getattr(base, "_last_llm_visual_3d_rope_stats", None)
+        metadata = prefill_metadata or getattr(self.model, "_last_llm_geo_debug", None)
+        if not stats:
+            return None
+        non_skipped = [item for item in stats if not item.get("skipped", False)]
+        aggregate = {
+            "num_logged_layers": len(stats),
+            "num_active_layers": len(non_skipped),
+            "attention_delta_mean_abs": 0.0,
+            "visual_visual_logits_delta_mean_abs": 0.0,
+            "num_valid_geo_tokens": 0,
+        }
+        if non_skipped:
+            aggregate["attention_delta_mean_abs"] = float(
+                sum(float(item.get("attention_delta_mean_abs", 0.0) or 0.0) for item in non_skipped) / len(non_skipped)
+            )
+            aggregate["visual_visual_logits_delta_mean_abs"] = float(
+                sum(float(item.get("visual_visual_logits_delta_mean_abs", 0.0) or 0.0) for item in non_skipped)
+                / len(non_skipped)
+            )
+        for item in stats:
+            aggregate["num_valid_geo_tokens"] = max(
+                aggregate["num_valid_geo_tokens"],
+                int(item.get("num_valid_geo_tokens", 0) or 0),
+            )
+        return {
+            "aggregate": aggregate,
+            "layers": self._jsonable(stats),
+            "metadata": self._jsonable(metadata),
+            "decode_layers": self._jsonable(decode_stats),
+            "decode_metadata": self._jsonable(decode_metadata),
+        }
+
+    def _write_llm_visual_3d_rope_eval_stats(self, stage):
+        if not self.llm_visual_3d_rope_enable or not self.llm_visual_3d_rope_log_stats or self.rank != 0:
+            return
+        stats = self._collect_llm_visual_3d_rope_eval_stats()
+        if not stats:
+            return
+        payload = {
+            "event": "eval",
+            "counter": int(self._llm_visual_3d_rope_eval_counter),
+            "stage": stage,
+            "alpha": self.llm_visual_3d_rope_alpha,
+            "shuffle_enabled": self.llm_visual_3d_rope_shuffle,
+            "shuffle_mode": self.llm_visual_3d_rope_shuffle_mode,
+            "shuffle_seed": self.llm_visual_3d_rope_shuffle_seed,
+            "peak_gpu_memory_allocated_bytes": int(torch.cuda.max_memory_allocated(self.device)) if torch.cuda.is_available() else 0,
+            **stats,
+        }
+        self._llm_visual_3d_rope_eval_counter += 1
+        line = json.dumps(payload, sort_keys=True)
+        eval_logger.info(f"[LLM_VISUAL_3D_ROPE_STATS] {line}")
+        if self.llm_visual_3d_rope_stats_path is None:
+            return
+        try:
+            self.llm_visual_3d_rope_stats_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.llm_visual_3d_rope_stats_path.open("a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except OSError as exc:
+            eval_logger.warning(f"Failed to write LLM visual 3D RoPE stats: {exc}")
+
     def _requires_geometry_rope_sidecar(self):
+        if getattr(self, "llm_visual_3d_rope_enable", False):
+            return True
         fusion_block = self.fusion_block or getattr(self._config, "fusion_block", None)
         return fusion_block in {"svf_3d_rope", "svf_depth_rope", "svf_xyz_rope", "svf_spherical_rope"}
 
@@ -782,6 +946,7 @@ class Vlm3r(lmms):
                     num_beams=gen_kwargs["num_beams"],
                     max_new_tokens=gen_kwargs["max_new_tokens"],
                 )
+                self._write_llm_visual_3d_rope_eval_stats("generate")
                 # output_ids = model.generate(inputs=input_ids, images=video, attention_mask=attention_masks, modalities="video", do_sample=True, temperature=0.2, use_cache=True, stopping_criteria=[stopping_criteria])
 
             outputs = self.tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0].strip()

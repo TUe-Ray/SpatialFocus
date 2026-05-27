@@ -401,7 +401,11 @@ class LLaVATrainer(Trainer):
         if getattr(self, "_last_geo_rope_stats_logged_step", None) == step:
             return
         self._last_geo_rope_stats_logged_step = step
-        payload = {"step": step, **stats}
+        payload = {
+            "step": step,
+            "peak_gpu_memory_allocated_bytes": int(torch.cuda.max_memory_allocated()) if torch.cuda.is_available() else 0,
+            **stats,
+        }
         line = json.dumps(payload, sort_keys=True)
         rank0_print(f"[GEO_ROPE_STATS] {line}")
         try:
@@ -410,6 +414,70 @@ class LLaVATrainer(Trainer):
                 f.write(line + "\n")
         except OSError as exc:
             rank0_print(f"[GEO_ROPE_STATS][WARN] failed to write JSONL: {exc}")
+
+    def _llm_visual_3d_rope_stats(self):
+        for module in self.model.modules():
+            stats = getattr(module, "_last_llm_visual_3d_rope_stats", None)
+            if stats:
+                return stats
+        return None
+
+    def _llm_visual_3d_rope_debug(self):
+        for module in self.model.modules():
+            debug = getattr(module, "_last_llm_geo_debug", None)
+            if debug:
+                return debug
+        return None
+
+    def _llm_visual_3d_rope_metrics(self):
+        stats = self._llm_visual_3d_rope_stats()
+        if not stats:
+            return None, None
+        aggregate = {
+            "num_logged_layers": len(stats),
+            "attention_delta_mean_abs": 0.0,
+            "visual_visual_logits_delta_mean_abs": 0.0,
+            "num_valid_geo_tokens": 0,
+        }
+        deltas = [
+            float(item.get("attention_delta_mean_abs", 0.0) or 0.0)
+            for item in stats
+            if not item.get("skipped", False)
+        ]
+        vv_deltas = [
+            float(item.get("visual_visual_logits_delta_mean_abs", 0.0) or 0.0)
+            for item in stats
+            if not item.get("skipped", False)
+        ]
+        if deltas:
+            aggregate["attention_delta_mean_abs"] = sum(deltas) / len(deltas)
+        if vv_deltas:
+            aggregate["visual_visual_logits_delta_mean_abs"] = sum(vv_deltas) / len(vv_deltas)
+        for item in stats:
+            aggregate["num_valid_geo_tokens"] = max(
+                aggregate["num_valid_geo_tokens"],
+                int(item.get("num_valid_geo_tokens", 0) or 0),
+            )
+        metrics = {}
+        self._flatten_numeric("llm_visual_3d_rope", aggregate, metrics)
+        return metrics, {"aggregate": aggregate, "layers": self._jsonable(stats), "metadata": self._jsonable(self._llm_visual_3d_rope_debug())}
+
+    def _write_llm_visual_3d_rope_stats(self, stats):
+        if not stats or not self.is_world_process_zero():
+            return
+        step = int(getattr(self.state, "global_step", 0) or 0)
+        if getattr(self, "_last_llm_visual_3d_rope_stats_logged_step", None) == step:
+            return
+        self._last_llm_visual_3d_rope_stats_logged_step = step
+        payload = {"step": step, **stats}
+        line = json.dumps(payload, sort_keys=True)
+        rank0_print(f"[LLM_VISUAL_3D_ROPE_STATS] {line}")
+        try:
+            os.makedirs(self.args.output_dir, exist_ok=True)
+            with open(os.path.join(self.args.output_dir, "llm_visual_3d_rope_stats.jsonl"), "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except OSError as exc:
+            rank0_print(f"[LLM_VISUAL_3D_ROPE_STATS][WARN] failed to write JSONL: {exc}")
 
     def _maybe_log_save_evaluate(self, *args, **kwargs):
         if (
@@ -426,6 +494,7 @@ class LLaVATrainer(Trainer):
     def log(self, logs, *args, **kwargs):
         metrics = self._spatial_rank_metrics()
         geo_rope_metrics, geo_rope_stats = self._geo_rope_fusion_metrics()
+        llm_rope_metrics, llm_rope_stats = self._llm_visual_3d_rope_metrics()
         if metrics:
             logs = dict(logs)
             logs.update(metrics)
@@ -433,6 +502,10 @@ class LLaVATrainer(Trainer):
             logs = dict(logs)
             logs.update(geo_rope_metrics)
             self._write_geo_rope_fusion_stats(geo_rope_stats)
+        if llm_rope_metrics:
+            logs = dict(logs)
+            logs.update(llm_rope_metrics)
+            self._write_llm_visual_3d_rope_stats(llm_rope_stats)
         return super().log(logs, *args, **kwargs)
 
     def _build_sampler_generator(self):

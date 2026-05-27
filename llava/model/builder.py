@@ -24,6 +24,16 @@ from llava.constants import DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, D
 from llava.utils import rank0_print
 
 
+def _force_config_attn_implementation(config, attn_implementation):
+    if config is None or not attn_implementation:
+        return
+    for attr in ("_attn_implementation", "_attn_implementation_internal", "attn_implementation"):
+        try:
+            setattr(config, attr, attn_implementation)
+        except Exception:
+            pass
+
+
 def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, load_4bit=False, device_map="auto", torch_dtype="float16",attn_implementation="flash_attention_2", customized_config=None, overwrite_config=None, **kwargs):
     kwargs["device_map"] = device_map
 
@@ -91,11 +101,13 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
                     rank0_print(f"Overwriting config with {overwrite_config}")
                     for k, v in overwrite_config.items():
                         setattr(lora_cfg_pretrained, k, v)
+                    _force_config_attn_implementation(lora_cfg_pretrained, attn_implementation)
                     model = LlavaQwenForCausalLM.from_pretrained(model_base, low_cpu_mem_usage=False, attn_implementation=attn_implementation, config=lora_cfg_pretrained, **kwargs)
                 else:
                     overwrite_config = additional_config
                     for k, v in overwrite_config.items():
                         setattr(lora_cfg_pretrained, k, v)
+                    _force_config_attn_implementation(lora_cfg_pretrained, attn_implementation)
                     model = LlavaQwenForCausalLM.from_pretrained(model_base, low_cpu_mem_usage=False, attn_implementation=attn_implementation, config=lora_cfg_pretrained, **kwargs)
                 # model.to(device="cuda", dtype=torch.float16)
 
@@ -202,6 +214,7 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
                     rank0_print(f"Overwriting config with {overwrite_config}")
                     for k, v in overwrite_config.items():
                         setattr(cfg_pretrained, k, v)
+                    _force_config_attn_implementation(cfg_pretrained, attn_implementation)
                     del kwargs["device_map"]
                     model = LlavaQwenForCausalLM.from_pretrained(model_base, low_cpu_mem_usage=False, attn_implementation=attn_implementation, config=cfg_pretrained, **kwargs)
                     model.to(device="cuda", dtype=torch.float16)
@@ -271,6 +284,7 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
                         rank0_print(f"Overwriting config with {overwrite_config}")
                         for k, v in overwrite_config.items():
                             setattr(llava_cfg, k, v)
+                        _force_config_attn_implementation(llava_cfg, attn_implementation)
                         model = LlavaQwenMoeForCausalLM.from_pretrained(model_path, low_cpu_mem_usage=True, attn_implementation=attn_implementation, config=llava_cfg, **kwargs)
                     else:
                         model = LlavaQwenMoeForCausalLM.from_pretrained(model_path, low_cpu_mem_usage=True, attn_implementation=attn_implementation, **kwargs)
@@ -289,6 +303,7 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
                         rank0_print(f"Overwriting config with {overwrite_config}")
                         for k, v in overwrite_config.items():
                             setattr(llava_cfg, k, v)
+                        _force_config_attn_implementation(llava_cfg, attn_implementation)
                         model = LlavaQwenForCausalLM.from_pretrained(model_path, low_cpu_mem_usage=False, attn_implementation=attn_implementation, config=llava_cfg, **kwargs)
                         model.to(device="cuda", dtype=torch.float16)
                     else:

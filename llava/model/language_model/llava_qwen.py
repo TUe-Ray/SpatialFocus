@@ -21,15 +21,31 @@ from torch.nn import CrossEntropyLoss
 import transformers
 from transformers import AutoConfig, AutoModelForCausalLM, LlamaConfig, LlamaModel, LlamaForCausalLM
 
-from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.cache_utils import Cache, DynamicCache
+from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask, _prepare_4d_causal_attention_mask_for_sdpa
+from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.generation.utils import GenerateOutput
 
 # from ...constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 from llava.model.llava_arch import LlavaMetaModel, LlavaMetaForCausalLM
 from transformers import Qwen2Config, Qwen2Model, Qwen2ForCausalLM
+from llava.model.language_model.llm_visual_3d_rope import (
+    clear_qwen2_visual_3d_rope_context,
+    collect_qwen2_visual_3d_rope_stats,
+    install_qwen2_visual_3d_rope_attention,
+    qwen2_visual_3d_rope_requires_eager,
+)
 
 # from .qwen.modeling_qwen import QWenLMHeadModel, QWenModel
 # from .qwen.configuration_qwen import QWenConfig
+
+
+def _as_bool_config(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
 
 
 class LlavaQwenConfig(Qwen2Config):
@@ -40,13 +56,197 @@ class LlavaQwenModel(LlavaMetaModel, Qwen2Model):
     config_class = LlavaQwenConfig
 
     def __init__(self, config: Qwen2Config):
+        install_qwen2_visual_3d_rope_attention()
         super(LlavaQwenModel, self).__init__(config)
+
+    def _decoder_layer_forward_with_llm_geo(
+        self,
+        decoder_layer,
+        hidden_states,
+        attention_mask,
+        position_ids,
+        past_key_values,
+        output_attentions,
+        use_cache,
+        llm_geo_pos,
+        llm_geo_mask,
+    ):
+        attn = getattr(decoder_layer, "self_attn", None)
+        if attn is not None:
+            attn._llm_visual_3d_rope_pos = llm_geo_pos
+            attn._llm_visual_3d_rope_mask = llm_geo_mask
+            attn.last_llm_visual_3d_rope_stats = None
+        try:
+            return decoder_layer(
+                hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_values,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+            )
+        finally:
+            if attn is not None:
+                for attr in ("_llm_visual_3d_rope_pos", "_llm_visual_3d_rope_mask"):
+                    if hasattr(attn, attr):
+                        delattr(attn, attr)
+
+    def forward(
+        self,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        llm_geo_pos: Optional[torch.FloatTensor] = None,
+        llm_geo_mask: Optional[torch.BoolTensor] = None,
+    ) -> Union[Tuple, BaseModelOutputWithPast]:
+        if qwen2_visual_3d_rope_requires_eager(self.config):
+            raise RuntimeError("LLM visual-token 3D RoPE requires Qwen2 eager attention; disable FlashAttention/SDPA.")
+        try:
+            output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+            output_hidden_states = (
+                output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+            )
+            use_cache = use_cache if use_cache is not None else self.config.use_cache
+            return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+            if input_ids is not None and inputs_embeds is not None:
+                raise ValueError("You cannot specify both decoder_input_ids and decoder_inputs_embeds at the same time")
+            elif input_ids is not None:
+                batch_size, seq_length = input_ids.shape
+            elif inputs_embeds is not None:
+                batch_size, seq_length, _ = inputs_embeds.shape
+            else:
+                raise ValueError("You have to specify either decoder_input_ids or decoder_inputs_embeds")
+
+            if self.gradient_checkpointing and self.training and use_cache:
+                use_cache = False
+
+            past_key_values_length = 0
+            if use_cache:
+                use_legacy_cache = not isinstance(past_key_values, Cache)
+                if use_legacy_cache:
+                    past_key_values = DynamicCache.from_legacy_cache(past_key_values)
+                past_key_values_length = past_key_values.get_usable_length(seq_length)
+            else:
+                use_legacy_cache = False
+
+            if position_ids is None:
+                device = input_ids.device if input_ids is not None else inputs_embeds.device
+                position_ids = torch.arange(
+                    past_key_values_length,
+                    seq_length + past_key_values_length,
+                    dtype=torch.long,
+                    device=device,
+                )
+                position_ids = position_ids.unsqueeze(0).view(-1, seq_length)
+            else:
+                position_ids = position_ids.view(-1, seq_length).long()
+
+            if inputs_embeds is None:
+                inputs_embeds = self.embed_tokens(input_ids)
+
+            if attention_mask is not None and self._attn_implementation == "flash_attention_2" and use_cache:
+                is_padding_right = attention_mask[:, -1].sum().item() != batch_size
+                if is_padding_right:
+                    raise ValueError(
+                        "You are attempting to perform batched generation with padding_side='right'. "
+                        "Use left padding for batched generation."
+                    )
+
+            if self._attn_implementation == "flash_attention_2":
+                attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask) else None
+            elif self._attn_implementation == "sdpa" and not output_attentions:
+                attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
+                    attention_mask,
+                    (batch_size, seq_length),
+                    inputs_embeds,
+                    past_key_values_length,
+                )
+            else:
+                attention_mask = _prepare_4d_causal_attention_mask(
+                    attention_mask,
+                    (batch_size, seq_length),
+                    inputs_embeds,
+                    past_key_values_length,
+                    sliding_window=self.config.sliding_window,
+                )
+
+            hidden_states = inputs_embeds
+            all_hidden_states = () if output_hidden_states else None
+            all_self_attns = () if output_attentions else None
+            next_decoder_cache = None
+
+            for decoder_layer in self.layers:
+                if output_hidden_states:
+                    all_hidden_states += (hidden_states,)
+
+                if self.gradient_checkpointing and self.training:
+                    layer_outputs = self._gradient_checkpointing_func(
+                        self._decoder_layer_forward_with_llm_geo,
+                        decoder_layer,
+                        hidden_states,
+                        attention_mask,
+                        position_ids,
+                        past_key_values,
+                        output_attentions,
+                        use_cache,
+                        llm_geo_pos,
+                        llm_geo_mask,
+                    )
+                else:
+                    layer_outputs = self._decoder_layer_forward_with_llm_geo(
+                        decoder_layer,
+                        hidden_states,
+                        attention_mask,
+                        position_ids,
+                        past_key_values,
+                        output_attentions,
+                        use_cache,
+                        llm_geo_pos,
+                        llm_geo_mask,
+                    )
+
+                hidden_states = layer_outputs[0]
+                if use_cache:
+                    next_decoder_cache = layer_outputs[2 if output_attentions else 1]
+                if output_attentions:
+                    all_self_attns += (layer_outputs[1],)
+
+            hidden_states = self.norm(hidden_states)
+
+            if output_hidden_states:
+                all_hidden_states += (hidden_states,)
+
+            next_cache = None
+            if use_cache:
+                next_cache = next_decoder_cache.to_legacy_cache() if use_legacy_cache else next_decoder_cache
+
+            if not return_dict:
+                outputs = tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
+            else:
+                outputs = BaseModelOutputWithPast(
+                    last_hidden_state=hidden_states,
+                    past_key_values=next_cache,
+                    hidden_states=all_hidden_states,
+                    attentions=all_self_attns,
+                )
+            self._last_llm_visual_3d_rope_stats = collect_qwen2_visual_3d_rope_stats(self)
+            return outputs
+        finally:
+            clear_qwen2_visual_3d_rope_context(self)
 
 
 class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
     config_class = LlavaQwenConfig
 
     def __init__(self, config):
+        install_qwen2_visual_3d_rope_attention()
         # super(Qwen2ForCausalLM, self).__init__(config)
         Qwen2ForCausalLM.__init__(self, config)
         config.model_type = "llava_qwen"
@@ -103,6 +303,9 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
         dpo_forward: Optional[bool] = False,
         cache_position=None,
         return_visual_metadata: Optional[bool] = False,
+        llm_geo_pos: Optional[torch.FloatTensor] = None,
+        llm_geo_mask: Optional[torch.BoolTensor] = None,
+        llm_geo_debug: Optional[Dict] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
 
         self.get_model()._last_geometry_projection_outputs = None
@@ -123,7 +326,15 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
             return_dict = True
 
         visual_metadata = None
-        if inputs_embeds is None:
+        llm_geo_debug_info = llm_geo_debug
+        llm_visual_3d_rope_enabled = _as_bool_config(getattr(self.config, "llm_visual_3d_rope_enable", False), False)
+        should_prepare_multimodal = (
+            inputs_embeds is None
+            and images is not None
+            and input_ids is not None
+            and input_ids.shape[1] != 1
+        )
+        if should_prepare_multimodal:
             prepared = self.prepare_inputs_labels_for_multimodal(
                 input_ids,
                 position_ids,
@@ -136,13 +347,41 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
                 modalities,
                 image_sizes,
                 return_visual_metadata=spatial_rank_enabled or metadata_requested,
+                return_llm_geo_metadata=llm_visual_3d_rope_enabled,
                 geometry_outputs=geometry_outputs,
                 geometry_spatial_features=geometry_spatial_features,
             )
-            if spatial_rank_enabled or metadata_requested:
+            if (spatial_rank_enabled or metadata_requested) and llm_visual_3d_rope_enabled:
+                (
+                    input_ids,
+                    position_ids,
+                    attention_mask,
+                    past_key_values,
+                    inputs_embeds,
+                    labels,
+                    visual_metadata,
+                    llm_geo_pos,
+                    llm_geo_mask,
+                    llm_geo_debug_info,
+                ) = prepared
+            elif spatial_rank_enabled or metadata_requested:
                 (input_ids, position_ids, attention_mask, past_key_values, inputs_embeds, labels, visual_metadata) = prepared
+            elif llm_visual_3d_rope_enabled:
+                (
+                    input_ids,
+                    position_ids,
+                    attention_mask,
+                    past_key_values,
+                    inputs_embeds,
+                    labels,
+                    llm_geo_pos,
+                    llm_geo_mask,
+                    llm_geo_debug_info,
+                ) = prepared
             else:
                 (input_ids, position_ids, attention_mask, past_key_values, inputs_embeds, labels) = prepared
+        elif llm_visual_3d_rope_enabled and llm_geo_debug_info is None:
+            llm_geo_debug_info = {"skip_reason": "text_only_or_cached_decode"}
 
         if dpo_forward:
             outputs = self.model(
@@ -155,6 +394,8 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
                 output_attentions=output_attentions,
                 output_hidden_states=output_hidden_states,
                 return_dict=return_dict,
+                llm_geo_pos=llm_geo_pos,
+                llm_geo_mask=llm_geo_mask,
             )
 
             hidden_states = outputs[0]
@@ -172,23 +413,69 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
 
                 hook_handle = first_block.register_forward_hook(capture_h1)
             try:
-                outputs = super().forward(
+                output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+                output_hidden_states = (
+                    output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+                )
+                return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+                model_outputs = self.model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     position_ids=position_ids,
                     past_key_values=past_key_values,
                     inputs_embeds=inputs_embeds,
-                    labels=labels,
                     use_cache=use_cache,
                     output_attentions=output_attentions,
                     output_hidden_states=output_hidden_states,
                     return_dict=return_dict,
+                    llm_geo_pos=llm_geo_pos,
+                    llm_geo_mask=llm_geo_mask,
                 )
+                if llm_visual_3d_rope_enabled:
+                    current_stats = getattr(self.get_model(), "_last_llm_visual_3d_rope_stats", None)
+                    if current_stats:
+                        has_active_geo = any(
+                            (not item.get("skipped", False)) and int(item.get("num_valid_geo_tokens", 0) or 0) > 0
+                            for item in current_stats
+                        )
+                        if has_active_geo:
+                            self._last_llm_visual_3d_rope_prefill_stats = current_stats
+                            self._last_llm_geo_prefill_debug = llm_geo_debug_info
+                        else:
+                            self._last_llm_visual_3d_rope_decode_stats = current_stats
+                            self._last_llm_geo_decode_debug = llm_geo_debug_info
+                hidden_states = model_outputs[0]
+                logits = self.lm_head(hidden_states)
+                logits = logits.float()
+
+                loss = None
+                if labels is not None:
+                    shift_logits = logits[..., :-1, :].contiguous()
+                    shift_labels = labels[..., 1:].contiguous()
+                    loss_fct = CrossEntropyLoss()
+                    shift_logits = shift_logits.view(-1, self.config.vocab_size)
+                    shift_labels = shift_labels.view(-1)
+                    shift_labels = shift_labels.to(shift_logits.device)
+                    loss = loss_fct(shift_logits, shift_labels)
+
+                if not return_dict:
+                    output = (logits,) + model_outputs[1:]
+                    outputs = (loss,) + output if loss is not None else output
+                else:
+                    outputs = CausalLMOutputWithPast(
+                        loss=loss,
+                        logits=logits,
+                        past_key_values=model_outputs.past_key_values,
+                        hidden_states=model_outputs.hidden_states,
+                        attentions=model_outputs.attentions,
+                    )
             finally:
                 if hook_handle is not None:
                     hook_handle.remove()
             if metadata_requested:
                 self._last_visual_metadata = visual_metadata
+            if llm_visual_3d_rope_enabled:
+                self._last_llm_geo_debug = llm_geo_debug_info
             geometry_projection_outputs = getattr(self.get_model(), "_last_geometry_projection_outputs", None)
             use_geometry_projection = getattr(self.config, "use_geometry_aware_projection", False)
             if isinstance(use_geometry_projection, str):
@@ -284,8 +571,18 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
         if "inputs_embeds" in kwargs:
             raise NotImplementedError("`inputs_embeds` is not supported")
 
+        llm_visual_3d_rope_enabled = _as_bool_config(getattr(self.config, "llm_visual_3d_rope_enable", False), False)
+        if llm_visual_3d_rope_enabled:
+            for attr in (
+                "_last_llm_visual_3d_rope_prefill_stats",
+                "_last_llm_geo_prefill_debug",
+                "_last_llm_visual_3d_rope_decode_stats",
+                "_last_llm_geo_decode_debug",
+            ):
+                if hasattr(self, attr):
+                    delattr(self, attr)
         if images is not None:
-            (inputs, position_ids, attention_mask, _, inputs_embeds, _) = self.prepare_inputs_labels_for_multimodal(
+            prepared = self.prepare_inputs_labels_for_multimodal(
                 inputs,
                 position_ids,
                 attention_mask,
@@ -296,18 +593,40 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
                 point_maps,
                 modalities,
                 image_sizes=image_sizes,
+                return_llm_geo_metadata=llm_visual_3d_rope_enabled,
                 geometry_outputs=geometry_outputs,
                 geometry_spatial_features=geometry_spatial_features,
             )
+            if llm_visual_3d_rope_enabled:
+                (inputs, position_ids, attention_mask, _, inputs_embeds, _, llm_geo_pos, llm_geo_mask, llm_geo_debug) = prepared
+            else:
+                (inputs, position_ids, attention_mask, _, inputs_embeds, _) = prepared
         else:
             inputs_embeds = self.get_model().embed_tokens(inputs)
+            llm_geo_pos = None
+            llm_geo_mask = None
+            llm_geo_debug = None
 
-        return super().generate(position_ids=position_ids, attention_mask=attention_mask, inputs_embeds=inputs_embeds, **kwargs)
+        try:
+            return super().generate(
+                position_ids=position_ids,
+                attention_mask=attention_mask,
+                inputs_embeds=inputs_embeds,
+                llm_geo_pos=llm_geo_pos,
+                llm_geo_mask=llm_geo_mask,
+                llm_geo_debug=llm_geo_debug,
+                **kwargs,
+            )
+        finally:
+            clear_qwen2_visual_3d_rope_context(self.model)
 
     def prepare_inputs_for_generation(self, input_ids, past_key_values=None, inputs_embeds=None, **kwargs):
         images = kwargs.pop("images", None)
         geometry_outputs = kwargs.pop("geometry_outputs", None)
         geometry_spatial_features = kwargs.pop("geometry_spatial_features", None)
+        llm_geo_pos = kwargs.pop("llm_geo_pos", None)
+        llm_geo_mask = kwargs.pop("llm_geo_mask", None)
+        llm_geo_debug = kwargs.pop("llm_geo_debug", None)
         image_sizes = kwargs.pop("image_sizes", None)
         inputs = super().prepare_inputs_for_generation(input_ids, past_key_values=past_key_values, inputs_embeds=inputs_embeds, **kwargs)
         if images is not None:
@@ -318,6 +637,12 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
             inputs["geometry_spatial_features"] = geometry_spatial_features
         if image_sizes is not None:
             inputs["image_sizes"] = image_sizes
+        if llm_geo_pos is not None:
+            inputs["llm_geo_pos"] = llm_geo_pos
+        if llm_geo_mask is not None:
+            inputs["llm_geo_mask"] = llm_geo_mask
+        if llm_geo_debug is not None:
+            inputs["llm_geo_debug"] = llm_geo_debug
         return inputs
 
 

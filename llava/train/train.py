@@ -257,6 +257,19 @@ class ModelArguments:
             )
         },
     )
+    llm_visual_3d_rope_enable: bool = field(default=False)
+    llm_visual_3d_rope_alpha: float = field(default=1.0)
+    llm_visual_3d_rope_mode: str = field(default="spherical")
+    llm_visual_3d_rope_group_split: str = field(default="2,1,2")
+    llm_visual_3d_rope_max_depth: float = field(default=10.0)
+    llm_visual_3d_rope_layers: str = field(default="all")
+    llm_visual_3d_rope_geometry_source: str = field(default="point_maps_ref")
+    llm_visual_3d_rope_shuffle: bool = field(default=False)
+    llm_visual_3d_rope_shuffle_mode: str = field(default="intra_sample_token_shuffle")
+    llm_visual_3d_rope_shuffle_seed: int = field(default=0)
+    llm_visual_3d_rope_log_stats: bool = field(default=True)
+    llm_visual_3d_rope_log_layers: str = field(default="first_middle_last")
+    llm_visual_3d_rope_force_eager_attention: bool = field(default=True)
     tune_fusion_block: bool = field(default=False)
     use_geometry_aware_projection: bool = field(
         default=False,
@@ -2493,6 +2506,23 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
     if model_args.geo_rope_point_map_key is not None:
         overwrite_config["geo_rope_point_map_key"] = model_args.geo_rope_point_map_key
         overwrite_config["geometry_point_map_key"] = model_args.geo_rope_point_map_key
+    if model_args.llm_visual_3d_rope_enable:
+        overwrite_config["llm_visual_3d_rope_enable"] = model_args.llm_visual_3d_rope_enable
+        overwrite_config["llm_visual_3d_rope_alpha"] = model_args.llm_visual_3d_rope_alpha
+        overwrite_config["llm_visual_3d_rope_mode"] = model_args.llm_visual_3d_rope_mode
+        overwrite_config["llm_visual_3d_rope_group_split"] = model_args.llm_visual_3d_rope_group_split
+        overwrite_config["llm_visual_3d_rope_max_depth"] = model_args.llm_visual_3d_rope_max_depth
+        overwrite_config["llm_visual_3d_rope_layers"] = model_args.llm_visual_3d_rope_layers
+        overwrite_config["llm_visual_3d_rope_geometry_source"] = model_args.llm_visual_3d_rope_geometry_source
+        overwrite_config["llm_visual_3d_rope_shuffle"] = model_args.llm_visual_3d_rope_shuffle
+        overwrite_config["llm_visual_3d_rope_shuffle_mode"] = model_args.llm_visual_3d_rope_shuffle_mode
+        overwrite_config["llm_visual_3d_rope_shuffle_seed"] = model_args.llm_visual_3d_rope_shuffle_seed
+        overwrite_config["llm_visual_3d_rope_log_stats"] = model_args.llm_visual_3d_rope_log_stats
+        overwrite_config["llm_visual_3d_rope_log_layers"] = model_args.llm_visual_3d_rope_log_layers
+        overwrite_config["llm_visual_3d_rope_force_eager_attention"] = model_args.llm_visual_3d_rope_force_eager_attention
+        overwrite_config["_attn_implementation"] = "eager"
+        overwrite_config["_attn_implementation_internal"] = "eager"
+        overwrite_config["attn_implementation"] = "eager"
     if model_args.use_geometry_aware_projection:
         overwrite_config["use_geometry_aware_projection"] = model_args.use_geometry_aware_projection
         overwrite_config["spatial_encoder_type"] = model_args.spatial_encoder_type
@@ -2595,6 +2625,8 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
                 config.mm_vision_tower = model_args.vision_tower
                 config.vision_tower = model_args.vision_tower
                 config.delay_load = True
+                for k, v in overwrite_config.items():
+                    setattr(config, k, v)
 
                 print("[DEBUG] model_name_or_path =", model_args.model_name_or_path)
                 print("[DEBUG] cli vision_tower =", model_args.vision_tower)
@@ -2638,6 +2670,16 @@ def train(attn_implementation=None):
 
     parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    if model_args.llm_visual_3d_rope_enable:
+        if model_args.llm_visual_3d_rope_force_eager_attention:
+            if training_args.attn_implementation != "eager":
+                rank0_print(
+                    "[ATTN] llm_visual_3d_rope_enable=True; overriding "
+                    f"attn_implementation={training_args.attn_implementation!r} to 'eager'."
+                )
+            training_args.attn_implementation = "eager"
+        elif training_args.attn_implementation != "eager":
+            raise ValueError("LLM visual-token 3D RoPE requires --attn_implementation eager.")
     rank0_print(f"[ATTN] attn_implementation={training_args.attn_implementation}")
     rank0_print(f"[ABLATION] zero_spatial_features={data_args.zero_spatial_features}")
 
@@ -2822,6 +2864,36 @@ def train(attn_implementation=None):
         model.get_model().initialize_fusion_block(model_args=model_args, fsdp=training_args.fsdp)
         fusion_block = model.get_fusion_block()
         fusion_block.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
+
+    if model_args.llm_visual_3d_rope_enable:
+        model.config.llm_visual_3d_rope_enable = model_args.llm_visual_3d_rope_enable
+        model.config.llm_visual_3d_rope_alpha = model_args.llm_visual_3d_rope_alpha
+        model.config.llm_visual_3d_rope_mode = model_args.llm_visual_3d_rope_mode
+        model.config.llm_visual_3d_rope_group_split = model_args.llm_visual_3d_rope_group_split
+        model.config.llm_visual_3d_rope_max_depth = model_args.llm_visual_3d_rope_max_depth
+        model.config.llm_visual_3d_rope_layers = model_args.llm_visual_3d_rope_layers
+        model.config.llm_visual_3d_rope_geometry_source = model_args.llm_visual_3d_rope_geometry_source
+        model.config.llm_visual_3d_rope_shuffle = model_args.llm_visual_3d_rope_shuffle
+        model.config.llm_visual_3d_rope_shuffle_mode = model_args.llm_visual_3d_rope_shuffle_mode
+        model.config.llm_visual_3d_rope_shuffle_seed = model_args.llm_visual_3d_rope_shuffle_seed
+        model.config.llm_visual_3d_rope_log_stats = model_args.llm_visual_3d_rope_log_stats
+        model.config.llm_visual_3d_rope_log_layers = model_args.llm_visual_3d_rope_log_layers
+        model.config.llm_visual_3d_rope_force_eager_attention = model_args.llm_visual_3d_rope_force_eager_attention
+        model.config.geo_rope_training_point_map_key = model_args.llm_visual_3d_rope_geometry_source
+        model.config.geo_rope_point_map_key = model_args.llm_visual_3d_rope_geometry_source
+        model.config.geometry_point_map_key = model_args.llm_visual_3d_rope_geometry_source
+        model.config._attn_implementation = "eager"
+        model.config._attn_implementation_internal = "eager"
+        model.config.attn_implementation = "eager"
+        base_model = model.get_model() if hasattr(model, "get_model") else getattr(model, "model", None)
+        first_attn = None
+        if base_model is not None and getattr(base_model, "layers", None):
+            first_attn = getattr(base_model.layers[0], "self_attn", None)
+        if first_attn is None or first_attn.__class__.__name__ != "Qwen2Visual3DRopeAttention":
+            raise RuntimeError(
+                "LLM visual-token 3D RoPE training requires Qwen2Visual3DRopeAttention eager layers, "
+                f"got {first_attn.__class__.__name__ if first_attn is not None else None}."
+            )
 
         model.config.fusion_block = model_args.fusion_block
         if model_args.geo_rope_fusion_mode is not None:
