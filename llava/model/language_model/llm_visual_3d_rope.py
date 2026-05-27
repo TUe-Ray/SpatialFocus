@@ -297,8 +297,12 @@ class Qwen2Visual3DRopeAttention(Qwen2Attention):
             self.last_llm_visual_3d_rope_stats["attention_prob_inf_count"] = int(torch.isinf(attn_probs).sum().item())
             self.last_llm_visual_3d_rope_stats["masked_attention_prob_nonfinite_count"] = 0
             return
-        expanded = mask.expand(attn_probs.shape[0], attn_probs.shape[1], attn_probs.shape[2], attn_probs.shape[3])
-        masked_probs = attn_probs.detach().masked_select(expanded)
+        # Keep this validation cheap: expanding the mask over all attention
+        # heads can allocate tens of GiB for long VLM sequences during
+        # training. A max over heads preserves the causal-mask violation signal
+        # while reducing the diagnostic tensor from [B,H,Q,K] to [B,1,Q,K].
+        head_max_probs = attn_probs.detach().amax(dim=1, keepdim=True)
+        masked_probs = head_max_probs.masked_select(mask)
         nonfinite_count = int((~torch.isfinite(masked_probs)).sum().item()) if masked_probs.numel() else 0
         finite_masked_probs = masked_probs.float()
         finite_masked_probs = finite_masked_probs[torch.isfinite(finite_masked_probs)]
