@@ -546,9 +546,15 @@ class Cut3rSpatialTower(nn.Module):
 
         self.spatial_tower_name = spatial_tower
         mm_tunable_parts = getattr(spatial_tower_cfg, "mm_tunable_parts", "") or ""
+        preextracted_only = getattr(spatial_tower_cfg, "spatial_tower_preextracted_only", False)
+        if isinstance(preextracted_only, str):
+            preextracted_only = preextracted_only.lower() in {"1", "true", "yes", "y", "on"}
+        self.preextracted_only = bool(preextracted_only)
 
 
-        if not delay_load:
+        if self.preextracted_only:
+            self.cfg_only = self.config
+        elif not delay_load:
             rank0_print(f"Loading spatial tower: {spatial_tower}")
             self.load_model()
         elif getattr(spatial_tower_cfg, "unfreeze_mm_spatial_tower", False):
@@ -562,6 +568,11 @@ class Cut3rSpatialTower(nn.Module):
             self.cfg_only = self.config
 
     def load_model(self, device_map=None):
+        if self.preextracted_only:
+            raise RuntimeError(
+                "spatial_tower_preextracted_only=True forbids runtime CUT3R tower loading. "
+                "Use pre-extracted spatial_features with camera_tokens/patch_tokens instead."
+            )
         if self.is_loaded:
             rank0_print("{} is already loaded, `load_model` called again, skipping.".format(self.spatial_tower_name))
             return

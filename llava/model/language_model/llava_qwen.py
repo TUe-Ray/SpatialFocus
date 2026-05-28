@@ -275,9 +275,12 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
             zero_spatial_features = getattr(model.config, "zero_spatial_features", False)
             if isinstance(zero_spatial_features, str):
                 zero_spatial_features = zero_spatial_features.lower() in {"1", "true", "yes", "y", "on"}
+            preextracted_only = getattr(model.config, "spatial_tower_preextracted_only", False)
+            if isinstance(preextracted_only, str):
+                preextracted_only = preextracted_only.lower() in {"1", "true", "yes", "y", "on"}
 
             # Vision-only ablation: keep spatial tower wrapper but skip heavy weight loading.
-            if not zero_spatial_features:
+            if not zero_spatial_features and not preextracted_only:
                 model.get_spatial_tower().is_loaded = False
                 model.get_spatial_tower().load_model()
                 model.get_spatial_tower().is_loaded = True
@@ -417,8 +420,9 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
         payloads = self._select_bev_point_map_payloads(spatial_features, point_maps, geometry_spatial_features)
         if payloads is None:
             raise RuntimeError(
-                "use_bev_supervision=True requires CUT3R point-map sidecars in spatial_features "
-                "or point_maps. Expected keys such as point_maps_ref/point_maps_cam."
+                "use_bev_supervision=True requires CUT3R point-map sidecars in spatial_features, "
+                "point_maps, or geometry_spatial_features. Expected keys such as "
+                "point_maps_ref/point_maps_cam."
             )
 
         bev_gt_meter, bev_valid_mask, bev_debug = build_bev_targets_from_point_maps(

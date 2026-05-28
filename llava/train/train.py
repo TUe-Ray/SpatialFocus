@@ -182,6 +182,16 @@ class ModelArguments:
 
     ## spatial encoder
     spatial_tower: Optional[str] = field(default=None)
+    spatial_tower_preextracted_only: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "If True, keep the spatial tower in cfg-only mode and require "
+                "pre-extracted camera_tokens/patch_tokens sidecars instead of "
+                "loading/running the runtime spatial encoder."
+            )
+        },
+    )
     spatial_tower_select_feature: Optional[str] = field(
         default=None, metadata={"help": 'Could be "last_hidden_state", "last_hidden_state,camera_tokens"'}
     )
@@ -394,7 +404,7 @@ class DataArguments:
     spatial_features_fallback_root: Optional[str] = field(default=None, metadata={"help": "Optional fallback root for pre-extracted spatial features when spatial_features_root is temporarily unavailable."})
     spatial_features_subdir: Optional[str] = field(default="spatial_features", metadata={"help": "Subdirectory used to locate pre-extracted spatial features relative to video paths (default: spatial_features)."})
     require_spatial_features: Optional[bool] = field(default=False, metadata={"help": "If True, raise when a requested main spatial_features sidecar is missing."})
-    geometry_spatial_tower_type: Optional[str] = field(default=None, metadata={"help": "Optional geometry-only spatial tower type. Use pi3x to load decoded-feature sidecars for GeoRoPE positions while keeping the main spatial tower unchanged. Train/eval must use the same coordinate source."})
+    geometry_spatial_tower_type: Optional[str] = field(default=None, metadata={"help": "Optional geometry-only spatial tower type. Use pi3x decoded-feature sidecars or cut3r point-map sidecars for GeoRoPE/BEV geometry while keeping the main spatial tower unchanged. Train/eval must use the same coordinate source."})
     geometry_spatial_features_root: Optional[str] = field(default=None, metadata={"help": "Root directory for geometry-only pre-extracted spatial features. CUT3R point-map sidecars contain ref and cam coordinate frames; keep train/eval consistent."})
     geometry_spatial_features_subdir: Optional[str] = field(default=None, metadata={"help": "Subdirectory for geometry-only spatial features. Use '.' when files live directly under root/dataset. Do not switch point_maps_ref and point_maps_cam between train and eval."})
     require_geometry_spatial_features: Optional[bool] = field(default=False, metadata={"help": "If True, raise when a requested geometry_spatial_features sidecar is missing."})
@@ -2339,14 +2349,23 @@ class LazySupervisedDataset(Dataset):
                 )
 
         geometry_spatial_tower_type = getattr(self.data_args, 'geometry_spatial_tower_type', None)
+        geometry_features_root_arg = getattr(self.data_args, 'geometry_spatial_features_root', None)
+        geometry_features_subdir_arg = getattr(self.data_args, 'geometry_spatial_features_subdir', None)
         use_geometry_features = (
-            geometry_spatial_tower_type is not None
-            and 'pi3' in str(geometry_spatial_tower_type).lower()
+            (
+                geometry_spatial_tower_type is not None
+                and any(name in str(geometry_spatial_tower_type).lower() for name in ("pi3", "cut3r"))
+            )
+            or (
+                geometry_features_root_arg is not None
+                and geometry_features_subdir_arg is not None
+            )
+            or getattr(self.data_args, 'require_geometry_spatial_features', False)
         )
         if use_geometry_features and "video" in self.list_data_dict[i]:
             video_folder = self.data_args.video_folder
-            geometry_features_root = getattr(self.data_args, 'geometry_spatial_features_root', None) or "."
-            geometry_features_subdir = getattr(self.data_args, 'geometry_spatial_features_subdir', None)
+            geometry_features_root = geometry_features_root_arg or "."
+            geometry_features_subdir = geometry_features_subdir_arg
             video_rel_path = self.list_data_dict[i]['video']
             geometry_features_path = self._resolve_video_feature_path(
                 video_rel_path,
@@ -2510,6 +2529,7 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
         if model_args.spatial_tower == "vggt" and spatial_feature_dim is None:
             spatial_feature_dim = 2048
         overwrite_config["spatial_tower"] = model_args.spatial_tower
+        overwrite_config["spatial_tower_preextracted_only"] = model_args.spatial_tower_preextracted_only
         overwrite_config["spatial_tower_select_feature"] = model_args.spatial_tower_select_feature
         overwrite_config["spatial_tower_select_layer"] = model_args.spatial_tower_select_layer
         overwrite_config["spatial_feature_dim"] = spatial_feature_dim
@@ -2882,6 +2902,7 @@ def train(attn_implementation=None):
         spatial_tower.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
 
         model.config.spatial_tower = model_args.spatial_tower
+        model.config.spatial_tower_preextracted_only = model_args.spatial_tower_preextracted_only
         model.config.spatial_tower_select_feature = model_args.spatial_tower_select_feature
         model.config.spatial_tower_select_layer = model_args.spatial_tower_select_layer
         model.config.spatial_feature_dim = spatial_feature_dim

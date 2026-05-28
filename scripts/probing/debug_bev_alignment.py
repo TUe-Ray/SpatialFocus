@@ -313,6 +313,11 @@ def run_optional_model_forward(
     data_args.train_data_shuffle = False
     data_args.spatial_features_root = args.feature_root
     data_args.spatial_features_subdir = args.spatial_features_subdir
+    data_args.require_spatial_features = True
+    data_args.geometry_spatial_tower_type = "cut3r"
+    data_args.geometry_spatial_features_root = args.feature_root
+    data_args.geometry_spatial_features_subdir = args.point_maps_subdir
+    data_args.require_geometry_spatial_features = True
     dataset = LazySupervisedDataset(tokenizer=tokenizer, data_path=args.train_data_json, data_args=data_args)
     collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
     item = dataset[dataset_index]
@@ -331,6 +336,7 @@ def run_optional_model_forward(
             labels=None,
             images=batch["images"],
             spatial_features=batch.get("spatial_features"),
+            geometry_spatial_features=batch.get("geometry_spatial_features"),
             point_maps=batch.get("point_maps"),
             modalities=batch.get("modalities"),
             image_sizes=batch.get("image_sizes"),
@@ -426,7 +432,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--train-data-json", "--data-yaml", dest="train_data_json", default=str(REPO_ROOT / "scripts" / "VLM_3R" / "vsibench_data.yaml"))
     parser.add_argument("--feature-root", required=True)
-    parser.add_argument("--spatial-features-subdir", default="spatial_features_points")
+    parser.add_argument("--spatial-features-subdir", default="spatial_features")
+    parser.add_argument("--point-maps-subdir", default="spatial_features_points")
     parser.add_argument("--bev-point-map-key", default="point_maps_ref")
     parser.add_argument("--bev-conf-threshold", type=float, default=0.0)
     parser.add_argument("--bev-coord-scale", type=float, default=10.0)
@@ -470,11 +477,11 @@ def main() -> None:
     video_rel = str(record.get("video", ""))
     if not video_rel:
         raise ValueError(f"Selected record {dataset_index} does not contain a video path")
-    sidecar_path = resolve_sidecar_path(video_rel, Path(args.feature_root), args.spatial_features_subdir)
+    sidecar_path = resolve_sidecar_path(video_rel, Path(args.feature_root), args.point_maps_subdir)
     if sidecar_path is None:
         raise FileNotFoundError(
-            f"Missing CUT3R sidecar for {video_rel} under root={args.feature_root}, "
-            f"subdir={args.spatial_features_subdir}"
+            f"Missing CUT3R point-map sidecar for {video_rel} under root={args.feature_root}, "
+            f"subdir={args.point_maps_subdir}"
         )
     payload = load_point_map_sidecar(sidecar_path)
     target_pm = first_point_map(payload, args.bev_point_map_key)
@@ -506,6 +513,8 @@ def main() -> None:
         "dataset_index": dataset_index,
         "video": video_rel,
         "sidecar_path": str(sidecar_path),
+        "spatial_features_subdir": args.spatial_features_subdir,
+        "point_maps_subdir": args.point_maps_subdir,
         "bev_target_key": args.bev_point_map_key,
         "bev_conf_threshold": args.bev_conf_threshold,
         "bev_coord_scale": args.bev_coord_scale,

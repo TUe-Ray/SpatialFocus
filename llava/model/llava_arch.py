@@ -332,9 +332,13 @@ class LlavaMetaModel:
             
             # create spatial tower and fusion block
             if hasattr(config, "spatial_tower"):
-                # Force eager load so spatial towers do not stay in cfg-only mode
-                # and fail later on the first real forward pass.
-                self.spatial_tower = build_spatial_tower(config, delay_load=False)
+                preextracted_only = _as_bool_config(
+                    getattr(config, "spatial_tower_preextracted_only", False),
+                    False,
+                )
+                # Sidecar-only CUT3R jobs need the tower wrapper/config for fusion
+                # routing, but the heavy encoder weights are never used.
+                self.spatial_tower = build_spatial_tower(config, delay_load=preextracted_only)
             if hasattr(config, "fusion_block"):
                 self.fusion_block = build_multimodal_fusion_block(config, delay_load=delay_load)
             self.geometry_aware_projection = None
@@ -418,11 +422,16 @@ class LlavaMetaModel:
     def initialize_spatial_tower(self, model_args, fsdp=None):
         cli_spatial_tower = model_args.spatial_tower
         self.config.mm_spatial_tower = cli_spatial_tower
+        preextracted_only = _as_bool_config(
+            getattr(model_args, "spatial_tower_preextracted_only", getattr(self.config, "spatial_tower_preextracted_only", False)),
+            False,
+        )
+        self.config.spatial_tower_preextracted_only = preextracted_only
 
         if self.get_spatial_tower() is None:
-            # When creating the spatial tower for the first time, force eager load.
-            # Otherwise some towers keep only config (delay_load=True) and fail at first forward.
-            spatial_tower = build_spatial_tower(model_args, delay_load=False)
+            # Sidecar-only jobs intentionally keep the tower in cfg-only mode;
+            # forward must use pre-extracted camera_tokens/patch_tokens.
+            spatial_tower = build_spatial_tower(model_args, delay_load=preextracted_only)
 
             if hasattr(spatial_tower.config, "to_dict"):
                 cfg_dict = spatial_tower.config.to_dict()
@@ -453,6 +462,12 @@ class LlavaMetaModel:
             print("[DEBUG] spatial_tower_name =", getattr(spatial_tower, "spatial_tower_name", None))
             print("[DEBUG] tower_name =", getattr(spatial_tower, "tower_name", None))
             print("[DEBUG] model_name =", getattr(spatial_tower, "model_name", None))
+            if preextracted_only:
+                rank0_print(
+                    "[SPATIAL] spatial_tower_preextracted_only=True; leaving spatial tower unloaded "
+                    "and expecting pre-extracted token sidecars."
+                )
+                return
             spatial_tower.load_model()
 
     def initialize_geometry_aware_projection(self, model_args, fsdp=None):
@@ -1740,12 +1755,23 @@ class LlavaMetaForCausalLM(ABC):
             spatial_encoder_type = self.get_model().config.spatial_tower
             fusion_block_type = self.get_model().config.fusion_block
             spatial_tower = self.get_model().get_spatial_tower()
+            preextracted_only = _as_bool_config(
+                getattr(self.get_model().config, "spatial_tower_preextracted_only", False),
+                False,
+            )
 
             def ensure_spatial_tower_loaded():
                 if spatial_tower is None:
                     return
                 if getattr(spatial_tower, "is_loaded", True):
                     return
+                if preextracted_only:
+                    raise RuntimeError(
+                        "spatial_tower_preextracted_only=True disables runtime CUT3R tower loading. "
+                        "Forward requires pre-extracted spatial_features with camera_tokens and "
+                        "patch_tokens; use SPATIAL_FEATURES_SUBDIR=spatial_features and pass "
+                        "point-map sidecars separately as geometry_spatial_features."
+                    )
                 load_model = getattr(spatial_tower, "load_model", None)
                 if callable(load_model):
                     load_model()
@@ -1975,16 +2001,42 @@ class LlavaMetaForCausalLM(ABC):
                                            'svf_depth_rope', 'svf_xyz_rope', 'svf_spherical_rope']:
                     geometry_point_maps = None
                     if geometry_spatial_features is not None:
-                        pi3x_geometry = self._decode_pi3x_geometry_outputs_for_projection(
-                            geometry_spatial_features,
-                            device=image_features.device,
-                            force=True,
+                        loaded_geometry_features = (
+                            geometry_spatial_features[0]
+                            if isinstance(geometry_spatial_features, (list, tuple)) and len(geometry_spatial_features) > 0
+                            else geometry_spatial_features
                         )
-                        if pi3x_geometry is not None:
-                            geometry_point_maps = _coalesce_point_maps(
-                                pi3x_geometry.get("point_map", pi3x_geometry.get("points"))
+                        has_cut3r_point_maps = (
+                            isinstance(loaded_geometry_features, dict)
+                            and any(
+                                key in loaded_geometry_features
+                                for key in (
+                                    "point_maps_ref",
+                                    "pts3d_in_other_view",
+                                    "point_maps_cam",
+                                    "pts3d_in_self_view",
+                                    "point_maps",
+                                    "point_map",
+                                    "points",
+                                    "pts3d",
+                                )
                             )
-
+                        )
+                        if has_cut3r_point_maps:
+                            geometry_point_maps, _geometry_source = _resolve_llm_geo_point_maps(
+                                self.get_model().config,
+                                loaded_spatial_features=loaded_geometry_features,
+                            )
+                        else:
+                            pi3x_geometry = self._decode_pi3x_geometry_outputs_for_projection(
+                                geometry_spatial_features,
+                                device=image_features.device,
+                                force=True,
+                            )
+                            if pi3x_geometry is not None:
+                                geometry_point_maps = _coalesce_point_maps(
+                                    pi3x_geometry.get("point_map", pi3x_geometry.get("points"))
+                                )
                     if geometry_point_maps is None:
                         geometry_point_maps = _coalesce_point_maps(point_maps)
                     if geometry_point_maps is None and isinstance(loaded_spatial_features, dict):
@@ -2040,7 +2092,7 @@ class LlavaMetaForCausalLM(ABC):
                         )
                         raise RuntimeError(
                             f"{fusion_block_type} requires point_maps from CUT3R or "
-                            "geometry_spatial_features decoded from PI3X. Expected one of: "
+                            "geometry_spatial_features decoded from PI3X/CUT3R. Expected one of: "
                             "geometry_spatial_features, point_maps, point_maps_ref, "
                             "point_maps_cam, pts3d_in_other_view, pts3d_in_self_view. "
                             f"Debug: requested_point_map_key={requested_point_map_key!r}, "

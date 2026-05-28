@@ -17,7 +17,7 @@
 # ============================================================
 # User-defined variables: General
 # ============================================================
-NOTE="${NOTE:-Train VLM3R on VSI-Bench with CUT3R point-map sidecars, cross-attention fusion, and opt-in BEV auxiliary supervision.}"
+NOTE="${NOTE:-Train VLM3R on VSI-Bench with CUT3R token sidecars, CUT3R point-map sidecars, cross-attention fusion, and opt-in BEV auxiliary supervision.}"
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-vlm3r}"
 
 # ============================================================
@@ -31,9 +31,12 @@ WORK_DATA_ROOT="${WORK_DATA_ROOT:-/leonardo_work/EUHPC_D32_006/train_data/vlm3r}
 FAST_DATA_ROOT="${FAST_DATA_ROOT:-/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r}"
 DATA_ROOT="${DATA_ROOT:-$FAST_DATA_ROOT}"
 # DATA_ROOT="${DATA_ROOT:-$WORK_DATA_ROOT}"  # WORK mirror fallback if FAST is unstable.
-# SPATIAL_FEATURES_ROOT="${SPATIAL_FEATURES_ROOT:-$FAST_DATA_ROOT}"  # FAST CUT3R token sidecars.
 SPATIAL_FEATURES_ROOT="${SPATIAL_FEATURES_ROOT:-$DATA_ROOT}"
-SPATIAL_FEATURES_SUBDIR="${SPATIAL_FEATURES_SUBDIR:-spatial_features_points}"
+SPATIAL_FEATURES_SUBDIR="${SPATIAL_FEATURES_SUBDIR:-spatial_features}"
+GEOMETRY_SPATIAL_FEATURES_ROOT="${GEOMETRY_SPATIAL_FEATURES_ROOT:-$DATA_ROOT}"
+GEOMETRY_SPATIAL_FEATURES_SUBDIR="${GEOMETRY_SPATIAL_FEATURES_SUBDIR:-spatial_features_points}"
+GEOMETRY_SPATIAL_TOWER_TYPE="${GEOMETRY_SPATIAL_TOWER_TYPE:-cut3r}"
+REQUIRE_GEOMETRY_SPATIAL_FEATURES="${REQUIRE_GEOMETRY_SPATIAL_FEATURES:-True}"
 
 TRAIN_SAVE_ROOT="/leonardo_work/EUHPC_D32_006/Train_Model/VLM3R"
 TRAIN_RUN_NAME="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
@@ -71,6 +74,7 @@ MODEL_LORA_ENABLE="True"
 MODEL_LORA_R="128"
 MODEL_LORA_ALPHA="256"
 MODEL_SPATIAL_TOWER="cut3r"
+MODEL_SPATIAL_TOWER_PREEXTRACTED_ONLY="${MODEL_SPATIAL_TOWER_PREEXTRACTED_ONLY:-True}"
 MODEL_SPATIAL_TOWER_SELECT_FEATURE="all_tokens"
 MODEL_SPATIAL_FEATURE_DIM="768"
 MODEL_FUSION_BLOCK="${MODEL_FUSION_BLOCK:-cross_attention}"
@@ -120,8 +124,8 @@ MODEL_TF32="True"
 MODEL_MAX_LENGTH="32768"
 MODEL_GRADIENT_CHECKPOINTING="True"
 MODEL_LAZY_PREPROCESS="True"
-MODEL_TORCH_COMPILE="True"
-MODEL_TORCH_COMPILE_BACKEND="inductor"
+MODEL_TORCH_COMPILE="${MODEL_TORCH_COMPILE:-True}"
+MODEL_TORCH_COMPILE_BACKEND="${MODEL_TORCH_COMPILE_BACKEND:-inductor}"
 MODEL_FRAMES_UPBOUND="32"
 MODEL_MM_NEWLINE_POSITION="grid"
 MODEL_ADD_TIME_INSTRUCTION="True"
@@ -132,12 +136,12 @@ DATA_PATH_YAML="${DATA_PATH_YAML:-scripts/VLM_3R/vsibench_data.yaml}"  # FAST js
 # DATA_PATH_YAML="${DATA_PATH_YAML:-scripts/VLM_3R/vsibench_data_work.yaml}"  # WORK mirror fallback.
 DATA_GROUP_BY_MODALITY_LENGTH="True"
 
-PER_DEVICE_TRAIN_BATCH_SIZE=1
-TARGET_GLOBAL_BATCH_SIZE=128
+PER_DEVICE_TRAIN_BATCH_SIZE="${PER_DEVICE_TRAIN_BATCH_SIZE:-1}"
+TARGET_GLOBAL_BATCH_SIZE="${TARGET_GLOBAL_BATCH_SIZE:-128}"
 NUM_TRAIN_EPOCHS="1"
 SAVE_TOTAL_LIMIT="2"
 SAVE_STRATEGY="steps"
-SAVE_STEPS="100"
+SAVE_STEPS="${SAVE_STEPS:-100}"
 MAX_STEPS="${MAX_STEPS:--1}"
 LEARNING_RATE="2e-5"
 WEIGHT_DECAY="0."
@@ -145,7 +149,7 @@ WARMUP_RATIO="0.03"
 LR_SCHEDULER_TYPE="cosine"
 LOGGING_STEPS="5"
 DATALOADER_NUM_WORKERS="8"
-REPORT_TO="wandb"
+REPORT_TO="${REPORT_TO:-wandb}"
 DATALOADER_DROP_LAST="True"
 
 
@@ -227,6 +231,7 @@ fi
 
 export WANDB_MODE="offline"
 export NCCL_NVLS_ENABLE=0
+export DECORD_EOF_RETRY_MAX="${DECORD_EOF_RETRY_MAX:-20480}"
 export WANDB_DIR="$WANDB_DIR"
 export WANDB_CACHE_DIR="$WANDB_CACHE_DIR"
 export WANDB_CONFIG_DIR="$WANDB_CONFIG_DIR"
@@ -328,6 +333,7 @@ declare -A MODEL_ARGS=(
     [lora_r]="$MODEL_LORA_R"
     [lora_alpha]="$MODEL_LORA_ALPHA"
     [spatial_tower]="$MODEL_SPATIAL_TOWER"
+    [spatial_tower_preextracted_only]="$MODEL_SPATIAL_TOWER_PREEXTRACTED_ONLY"
     [spatial_tower_select_feature]="$MODEL_SPATIAL_TOWER_SELECT_FEATURE"
     [spatial_feature_dim]="$MODEL_SPATIAL_FEATURE_DIM"
     [fusion_block]="$MODEL_FUSION_BLOCK"
@@ -394,6 +400,10 @@ declare -A DATA_ARGS=(
     [spatial_features_root]="$SPATIAL_FEATURES_ROOT"
     [spatial_features_subdir]="$SPATIAL_FEATURES_SUBDIR"
     [require_spatial_features]="$REQUIRE_SPATIAL_FEATURES"
+    [geometry_spatial_tower_type]="$GEOMETRY_SPATIAL_TOWER_TYPE"
+    [geometry_spatial_features_root]="$GEOMETRY_SPATIAL_FEATURES_ROOT"
+    [geometry_spatial_features_subdir]="$GEOMETRY_SPATIAL_FEATURES_SUBDIR"
+    [require_geometry_spatial_features]="$REQUIRE_GEOMETRY_SPATIAL_FEATURES"
     [zero_spatial_features]="$ZERO_SPATIAL_FEATURES"
     [group_by_modality_length]="$DATA_GROUP_BY_MODALITY_LENGTH"   #控制 dataloader sampler 是否按模態長度分組（
                                         #通常可減少 padding、讓 batch 更穩定）

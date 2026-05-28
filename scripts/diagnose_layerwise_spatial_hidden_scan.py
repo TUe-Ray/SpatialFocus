@@ -409,8 +409,10 @@ def load_model(args: argparse.Namespace, device: torch.device, dtype: torch.dtyp
                 self.config = SimpleNamespace()
 
             def load_model(self, device_map=None):
-                self.is_loaded = True
-                return self
+                raise RuntimeError(
+                    "Runtime CUT3R tower loading was intentionally skipped. "
+                    "This diagnostic expects precomputed CUT3R token sidecars."
+                )
 
         original_build_spatial_tower = llava_arch.build_spatial_tower
 
@@ -435,6 +437,7 @@ def load_model(args: argparse.Namespace, device: torch.device, dtype: torch.dtyp
                 "mm_spatial_pool_stride": args.mm_spatial_pool_stride,
                 "mm_spatial_pool_mode": args.pool_mode,
                 "zero_spatial_features": load_zero_spatial,
+                "spatial_tower_preextracted_only": skip_spatial_tower_load,
             },
         )
     finally:
@@ -449,6 +452,7 @@ def load_model(args: argparse.Namespace, device: torch.device, dtype: torch.dtyp
     model.config.use_cache = False
     model.config.spatial_rank_loss_enable = False
     model.config.zero_spatial_features = False
+    model.config.spatial_tower_preextracted_only = skip_spatial_tower_load
     return tokenizer, model, image_processor
 
 
