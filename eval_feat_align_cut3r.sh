@@ -26,6 +26,8 @@ CONDA_ENV="${CONDA_ENV:-vsibench}"
 FAST_ROOT="${FAST_ROOT:-/leonardo_scratch/fast/EUHPC_D32_006}"
 HF_HOME="${HF_HOME:-$FAST_ROOT/hf_cache}"
 VSI_ROOT="${VSI_ROOT:-$FAST_ROOT/vsibench}"
+SPATIAL_FEATURES_ROOT="${SPATIAL_FEATURES_ROOT:-$FAST_ROOT/data/vlm3r}"
+SPATIAL_FEATURES_SUBDIR="${SPATIAL_FEATURES_SUBDIR:-spatial_features}"
 
 MODEL_ROOT="${MODEL_ROOT:-/leonardo_work/EUHPC_D32_006/FAST/hf_models/VLM3R}"
 MODEL_BASE_LOCAL="${MODEL_BASE_LOCAL:-$MODEL_ROOT/LLaVA-NeXT-Video-7B-Qwen2}"
@@ -43,6 +45,7 @@ CONV_TEMPLATE="${CONV_TEMPLATE:-qwen_1_5}"
 MODEL_NAME="${MODEL_NAME:-vlm-3r-llava-qwen2-lora}"
 
 LIMIT="${LIMIT:-0}"
+EXTRA_MODEL_ARGS="${EXTRA_MODEL_ARGS:-}"
 
 cd "$REPO_DIR"
 
@@ -56,6 +59,8 @@ echo "TASK_FILE=$TASK_FILE"
 echo "FAST_ROOT=$FAST_ROOT"
 echo "HF_HOME=$HF_HOME"
 echo "VSI_ROOT=$VSI_ROOT"
+echo "SPATIAL_FEATURES_ROOT=$SPATIAL_FEATURES_ROOT"
+echo "SPATIAL_FEATURES_SUBDIR=$SPATIAL_FEATURES_SUBDIR"
 echo "PRETRAINED_LOCAL=$PRETRAINED_LOCAL"
 echo "MODEL_BASE_LOCAL=$MODEL_BASE_LOCAL"
 echo "SIGLIP_LOCAL=$SIGLIP_LOCAL"
@@ -73,6 +78,11 @@ for path in "$REPO_DIR" "$SUBMODULE_DIR" "$TASK_DIR" "$PRETRAINED_LOCAL" "$MODEL
     exit 1
   fi
 done
+
+if [[ -n "$SPATIAL_FEATURES_ROOT" && ! -d "$SPATIAL_FEATURES_ROOT" ]]; then
+  echo "[ERROR] Missing spatial features root: $SPATIAL_FEATURES_ROOT"
+  exit 1
+fi
 
 if [[ ! -f "$PRETRAINED_LOCAL/config.json" ]]; then
   echo "[ERROR] Missing pretrained config: $PRETRAINED_LOCAL/config.json"
@@ -223,6 +233,12 @@ if [[ -n "$MODEL_NAME" ]]; then
   MODEL_ARGS+=",model_name=$MODEL_NAME"
 fi
 MODEL_ARGS+=",conv_template=$CONV_TEMPLATE,max_frames_num=$MAX_FRAMES_NUM"
+if [[ -n "$SPATIAL_FEATURES_ROOT" ]]; then
+  MODEL_ARGS+=",spatial_features_root=$SPATIAL_FEATURES_ROOT,spatial_features_subdir=$SPATIAL_FEATURES_SUBDIR"
+fi
+if [[ -n "$EXTRA_MODEL_ARGS" ]]; then
+  MODEL_ARGS+=",$EXTRA_MODEL_ARGS"
+fi
 
 echo "Running Leonardo offline evaluation"
 echo "PRETRAINED_RUNTIME=$PRETRAINED_RUNTIME"
