@@ -284,24 +284,35 @@ class Qwen2Visual3DRopeAttention(Qwen2Attention):
     def _record_mask_violation(self, attn_probs, attention_mask):
         if not self._stats_enabled() or not hasattr(self, "last_llm_visual_3d_rope_stats"):
             return
+        # Avoid full [B,H,Q,K] diagnostic masks in training. They can add
+        # multi-GiB temporary allocations and are not part of the model path.
+        head_max_probs = attn_probs.detach().amax(dim=1, keepdim=True)
+        prob_tensor_for_checks = head_max_probs if self.training else attn_probs.detach()
         if attention_mask is None:
             self.last_llm_visual_3d_rope_stats["masked_attention_prob_max"] = 0.0
-            self.last_llm_visual_3d_rope_stats["attention_prob_nan_count"] = int(torch.isnan(attn_probs).sum().item())
-            self.last_llm_visual_3d_rope_stats["attention_prob_inf_count"] = int(torch.isinf(attn_probs).sum().item())
+            self.last_llm_visual_3d_rope_stats["attention_prob_nan_count"] = int(
+                torch.isnan(prob_tensor_for_checks).sum().item()
+            )
+            self.last_llm_visual_3d_rope_stats["attention_prob_inf_count"] = int(
+                torch.isinf(prob_tensor_for_checks).sum().item()
+            )
             self.last_llm_visual_3d_rope_stats["masked_attention_prob_nonfinite_count"] = 0
             return
         mask = attention_mask < -1e4
         if not mask.any():
             self.last_llm_visual_3d_rope_stats["masked_attention_prob_max"] = 0.0
-            self.last_llm_visual_3d_rope_stats["attention_prob_nan_count"] = int(torch.isnan(attn_probs).sum().item())
-            self.last_llm_visual_3d_rope_stats["attention_prob_inf_count"] = int(torch.isinf(attn_probs).sum().item())
+            self.last_llm_visual_3d_rope_stats["attention_prob_nan_count"] = int(
+                torch.isnan(prob_tensor_for_checks).sum().item()
+            )
+            self.last_llm_visual_3d_rope_stats["attention_prob_inf_count"] = int(
+                torch.isinf(prob_tensor_for_checks).sum().item()
+            )
             self.last_llm_visual_3d_rope_stats["masked_attention_prob_nonfinite_count"] = 0
             return
         # Keep this validation cheap: expanding the mask over all attention
         # heads can allocate tens of GiB for long VLM sequences during
         # training. A max over heads preserves the causal-mask violation signal
         # while reducing the diagnostic tensor from [B,H,Q,K] to [B,1,Q,K].
-        head_max_probs = attn_probs.detach().amax(dim=1, keepdim=True)
         masked_probs = head_max_probs.masked_select(mask)
         nonfinite_count = int((~torch.isfinite(masked_probs)).sum().item()) if masked_probs.numel() else 0
         finite_masked_probs = masked_probs.float()
@@ -309,12 +320,30 @@ class Qwen2Visual3DRopeAttention(Qwen2Attention):
         self.last_llm_visual_3d_rope_stats["masked_attention_prob_max"] = (
             float(finite_masked_probs.max().item()) if finite_masked_probs.numel() else 0.0
         )
-        self.last_llm_visual_3d_rope_stats["attention_prob_nan_count"] = int(torch.isnan(attn_probs).sum().item())
-        self.last_llm_visual_3d_rope_stats["attention_prob_inf_count"] = int(torch.isinf(attn_probs).sum().item())
+        self.last_llm_visual_3d_rope_stats["attention_prob_nan_count"] = int(
+            torch.isnan(prob_tensor_for_checks).sum().item()
+        )
+        self.last_llm_visual_3d_rope_stats["attention_prob_inf_count"] = int(
+            torch.isinf(prob_tensor_for_checks).sum().item()
+        )
         self.last_llm_visual_3d_rope_stats["masked_attention_prob_nonfinite_count"] = nonfinite_count
 
     def _sanitize_attention_logits(self, attn_weights, attention_mask):
         if not torch.is_floating_point(attn_weights):
+            return attn_weights
+
+        if self.training:
+            if self._stats_enabled() and hasattr(self, "last_llm_visual_3d_rope_stats"):
+                sample = attn_weights.detach()[..., : min(attn_weights.shape[-2], 128), : min(attn_weights.shape[-1], 128)]
+                self.last_llm_visual_3d_rope_stats["attention_logit_nan_count"] = int(torch.isnan(sample).sum().item())
+                self.last_llm_visual_3d_rope_stats["attention_logit_inf_count"] = int(torch.isinf(sample).sum().item())
+                self.last_llm_visual_3d_rope_stats["attention_logits_sanitized"] = "training_inplace"
+
+            torch.nan_to_num_(attn_weights, nan=0.0, posinf=1.0e4, neginf=-1.0e4)
+            if attention_mask is not None:
+                mask = attention_mask < -1e4
+                if mask.any():
+                    attn_weights.masked_fill_(mask, -1.0e9)
             return attn_weights
 
         finite = torch.isfinite(attn_weights)
