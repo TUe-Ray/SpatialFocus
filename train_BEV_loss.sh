@@ -40,6 +40,10 @@ REQUIRE_GEOMETRY_SPATIAL_FEATURES="${REQUIRE_GEOMETRY_SPATIAL_FEATURES:-True}"
 
 TRAIN_SAVE_ROOT="/leonardo_work/EUHPC_D32_006/Train_Model/VLM3R"
 TRAIN_RUN_NAME="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
+WANDB_RUN_TIME="${WANDB_RUN_TIME:-$(date +%Y%m%d_%H%M%S)}"
+WANDB_RUN_ID="${WANDB_RUN_ID:-${WANDB_RUN_TIME}_${SLURM_JOB_NAME:-manual}_${SLURM_JOB_ID:-manual}}"
+WANDB_RUN_ID="${WANDB_RUN_ID//[^A-Za-z0-9_.-]/_}"
+WANDB_NAME="${WANDB_NAME:-$TRAIN_RUN_NAME}"
 
 WANDB_DIR="$WORK/wandb"
 WANDB_CACHE_DIR="$WORK/wandb_cache"
@@ -244,6 +248,8 @@ fi
 export WANDB_MODE="offline"
 export NCCL_NVLS_ENABLE=0
 export DECORD_EOF_RETRY_MAX="${DECORD_EOF_RETRY_MAX:-20480}"
+export WANDB_RUN_ID="$WANDB_RUN_ID"
+export WANDB_NAME="$WANDB_NAME"
 export WANDB_DIR="$WANDB_DIR"
 export WANDB_CACHE_DIR="$WANDB_CACHE_DIR"
 export WANDB_CONFIG_DIR="$WANDB_CONFIG_DIR"
@@ -440,7 +446,7 @@ declare -A TRAINING_ARGS=(
     [num_train_epochs]="$NUM_TRAIN_EPOCHS"  # 1 epoch for ablation, adjust as needed
     [max_steps]="$MAX_STEPS"
     [save_total_limit]="$SAVE_TOTAL_LIMIT"
-    [run_name]="$SUFFIX"
+    [run_name]="$TRAIN_RUN_NAME"
     [output_dir]="$OUTPUT_DIR"
     [per_device_train_batch_size]="$PER_DEVICE_TRAIN_BATCH_SIZE"
     [per_device_eval_batch_size]="4"

@@ -42,7 +42,13 @@ DEVICE="${DEVICE:-cuda:0}"
 WANDB_ENABLE="${WANDB_ENABLE:-0}"
 WANDB_PROJECT="${WANDB_PROJECT:-vlm3r-depth-probes}"
 WANDB_DIR="${WANDB_DIR:-${WORK:-/leonardo_work/EUHPC_D32_006}/wandb}"
-WANDB_NAME="${WANDB_NAME:-depth-probes-${SLURM_JOB_ID:-manual}}"
+WANDB_RUN_TIME="${WANDB_RUN_TIME:-$(date +%Y%m%d_%H%M%S)}"
+WANDB_RUN_NAME_DEFAULT="${SLURM_JOB_NAME:-manual}_${SLURM_JOB_ID:-manual}"
+WANDB_RUN_NAME_DEFAULT="${WANDB_RUN_NAME_DEFAULT//[^A-Za-z0-9_.-]/_}"
+WANDB_RUN_ID_DEFAULT="${WANDB_RUN_TIME}_${SLURM_JOB_NAME:-manual}_${SLURM_JOB_ID:-manual}"
+WANDB_RUN_ID_DEFAULT="${WANDB_RUN_ID_DEFAULT//[^A-Za-z0-9_.-]/_}"
+WANDB_RUN_ID="${WANDB_RUN_ID:-$WANDB_RUN_ID_DEFAULT}"
+WANDB_NAME="${WANDB_NAME:-$WANDB_RUN_NAME_DEFAULT}"
 SKIP_EXISTING="${SKIP_EXISTING:-0}"
 FEATURE_LEVELS="${FEATURE_LEVELS:-}"
 TRAIN_EXTRA_ARGS="${TRAIN_EXTRA_ARGS:-}"
@@ -66,6 +72,7 @@ if [[ "$WANDB_ENABLE" == "1" || "$WANDB_ENABLE" == "true" ]]; then
   cmd+=(--wandb
     --wandb-project "${WANDB_PROJECT}"
     --wandb-dir "${WANDB_DIR}"
+    --wandb-id "${WANDB_RUN_ID}"
     --wandb-name "${WANDB_NAME}"
   )
 fi
