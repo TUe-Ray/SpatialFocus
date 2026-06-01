@@ -833,6 +833,19 @@ class LlavaMetaForCausalLM(ABC):
         self.config.has_bev_head = True
         return self.bev_head
 
+    def initialize_depth_head(self, device=None, dtype=None):
+        from .geometry import DepthHead
+
+        hidden_size = int(getattr(self.config, "hidden_size"))
+        if getattr(self, "depth_head", None) is None:
+            self.depth_head = DepthHead(hidden_size)
+        if device is not None or dtype is not None:
+            self.depth_head.to(device=device, dtype=dtype)
+        for param in self.depth_head.parameters():
+            param.requires_grad = True
+        self.config.has_depth_head = True
+        return self.depth_head
+
     def _build_grid_metadata(
         self,
         num_frames,

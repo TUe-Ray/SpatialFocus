@@ -323,6 +323,27 @@ class ModelArguments:
         default=0.0,
         metadata={"help": "Confidence threshold for BEV token validity when confidence maps are available."},
     )
+    use_depth_supervision: bool = field(
+        default=False,
+        metadata={"help": "Enable train-only per-frame camera-space log-depth auxiliary supervision."},
+    )
+    depth_head_source: str = field(
+        default="llm_output",
+        metadata={"help": "Hidden-state source for depth head. Only llm_output is supported."},
+    )
+    lambda_depth: float = field(default=0.05, metadata={"help": "Weight for the auxiliary depth loss."})
+    depth_point_map_key: str = field(
+        default="point_maps_cam",
+        metadata={"help": "Camera-space CUT3R point-map key used for depth targets."},
+    )
+    depth_detach_hidden: bool = field(default=False, metadata={"help": "Diagnostic: detach depth head inputs."})
+    depth_shuffle_target: bool = field(default=False, metadata={"help": "Diagnostic negative control: shuffle depth targets across samples."})
+    depth_conf_threshold: float = field(
+        default=0.0,
+        metadata={"help": "Confidence threshold for depth token validity when confidence maps are available."},
+    )
+    depth_max_gt: float = field(default=20.0, metadata={"help": "Maximum valid ground-truth depth in meters; <=0 disables cap."})
+    depth_visualize_debug: bool = field(default=False, metadata={"help": "Enable explicit depth debug visualization hooks."})
 
     unfreeze_mm_vision_tower: bool = field(default=False)
     unfreeze_language_model: bool = field(default=False)
@@ -530,7 +551,7 @@ def get_mm_adapter_state_maybe_zero_3(named_params, keys_to_match):
 def find_all_linear_names(model):
     cls = torch.nn.Linear
     lora_module_names = set()
-    multimodal_keywords = ['mm_projector', 'vision_tower', 'vision_resampler', 'spatial_tower', 'fusion_block', 'geometry_aware_projection', 'bev_head']
+    multimodal_keywords = ['mm_projector', 'vision_tower', 'vision_resampler', 'spatial_tower', 'fusion_block', 'geometry_aware_projection', 'bev_head', 'depth_head']
     for name, module in model.named_modules():
         if any(mm_keyword in name for mm_keyword in multimodal_keywords):
             continue
@@ -566,6 +587,19 @@ def find_bev_model(model):
     if hasattr(model, "initialize_bev_head"):
         return model
     raise RuntimeError("Could not find a VLM-3R module that can initialize BEVHead.")
+
+
+def find_depth_model(model):
+    for module in model.modules():
+        if (
+            hasattr(module, "initialize_depth_head")
+            and hasattr(module, "prepare_inputs_labels_for_multimodal")
+            and module.__class__.__name__.startswith("Llava")
+        ):
+            return module
+    if hasattr(model, "initialize_depth_head"):
+        return model
+    raise RuntimeError("Could not find a VLM-3R module that can initialize DepthHead.")
 
 
 def _normalize_optional_path(path):
@@ -677,7 +711,7 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: st
     rank0_print(f"Only save projectors: {check_only_save_mm_adapter_tunnable}")
     if check_only_save_mm_adapter_tunnable:
         # Only save Adapter
-        keys_to_match = ["mm_projector", "vision_resampler", "fusion_block", "geometry_aware_projection", "bev_head"] # save fusion_block and projectors
+        keys_to_match = ["mm_projector", "vision_resampler", "fusion_block", "geometry_aware_projection", "bev_head", "depth_head"] # save fusion_block and projectors
         if getattr(trainer.args, "use_im_start_end", False):
             keys_to_match.extend(["embed_tokens", "embed_in"])
 
@@ -2607,6 +2641,18 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
         overwrite_config["bev_visualize_debug"] = model_args.bev_visualize_debug
         overwrite_config["bev_point_map_key"] = model_args.bev_point_map_key
         overwrite_config["bev_conf_threshold"] = model_args.bev_conf_threshold
+    if model_args.use_depth_supervision or model_args.depth_visualize_debug:
+        if cfg_pretrained is None:
+            cfg_pretrained = AutoConfig.from_pretrained(model_args.model_name_or_path)
+        overwrite_config["use_depth_supervision"] = model_args.use_depth_supervision
+        overwrite_config["depth_head_source"] = model_args.depth_head_source
+        overwrite_config["lambda_depth"] = model_args.lambda_depth
+        overwrite_config["depth_point_map_key"] = model_args.depth_point_map_key
+        overwrite_config["depth_detach_hidden"] = model_args.depth_detach_hidden
+        overwrite_config["depth_shuffle_target"] = model_args.depth_shuffle_target
+        overwrite_config["depth_conf_threshold"] = model_args.depth_conf_threshold
+        overwrite_config["depth_max_gt"] = model_args.depth_max_gt
+        overwrite_config["depth_visualize_debug"] = model_args.depth_visualize_debug
 
     if overwrite_config:
         assert cfg_pretrained is not None, "cfg_pretrained is None"
@@ -2804,10 +2850,24 @@ def train(attn_implementation=None):
         "bev_visualize_debug",
         "bev_point_map_key",
         "bev_conf_threshold",
+        "use_depth_supervision",
+        "depth_head_source",
+        "lambda_depth",
+        "depth_point_map_key",
+        "depth_detach_hidden",
+        "depth_shuffle_target",
+        "depth_conf_threshold",
+        "depth_max_gt",
+        "depth_visualize_debug",
     ):
         setattr(model.config, attr, getattr(model_args, attr))
     if model_args.use_bev_supervision:
         find_bev_model(model).initialize_bev_head(
+            device=training_args.device,
+            dtype=compute_dtype,
+        )
+    if model_args.use_depth_supervision:
+        find_depth_model(model).initialize_depth_head(
             device=training_args.device,
             dtype=compute_dtype,
         )
@@ -3153,6 +3213,11 @@ def train(attn_implementation=None):
                 device=training_args.device,
                 dtype=compute_dtype,
             )
+        if model_args.use_depth_supervision:
+            find_depth_model(model).initialize_depth_head(
+                device=training_args.device,
+                dtype=compute_dtype,
+            )
 
         total_params = sum(p.ds_numel if hasattr(p, "ds_numel") else p.numel() for p in model.parameters())
         trainable_params = sum(p.ds_numel if hasattr(p, "ds_numel") else p.numel() for p in model.parameters() if p.requires_grad)
@@ -3228,6 +3293,19 @@ def train(attn_implementation=None):
         rank0_print(f"P_geo requires_grad: {p_geo_requires_grad}")
         rank0_print(f"P_geo in optimizer: {p_geo_in_optimizer}")
         rank0_print(f"spatial_rank_head_frozen = {freeze_head}")
+
+    if model_args.use_depth_supervision:
+        depth_model = find_depth_model(model)
+        depth_params = _count_parameters(depth_model.depth_head)
+        depth_requires_grad = _module_requires_grad(depth_model.depth_head)
+        rank0_print(
+            "[DEPTH] enabled "
+            f"lambda_depth={model_args.lambda_depth}, source={model_args.depth_head_source}, "
+            f"point_map_key={model_args.depth_point_map_key}, max_gt={model_args.depth_max_gt}"
+        )
+        rank0_print("[DEPTH_HEAD] initialized as Linear(hidden_size, 1).")
+        rank0_print(f"num_parameters = {depth_params}")
+        rank0_print(f"requires_grad = {depth_requires_grad}")
 
     data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
     trainer = LLaVATrainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)

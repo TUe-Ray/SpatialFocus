@@ -100,6 +100,15 @@ class ProgressLoggerCallback(TrainerCallback):
             rank_str += f" | bev_mae={bev_mae:.3f}m"
         if isinstance(bev_valid, float):
             rank_str += f" | bev_valid={bev_valid:.3f}"
+        depth_loss = logs.get("loss_depth")
+        depth_mae = logs.get("depth_mae_meter")
+        depth_valid = logs.get("valid_depth_token_ratio")
+        if isinstance(depth_loss, float):
+            rank_str += f" | L_depth={depth_loss:.4f}"
+        if isinstance(depth_mae, float):
+            rank_str += f" | depth_mae={depth_mae:.3f}m"
+        if isinstance(depth_valid, float):
+            rank_str += f" | depth_valid={depth_valid:.3f}"
 
         print(f"[{bar}] {step}/{max_steps} ({pct:.1f}%) [{elapsed_str}<{eta_str}, {speed_str}] | epoch={epoch:.3f}{loss_str}{lr_str}{rank_str}", flush=True)
 
@@ -362,6 +371,13 @@ class LLaVATrainer(Trainer):
                 return metrics
         return None
 
+    def _depth_metrics(self):
+        for module in self.model.modules():
+            metrics = getattr(module, "_depth_last_metrics", None)
+            if metrics:
+                return metrics
+        return None
+
     @staticmethod
     def _jsonable(value):
         if isinstance(value, torch.Tensor):
@@ -510,6 +526,7 @@ class LLaVATrainer(Trainer):
     def log(self, logs, *args, **kwargs):
         metrics = self._spatial_rank_metrics()
         bev_metrics = self._bev_metrics()
+        depth_metrics = self._depth_metrics()
         geo_rope_metrics, geo_rope_stats = self._geo_rope_fusion_metrics()
         llm_rope_metrics, llm_rope_stats = self._llm_visual_3d_rope_metrics()
         if metrics:
@@ -520,6 +537,14 @@ class LLaVATrainer(Trainer):
             self._flatten_numeric("", bev_metrics, numeric_bev_metrics)
             logs = dict(logs)
             logs.update(numeric_bev_metrics)
+        if depth_metrics:
+            numeric_depth_metrics = {}
+            self._flatten_numeric("", depth_metrics, numeric_depth_metrics)
+            logs = dict(logs)
+            logs.update(numeric_depth_metrics)
+            for key in ("depth_point_map_key", "depth_head_source", "depth_point_map_key_used", "depth_target_space"):
+                if key in depth_metrics:
+                    logs[key] = str(depth_metrics[key])
         if geo_rope_metrics:
             logs = dict(logs)
             logs.update(geo_rope_metrics)
@@ -778,7 +803,7 @@ class LLaVATrainer(Trainer):
             output_dir = os.path.join(run_dir, checkpoint_folder)
 
             # Only save Adapter
-            keys_to_match = ["mm_projector", "vision_resampler", "fusion_block", "bev_head"]
+            keys_to_match = ["mm_projector", "vision_resampler", "fusion_block", "bev_head", "depth_head"]
             if getattr(self.args, "use_im_start_end", False):
                 keys_to_match.extend(["embed_tokens", "embed_in"])
 
@@ -827,7 +852,7 @@ class LLaVADPOTrainer(DPOTrainer):
             output_dir = os.path.join(run_dir, checkpoint_folder)
 
             # Only save Adapter
-            keys_to_match = ["mm_projector", "vision_resampler", "bev_head"]
+            keys_to_match = ["mm_projector", "vision_resampler", "bev_head", "depth_head"]
             if getattr(self.args, "use_im_start_end", False):
                 keys_to_match.extend(["embed_tokens", "embed_in"])
 

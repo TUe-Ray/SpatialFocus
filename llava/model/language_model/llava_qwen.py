@@ -28,7 +28,7 @@ from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutpu
 from transformers.generation.utils import GenerateOutput
 
 # from ...constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
-from llava.model.geometry import build_bev_targets_from_point_maps
+from llava.model.geometry import build_bev_targets_from_point_maps, build_depth_targets_from_point_maps
 from llava.model.llava_arch import LlavaMetaModel, LlavaMetaForCausalLM
 from transformers import Qwen2Config, Qwen2Model, Qwen2ForCausalLM
 from llava.model.language_model.llm_visual_3d_rope import (
@@ -265,6 +265,11 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
             use_bev_supervision = use_bev_supervision.lower() in {"1", "true", "yes", "y", "on"}
         if use_bev_supervision:
             self.initialize_bev_head()
+        use_depth_supervision = getattr(config, "use_depth_supervision", False)
+        if isinstance(use_depth_supervision, str):
+            use_depth_supervision = use_depth_supervision.lower() in {"1", "true", "yes", "y", "on"}
+        if use_depth_supervision:
+            self.initialize_depth_head()
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
@@ -306,7 +311,7 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
         if isinstance(visual_metadata, (list, tuple)):
             return list(visual_metadata)
         raise RuntimeError(
-            "BEV supervision requires visual metadata from prepare_inputs_labels_for_multimodal(); "
+            "Auxiliary visual-token supervision requires visual metadata from prepare_inputs_labels_for_multimodal(); "
             f"got {type(visual_metadata).__name__}."
         )
 
@@ -316,12 +321,12 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
         for metadata in LlavaQwenForCausalLM._metadata_items(visual_metadata):
             indices = metadata.get("visual_token_indices") if isinstance(metadata, dict) else None
             if not isinstance(indices, torch.Tensor):
-                raise RuntimeError("BEV visual metadata is missing tensor visual_token_indices.")
+                raise RuntimeError("Auxiliary visual metadata is missing tensor visual_token_indices.")
             total += int(indices.numel())
         return total
 
-    def _select_bev_hidden_states(self, outputs, captured_final_hidden=None):
-        source = str(getattr(self.config, "bev_head_source", "llm_output") or "llm_output")
+    def _select_aux_hidden_states(self, outputs, captured_final_hidden=None, *, source="llm_output", aux_name="aux"):
+        source = str(source or "llm_output")
         if source == "llm_output":
             if captured_final_hidden is not None:
                 return captured_final_hidden
@@ -329,31 +334,30 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
             if hidden_states is not None:
                 return hidden_states[-1]
             raise RuntimeError(
-                "bev_head_source='llm_output' could not capture final sequence hidden states. "
+                f"{aux_name}_head_source='llm_output' could not capture final sequence hidden states. "
                 "Expected the final-hidden hook on the base LLM to fire; if this model class "
                 "does not expose a hookable base model output, pass output_hidden_states=True "
                 "explicitly for debugging or add a model-specific final-hidden capture path."
             )
-        if source.startswith("llm_layer_"):
-            raise NotImplementedError(
-                f"bev_head_source={source!r} is not wired safely in this training path yet; "
-                "use bev_head_source='llm_output' until intermediate-layer indexing is verified."
-            )
-        if source == "fusion_output":
-            raise NotImplementedError(
-                "bev_head_source='fusion_output' is not currently exposed with verified visual-token "
-                "alignment; use bev_head_source='llm_output'."
-            )
-        raise ValueError(
-            "Unsupported bev_head_source. Expected 'llm_output', 'llm_layer_N', or 'fusion_output'; "
-            f"got {source!r}."
+        raise NotImplementedError(
+            f"{aux_name}_head_source={source!r} is not wired safely in this training path yet; "
+            f"use {aux_name}_head_source='llm_output'."
         )
 
-    def _gather_bev_visual_hidden(self, sequence_hidden_states, visual_metadata):
+    def _select_bev_hidden_states(self, outputs, captured_final_hidden=None):
+        source = str(getattr(self.config, "bev_head_source", "llm_output") or "llm_output")
+        return self._select_aux_hidden_states(
+            outputs,
+            captured_final_hidden=captured_final_hidden,
+            source=source,
+            aux_name="bev",
+        )
+
+    def _gather_aux_visual_hidden(self, sequence_hidden_states, visual_metadata, *, aux_name="aux"):
         metadata_items = self._metadata_items(visual_metadata)
         if len(metadata_items) != int(sequence_hidden_states.shape[0]):
             raise RuntimeError(
-                "BEV metadata batch size mismatch: "
+                f"{aux_name} metadata batch size mismatch: "
                 f"hidden batch={int(sequence_hidden_states.shape[0])}, metadata batch={len(metadata_items)}."
             )
 
@@ -362,7 +366,7 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
         for batch_idx, metadata in enumerate(metadata_items):
             indices = metadata.get("visual_token_indices") if isinstance(metadata, dict) else None
             if not isinstance(indices, torch.Tensor):
-                raise RuntimeError(f"BEV metadata[{batch_idx}] is missing tensor visual_token_indices.")
+                raise RuntimeError(f"{aux_name} metadata[{batch_idx}] is missing tensor visual_token_indices.")
             lengths.append(int(indices.numel()))
 
         max_tokens = max(lengths) if lengths else 0
@@ -373,16 +377,27 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
             indices = metadata["visual_token_indices"].to(device=sequence_hidden_states.device, dtype=torch.long)
             if int(indices.min().item()) < 0 or int(indices.max().item()) >= int(seq_len):
                 raise RuntimeError(
-                    f"BEV visual_token_indices for sample {batch_idx} are outside the LLM sequence: "
+                    f"{aux_name} visual_token_indices for sample {batch_idx} are outside the LLM sequence: "
                     f"min={int(indices.min().item())}, max={int(indices.max().item())}, seq_len={int(seq_len)}."
                 )
             gathered[batch_idx, :token_count] = sequence_hidden_states[batch_idx].index_select(0, indices)
         return gathered
 
+    def _gather_bev_visual_hidden(self, sequence_hidden_states, visual_metadata):
+        return self._gather_aux_visual_hidden(sequence_hidden_states, visual_metadata, aux_name="BEV")
+
     @staticmethod
-    def _bev_payload_available(candidate):
+    def _point_map_payload_available(candidate, point_map_keys):
         if candidate is None:
             return False
+        if isinstance(candidate, dict):
+            return any(candidate.get(key) is not None for key in point_map_keys)
+        if isinstance(candidate, (list, tuple)):
+            return len(candidate) > 0 and any(LlavaQwenForCausalLM._point_map_payload_available(item, point_map_keys) for item in candidate)
+        return isinstance(candidate, torch.Tensor)
+
+    @staticmethod
+    def _bev_payload_available(candidate):
         point_map_keys = (
             "point_maps_ref",
             "pts3d_in_other_view",
@@ -393,15 +408,29 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
             "points",
             "pts3d",
         )
-        if isinstance(candidate, dict):
-            return any(candidate.get(key) is not None for key in point_map_keys)
-        if isinstance(candidate, (list, tuple)):
-            return len(candidate) > 0 and any(LlavaQwenForCausalLM._bev_payload_available(item) for item in candidate)
-        return isinstance(candidate, torch.Tensor)
+        return LlavaQwenForCausalLM._point_map_payload_available(candidate, point_map_keys)
+
+    @staticmethod
+    def _depth_payload_available(candidate):
+        point_map_keys = (
+            "point_maps_cam",
+            "pts3d_in_self_view",
+            "point_maps",
+            "point_map",
+            "points",
+            "pts3d",
+        )
+        return LlavaQwenForCausalLM._point_map_payload_available(candidate, point_map_keys)
 
     def _select_bev_point_map_payloads(self, spatial_features, point_maps, geometry_spatial_features):
         for candidate in (spatial_features, point_maps, geometry_spatial_features):
             if self._bev_payload_available(candidate):
+                return candidate
+        return None
+
+    def _select_depth_point_map_payloads(self, spatial_features, point_maps, geometry_spatial_features):
+        for candidate in (geometry_spatial_features, point_maps, spatial_features):
+            if self._depth_payload_available(candidate):
                 return candidate
         return None
 
@@ -498,6 +527,111 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
             metrics["bev_debug_valid_ratio_from_builder"] = float(bev_debug.get("valid_bev_token_ratio", 0.0) or 0.0)
         return loss_bev, metrics
 
+    def _compute_depth_supervision_loss(
+        self,
+        outputs,
+        visual_metadata,
+        spatial_features,
+        point_maps,
+        geometry_spatial_features,
+        ce_loss,
+        final_sequence_hidden=None,
+    ):
+        source = str(getattr(self.config, "depth_head_source", "llm_output") or "llm_output")
+        sequence_hidden = self._select_aux_hidden_states(
+            outputs,
+            captured_final_hidden=final_sequence_hidden,
+            source=source,
+            aux_name="depth",
+        )
+        visual_hidden = self._gather_aux_visual_hidden(sequence_hidden, visual_metadata, aux_name="Depth")
+        payloads = self._select_depth_point_map_payloads(spatial_features, point_maps, geometry_spatial_features)
+        if payloads is None:
+            raise RuntimeError(
+                "use_depth_supervision=True requires CUT3R camera-space point-map sidecars in "
+                "geometry_spatial_features, point_maps, or spatial_features if it contains point maps. "
+                "Expected point_maps_cam or pts3d_in_self_view; point_maps_ref z is not camera depth."
+            )
+
+        depth_gt_log, depth_valid_mask, depth_debug = build_depth_targets_from_point_maps(
+            payloads,
+            visual_metadata,
+            depth_point_map_key=str(getattr(self.config, "depth_point_map_key", "point_maps_cam")),
+            use_geometry_confidence_mask=self._as_bool_config(
+                getattr(self.config, "use_geometry_confidence_mask", True),
+                True,
+            ),
+            depth_conf_threshold=float(getattr(self.config, "depth_conf_threshold", 0.0)),
+            depth_max_gt=float(getattr(self.config, "depth_max_gt", 20.0)),
+        )
+        depth_gt_log = depth_gt_log.to(device=visual_hidden.device, dtype=visual_hidden.dtype)
+        depth_valid_mask = depth_valid_mask.to(device=visual_hidden.device, dtype=torch.bool)
+
+        if visual_hidden.shape[:2] != depth_gt_log.shape[:2] or depth_gt_log.shape[:2] != depth_valid_mask.shape[:2]:
+            raise RuntimeError(
+                "Depth visual-token alignment mismatch. "
+                f"visual_hidden[:2]={tuple(visual_hidden.shape[:2])}, "
+                f"depth_gt_log[:2]={tuple(depth_gt_log.shape[:2])}, "
+                f"depth_valid_mask[:2]={tuple(depth_valid_mask.shape[:2])}. "
+                "Likely causes: visual_grid_shapes differ from CUT3R patch pooling, "
+                "visual_token_indices include non-visual tokens, or frame order differs."
+            )
+
+        shuffle_applied = False
+        if self._as_bool_config(getattr(self.config, "depth_shuffle_target", False), False) and depth_gt_log.shape[0] > 1:
+            perm = torch.randperm(depth_gt_log.shape[0], device=depth_gt_log.device)
+            depth_gt_log = depth_gt_log.index_select(0, perm)
+            depth_valid_mask = depth_valid_mask.index_select(0, perm)
+            shuffle_applied = True
+
+        depth_head = getattr(self, "depth_head", None)
+        if depth_head is None:
+            depth_head = self.initialize_depth_head(device=visual_hidden.device, dtype=visual_hidden.dtype)
+
+        depth_input = (
+            visual_hidden.detach()
+            if self._as_bool_config(getattr(self.config, "depth_detach_hidden", False), False)
+            else visual_hidden
+        )
+        depth_pred_log = depth_head(depth_input)
+
+        finite_mask = torch.isfinite(depth_gt_log) & torch.isfinite(depth_pred_log)
+        valid_mask = depth_valid_mask & finite_mask
+        num_valid = int(valid_mask.detach().sum().item())
+        num_total = self._total_visual_tokens_from_metadata(visual_metadata)
+        total_for_ratio = max(int(num_total), 1)
+
+        if num_valid == 0:
+            loss_depth = ce_loss.new_zeros(())
+            depth_mae_meter = ce_loss.new_zeros(())
+        else:
+            loss_depth = F.smooth_l1_loss(depth_pred_log[valid_mask].float(), depth_gt_log[valid_mask].float())
+            depth_pred_meter = torch.expm1(depth_pred_log[valid_mask].float())
+            depth_gt_meter = torch.expm1(depth_gt_log[valid_mask].float())
+            depth_mae_meter = (depth_pred_meter - depth_gt_meter).abs().mean()
+
+        metrics = {
+            "loss_ce": float(ce_loss.detach().float().item()),
+            "loss_depth": float(loss_depth.detach().float().item()),
+            "lambda_depth_times_loss_depth": float((loss_depth.detach().float() * float(getattr(self.config, "lambda_depth", 0.05))).item()),
+            "depth_mae_meter": float(depth_mae_meter.detach().float().item()),
+            "valid_depth_token_ratio": float(num_valid / total_for_ratio),
+            "num_valid_depth_tokens": float(num_valid),
+            "num_total_depth_tokens": float(num_total),
+            "depth_point_map_key": str(getattr(self.config, "depth_point_map_key", "point_maps_cam")),
+            "depth_head_source": source,
+            "depth_detach_hidden": float(self._as_bool_config(getattr(self.config, "depth_detach_hidden", False), False)),
+            "depth_shuffle_target": float(self._as_bool_config(getattr(self.config, "depth_shuffle_target", False), False)),
+            "depth_shuffle_applied": float(shuffle_applied),
+            "depth_max_gt": float(getattr(self.config, "depth_max_gt", 20.0)),
+            "depth_conf_threshold": float(getattr(self.config, "depth_conf_threshold", 0.0)),
+        }
+        if isinstance(depth_debug, dict):
+            metrics["depth_debug_valid_ratio_from_builder"] = float(depth_debug.get("valid_depth_token_ratio", 0.0) or 0.0)
+            metrics["depth_point_map_key_used"] = str(depth_debug.get("depth_point_map_key_used", ""))
+            metrics["depth_target_space"] = str(depth_debug.get("depth_target_space", ""))
+        return loss_depth, metrics
+
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -529,6 +663,7 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
         self.get_model()._last_geometry_projection_metrics = None
         self._geometry_projection_last_metrics = {}
         self._bev_last_metrics = {}
+        self._depth_last_metrics = {}
         metadata_requested = bool(return_visual_metadata)
         input_embeds_provided = inputs_embeds is not None
         spatial_rank_enabled = bool(
@@ -544,11 +679,19 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
             and not input_embeds_provided
             and self._as_bool_config(getattr(self.config, "use_bev_supervision", False), False)
         )
+        depth_loss_enabled = bool(
+            self.training
+            and not dpo_forward
+            and labels is not None
+            and not input_embeds_provided
+            and self._as_bool_config(getattr(self.config, "use_depth_supervision", False), False)
+        )
+        aux_loss_enabled = bev_loss_enabled or depth_loss_enabled
         original_output_hidden_states = output_hidden_states
         if spatial_rank_enabled:
             output_hidden_states = True
             return_dict = True
-        elif bev_loss_enabled:
+        elif aux_loss_enabled:
             return_dict = True
         elif metadata_requested:
             output_hidden_states = True
@@ -575,12 +718,12 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
                 point_maps,
                 modalities,
                 image_sizes,
-                return_visual_metadata=spatial_rank_enabled or metadata_requested or bev_loss_enabled,
+                return_visual_metadata=spatial_rank_enabled or metadata_requested or aux_loss_enabled,
                 return_llm_geo_metadata=llm_visual_3d_rope_enabled,
                 geometry_outputs=geometry_outputs,
                 geometry_spatial_features=geometry_spatial_features,
             )
-            visual_metadata_requested = spatial_rank_enabled or metadata_requested or bev_loss_enabled
+            visual_metadata_requested = spatial_rank_enabled or metadata_requested or aux_loss_enabled
             if visual_metadata_requested and llm_visual_3d_rope_enabled:
                 (
                     input_ids,
@@ -634,9 +777,9 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
 
         else:
             h1_holder = {}
-            bev_final_hidden_holder = {}
+            aux_final_hidden_holder = {}
             hook_handle = None
-            bev_hook_handle = None
+            aux_hook_handle = None
             if spatial_rank_enabled:
                 first_block = self.model.layers[0]
 
@@ -644,7 +787,11 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
                     h1_holder["h1"] = output[0] if isinstance(output, (tuple, list)) else output
 
                 hook_handle = first_block.register_forward_hook(capture_h1)
-            if bev_loss_enabled and str(getattr(self.config, "bev_head_source", "llm_output") or "llm_output") == "llm_output":
+            aux_final_hidden_needed = (
+                (bev_loss_enabled and str(getattr(self.config, "bev_head_source", "llm_output") or "llm_output") == "llm_output")
+                or (depth_loss_enabled and str(getattr(self.config, "depth_head_source", "llm_output") or "llm_output") == "llm_output")
+            )
+            if aux_final_hidden_needed:
                 def capture_final_hidden(_module, _inputs, output):
                     if isinstance(output, (tuple, list)):
                         hidden = output[0]
@@ -652,9 +799,9 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
                         hidden = output.last_hidden_state
                     else:
                         hidden = output
-                    bev_final_hidden_holder["hidden"] = hidden
+                    aux_final_hidden_holder["hidden"] = hidden
 
-                bev_hook_handle = self.model.register_forward_hook(capture_final_hidden)
+                aux_hook_handle = self.model.register_forward_hook(capture_final_hidden)
             try:
                 output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
                 output_hidden_states = (
@@ -715,8 +862,8 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
             finally:
                 if hook_handle is not None:
                     hook_handle.remove()
-                if bev_hook_handle is not None:
-                    bev_hook_handle.remove()
+                if aux_hook_handle is not None:
+                    aux_hook_handle.remove()
             if metadata_requested:
                 self._last_visual_metadata = visual_metadata
             if llm_visual_3d_rope_enabled:
@@ -740,12 +887,12 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
                 and use_auxiliary_geometry_head
                 and use_auxiliary_geometry_loss
             )
-            if not spatial_rank_enabled and not geometry_loss_enabled and not bev_loss_enabled:
+            if not spatial_rank_enabled and not geometry_loss_enabled and not aux_loss_enabled:
                 return outputs
 
             ce_loss = outputs.loss
             if ce_loss is None:
-                raise RuntimeError("Auxiliary BEV/spatial/geometry losses require labels so CE loss is available.")
+                raise RuntimeError("Auxiliary BEV/depth/spatial/geometry losses require labels so CE loss is available.")
 
             total_loss = ce_loss
             if geometry_loss_enabled:
@@ -767,7 +914,7 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
                     point_maps,
                     geometry_spatial_features,
                     ce_loss,
-                    final_sequence_hidden=bev_final_hidden_holder.get("hidden"),
+                    final_sequence_hidden=aux_final_hidden_holder.get("hidden"),
                 )
                 lambda_bev = float(getattr(self.config, "lambda_bev", 0.05))
                 total_loss = total_loss + lambda_bev * loss_bev
@@ -775,6 +922,25 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
                 bev_metrics["loss_total"] = float(total_loss.detach().float().item())
                 bev_metrics["lambda_bev"] = lambda_bev
                 self._bev_last_metrics = bev_metrics
+
+            if depth_loss_enabled:
+                loss_depth, depth_metrics = self._compute_depth_supervision_loss(
+                    outputs,
+                    visual_metadata,
+                    spatial_features,
+                    point_maps,
+                    geometry_spatial_features,
+                    ce_loss,
+                    final_sequence_hidden=aux_final_hidden_holder.get("hidden"),
+                )
+                lambda_depth = float(getattr(self.config, "lambda_depth", 0.05))
+                total_loss = total_loss + lambda_depth * loss_depth
+                depth_metrics["lambda_depth_times_loss_depth"] = float((loss_depth.detach().float() * lambda_depth).item())
+                depth_metrics["loss_total"] = float(total_loss.detach().float().item())
+                depth_metrics["lambda_depth"] = lambda_depth
+                self._depth_last_metrics = depth_metrics
+                if bev_loss_enabled and self._bev_last_metrics:
+                    self._bev_last_metrics["loss_total"] = float(total_loss.detach().float().item())
 
             if not spatial_rank_enabled:
                 if geometry_loss_enabled:
@@ -816,6 +982,13 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
                     "bev_loss_bev": self._bev_last_metrics.get("loss_bev", 0.0),
                     "bev_loss_weighted": self._bev_last_metrics.get("lambda_bev_times_loss_bev", 0.0),
                     "lambda_bev": self._bev_last_metrics.get("lambda_bev", 0.0),
+                })
+            if depth_loss_enabled and self._depth_last_metrics:
+                self._depth_last_metrics["loss_total"] = float(total_loss.detach().float().item())
+                self._spatial_rank_last_metrics.update({
+                    "depth_loss_depth": self._depth_last_metrics.get("loss_depth", 0.0),
+                    "depth_loss_weighted": self._depth_last_metrics.get("lambda_depth_times_loss_depth", 0.0),
+                    "lambda_depth": self._depth_last_metrics.get("lambda_depth", 0.0),
                 })
 
             return CausalLMOutputWithPast(
