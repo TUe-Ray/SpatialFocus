@@ -14,7 +14,7 @@
 #SBATCH --exclusive
 TRAIN_DATA_PERCENTAGE="50"
 SUFFIX="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
-MODEL_TORCH_COMPILE="${MODEL_TORCH_COMPILE:-False}" #TRUE later
+MODEL_TORCH_COMPILE="${MODEL_TORCH_COMPILE:-True}"
 SPATIAL_RANK_LOSS_ENABLE="${SPATIAL_RANK_LOSS_ENABLE:-True}"
 # ============================================================
 # User-defined variables: General

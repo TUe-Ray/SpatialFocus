@@ -36,9 +36,9 @@ export MODEL_LLM_VISUAL_3D_ROPE_LOG_STATS="${MODEL_LLM_VISUAL_3D_ROPE_LOG_STATS:
 export MODEL_LLM_VISUAL_3D_ROPE_LOG_LAYERS="${MODEL_LLM_VISUAL_3D_ROPE_LOG_LAYERS:-first_middle_last}"
 export MODEL_LLM_VISUAL_3D_ROPE_FORCE_EAGER_ATTENTION="${MODEL_LLM_VISUAL_3D_ROPE_FORCE_EAGER_ATTENTION:-True}"
 
-# The model code forces eager attention when LLM 3D RoPE is enabled. Keep compile off
-# for this custom attention path; gradient checkpointing is supported by per-layer metadata attachment.
-export MODEL_TORCH_COMPILE="${MODEL_TORCH_COMPILE:-False}"
+# The model code forces eager attention when LLM 3D RoPE is enabled; compile can still
+# be toggled here for profiling this custom attention path.
+export MODEL_TORCH_COMPILE="${MODEL_TORCH_COMPILE:-True}"
 export MODEL_GRADIENT_CHECKPOINTING="${MODEL_GRADIENT_CHECKPOINTING:-True}"
 
 REPO_DIR="${REPO_DIR:-/leonardo/home/userexternal/shuang00/VLM-3R}"
