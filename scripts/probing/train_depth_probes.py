@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 import math
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +27,35 @@ from depth_probe_common import (
     write_csv,
     write_json,
 )
+
+
+def split_layer_feature_path(output_root: Path, model_label: str, feature_level: str, frame_sample_id: str) -> Path:
+    return output_root / "features" / model_label / feature_level / f"frame_{frame_sample_id}.pt"
+
+
+def legacy_llm_layers_path(output_root: Path, model_label: str, frame_sample_id: str) -> Path:
+    return output_root / "features" / model_label / "llm_layers" / f"frame_{frame_sample_id}.pt"
+
+
+def feature_tensor_path(output_root: Path, model_label: str, feature_level: str, frame_sample_id: str) -> Path:
+    if feature_level.startswith("layer_"):
+        split_path = split_layer_feature_path(output_root, model_label, feature_level, frame_sample_id)
+        if split_path.exists():
+            return split_path
+        return legacy_llm_layers_path(output_root, model_label, frame_sample_id)
+    return output_root / "features" / model_label / feature_level / f"frame_{frame_sample_id}.pt"
+
+
+def load_feature_tensor(output_root: Path, model_label: str, feature_level: str, frame_sample_id: str) -> torch.Tensor:
+    path = feature_tensor_path(output_root, model_label, feature_level, frame_sample_id)
+    if not path.exists():
+        raise FileNotFoundError(path)
+    payload = torch.load(path, map_location="cpu")
+    if feature_level.startswith("layer_") and isinstance(payload, dict):
+        return payload[feature_level]
+    if not isinstance(payload, torch.Tensor):
+        raise TypeError(f"Expected tensor feature at {path}, got {type(payload)}")
+    return payload
 
 
 class DepthProbeMLP(nn.Module):
@@ -53,21 +84,12 @@ class CachedFrameDepthDataset(Dataset):
         return len(self.frame_records)
 
     def _feature_path(self, frame_sample_id: str) -> Path:
-        if self.feature_level.startswith("layer_"):
-            return self.output_root / "features" / self.model_label / "llm_layers" / f"frame_{frame_sample_id}.pt"
-        return self.output_root / "features" / self.model_label / self.feature_level / f"frame_{frame_sample_id}.pt"
+        return feature_tensor_path(self.output_root, self.model_label, self.feature_level, frame_sample_id)
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         record = self.frame_records[index]
         fsid = str(record["frame_sample_id"])
-        feature_path = self._feature_path(fsid)
-        if not feature_path.exists():
-            raise FileNotFoundError(feature_path)
-        if self.feature_level.startswith("layer_"):
-            payload = torch.load(feature_path, map_location="cpu")
-            feature = payload[self.feature_level]
-        else:
-            feature = torch.load(feature_path, map_location="cpu")
+        feature = load_feature_tensor(self.output_root, self.model_label, self.feature_level, fsid)
         gt = torch.load(self.output_root / "gt_depth" / f"frame_{fsid}.pt", map_location="cpu")
         meta = torch.load(self.output_root / "metadata" / f"frame_{fsid}.pt", map_location="cpu")
         valid = meta.get("gt_valid_mask", torch.isfinite(gt) & (gt > 0))
@@ -191,12 +213,28 @@ def train_one_probe(
     best_epoch = -1
     history = []
     stale_epochs = 0
+    probe_started_at = time.perf_counter()
     for epoch in range(1, args.epochs + 1):
+        epoch_started_at = datetime.now(timezone.utc).isoformat()
+        epoch_start_time = time.perf_counter()
+        train_start_time = time.perf_counter()
         train_metrics = run_epoch(model, train_loader, device=device, optimizer=optimizer)
+        train_seconds = time.perf_counter() - train_start_time
+        val_start_time = time.perf_counter()
         with torch.no_grad():
             val_metrics = run_epoch(model, val_loader, device=device)
+        val_seconds = time.perf_counter() - val_start_time
+        epoch_seconds = time.perf_counter() - epoch_start_time
+        elapsed_seconds = time.perf_counter() - probe_started_at
+        epoch_finished_at = datetime.now(timezone.utc).isoformat()
         row = {
             "epoch": epoch,
+            "epoch_started_at": epoch_started_at,
+            "epoch_finished_at": epoch_finished_at,
+            "train_seconds": train_seconds,
+            "val_seconds": val_seconds,
+            "epoch_seconds": epoch_seconds,
+            "elapsed_seconds": elapsed_seconds,
             "train_mae": train_metrics["mae"],
             "val_mae": val_metrics["mae"],
             "val_absrel": val_metrics["absrel"],
@@ -206,7 +244,8 @@ def train_one_probe(
         print(
             f"[{model_label}/{feature_level}] epoch={epoch} "
             f"train_mae={row['train_mae']:.6f} val_mae={row['val_mae']:.6f} "
-            f"absrel={row['val_absrel']:.6f} delta125={row['val_delta125']:.6f}",
+            f"absrel={row['val_absrel']:.6f} delta125={row['val_delta125']:.6f} "
+            f"train_s={train_seconds:.1f} val_s={val_seconds:.1f} epoch_s={epoch_seconds:.1f}",
             flush=True,
         )
         if wandb_run is not None:
@@ -219,10 +258,17 @@ def train_one_probe(
                     "val/mae": row["val_mae"],
                     "val/absrel": row["val_absrel"],
                     "val/delta125": row["val_delta125"],
+                    "time/train_seconds": row["train_seconds"],
+                    "time/val_seconds": row["val_seconds"],
+                    "time/epoch_seconds": row["epoch_seconds"],
+                    "time/elapsed_seconds": row["elapsed_seconds"],
                     f"{model_label}/{feature_level}/train_mae": row["train_mae"],
                     f"{model_label}/{feature_level}/val_mae": row["val_mae"],
                     f"{model_label}/{feature_level}/val_absrel": row["val_absrel"],
                     f"{model_label}/{feature_level}/val_delta125": row["val_delta125"],
+                    f"{model_label}/{feature_level}/train_seconds": row["train_seconds"],
+                    f"{model_label}/{feature_level}/val_seconds": row["val_seconds"],
+                    f"{model_label}/{feature_level}/epoch_seconds": row["epoch_seconds"],
                 }
             )
         if val_metrics["mae"] < best_mae:
@@ -280,10 +326,7 @@ def filter_existing_records(output_root: Path, model_label: str, feature_level: 
     kept = []
     for record in records:
         fsid = str(record["frame_sample_id"])
-        if feature_level.startswith("layer_"):
-            path = output_root / "features" / model_label / "llm_layers" / f"frame_{fsid}.pt"
-        else:
-            path = output_root / "features" / model_label / feature_level / f"frame_{fsid}.pt"
+        path = feature_tensor_path(output_root, model_label, feature_level, fsid)
         if path.exists() and (output_root / "gt_depth" / f"frame_{fsid}.pt").exists():
             kept.append(record)
     return kept
