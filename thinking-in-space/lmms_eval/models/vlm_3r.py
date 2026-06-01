@@ -232,6 +232,9 @@ class Vlm3r(lmms):
         probe_geometry_shuffle_mode: str = "cyclic_shift",
         probe_geometry_shuffle_shift: Optional[Union[int, str]] = 1,
         probe_geometry_shuffle_seed: Optional[Union[int, str]] = 0,
+        probe_spatial_feature_frame_swap: Union[bool, str] = False,
+        probe_spatial_feature_frame_swap_mode: str = "random_derange",
+        probe_spatial_feature_frame_swap_seed: Optional[Union[int, str]] = 0,
         probe_cross_frame_window: Optional[Union[int, str]] = 0,
         probe_cross_frame_include_self: Union[bool, str] = True,
         probe_cross_frame_mode: str = "sliding_window",
@@ -301,6 +304,9 @@ class Vlm3r(lmms):
         self.probe_geometry_shuffle_mode = probe_geometry_shuffle_mode or "cyclic_shift"
         self.probe_geometry_shuffle_shift = int(probe_geometry_shuffle_shift or 0)
         self.probe_geometry_shuffle_seed = int(probe_geometry_shuffle_seed or 0)
+        self.probe_spatial_feature_frame_swap = _str_to_bool(probe_spatial_feature_frame_swap)
+        self.probe_spatial_feature_frame_swap_mode = probe_spatial_feature_frame_swap_mode or "random_derange"
+        self.probe_spatial_feature_frame_swap_seed = int(probe_spatial_feature_frame_swap_seed or 0)
         self.probe_cross_frame_window = int(probe_cross_frame_window or 0)
         self.probe_cross_frame_include_self = _str_to_bool(probe_cross_frame_include_self)
         self.probe_cross_frame_mode = probe_cross_frame_mode or "sliding_window"
@@ -361,6 +367,9 @@ class Vlm3r(lmms):
             overwrite_config["probe_geometry_shuffle_mode"] = self.probe_geometry_shuffle_mode
             overwrite_config["probe_geometry_shuffle_shift"] = self.probe_geometry_shuffle_shift
             overwrite_config["probe_geometry_shuffle_seed"] = self.probe_geometry_shuffle_seed
+            overwrite_config["probe_spatial_feature_frame_swap"] = self.probe_spatial_feature_frame_swap
+            overwrite_config["probe_spatial_feature_frame_swap_mode"] = self.probe_spatial_feature_frame_swap_mode
+            overwrite_config["probe_spatial_feature_frame_swap_seed"] = self.probe_spatial_feature_frame_swap_seed
             overwrite_config["probe_cross_frame_window"] = self.probe_cross_frame_window
             overwrite_config["probe_cross_frame_include_self"] = self.probe_cross_frame_include_self
             overwrite_config["probe_cross_frame_mode"] = self.probe_cross_frame_mode
@@ -461,6 +470,37 @@ class Vlm3r(lmms):
                 attn_implementation=self.attn_implementation,
             )
 
+        # HF `device_map="cuda:<rank>"` does not reliably place custom
+        # modules with newly initialized or non-LoRA-loaded weights. Keep the
+        # small VLM-3R heads aligned with the rank-local model before
+        # Accelerate wraps it; otherwise their LayerNorm weights can remain on
+        # CPU while visual/spatial features are already on CUDA.
+        def _move_custom_module(module, name):
+            if isinstance(module, list):
+                module = module[0] if module else None
+            if module is None:
+                return
+            param = next(module.parameters(), None)
+            if param is None:
+                return
+            if param.device != self._device:
+                eval_logger.info(
+                    "[DEVICE][EVAL] moving {} from {} to {}",
+                    name,
+                    param.device,
+                    self._device,
+                )
+                module.to(device=self._device)
+
+        base_model = self._model.get_model() if hasattr(self._model, "get_model") else getattr(self._model, "model", None)
+        if base_model is not None:
+            get_fusion_block = getattr(base_model, "get_fusion_block", None)
+            _move_custom_module(get_fusion_block() if callable(get_fusion_block) else getattr(base_model, "fusion_block", None), "model.fusion_block")
+            _move_custom_module(getattr(base_model, "mm_projector", None), "model.mm_projector")
+            _move_custom_module(getattr(base_model, "vision_resampler", None), "model.vision_resampler")
+            _move_custom_module(getattr(base_model, "geometry_aware_projection", None), "model.geometry_aware_projection")
+        _move_custom_module(getattr(self._model, "bev_head", None), "bev_head")
+
         if self.force_geo_rope_gate_zero:
             _force_geo_rope_gates_zero(self._model, self.pretrained)
 
@@ -471,6 +511,9 @@ class Vlm3r(lmms):
         setattr(self._config, "probe_geometry_shuffle_mode", self.probe_geometry_shuffle_mode)
         setattr(self._config, "probe_geometry_shuffle_shift", self.probe_geometry_shuffle_shift)
         setattr(self._config, "probe_geometry_shuffle_seed", self.probe_geometry_shuffle_seed)
+        setattr(self._config, "probe_spatial_feature_frame_swap", self.probe_spatial_feature_frame_swap)
+        setattr(self._config, "probe_spatial_feature_frame_swap_mode", self.probe_spatial_feature_frame_swap_mode)
+        setattr(self._config, "probe_spatial_feature_frame_swap_seed", self.probe_spatial_feature_frame_swap_seed)
         setattr(self._config, "probe_cross_frame_window", self.probe_cross_frame_window)
         setattr(self._config, "probe_cross_frame_include_self", self.probe_cross_frame_include_self)
         setattr(self._config, "probe_cross_frame_mode", self.probe_cross_frame_mode)
@@ -517,6 +560,12 @@ class Vlm3r(lmms):
             self.probe_geometry_shuffle_mode,
             self.probe_geometry_shuffle_shift,
             self.probe_geometry_shuffle_seed,
+        )
+        eval_logger.info(
+            "[PROBE][EVAL] spatial_feature_frame_swap={}, mode={}, seed={}",
+            self.probe_spatial_feature_frame_swap,
+            self.probe_spatial_feature_frame_swap_mode,
+            self.probe_spatial_feature_frame_swap_seed,
         )
         eval_logger.info(
             "[PROBE][EVAL] cross_frame_window={}, include_self={}, mode={}",

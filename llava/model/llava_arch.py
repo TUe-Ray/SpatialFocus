@@ -175,6 +175,97 @@ def _maybe_shuffle_geometry_point_maps(config, geometry_point_maps, training):
     return geometry_point_maps[perm]
 
 
+def _spatial_frame_swap_permutation(frame_count, device, mode, seed):
+    frame_ids = torch.arange(frame_count, device=device)
+
+    if mode == "cyclic_shift":
+        shift = seed % frame_count
+        if shift == 0:
+            shift = 1
+        return torch.roll(frame_ids, shifts=shift, dims=0)
+    if mode == "reverse":
+        return torch.arange(frame_count - 1, -1, -1, device=device)
+
+    generator_device = device if device.type == "cuda" else "cpu"
+    generator = torch.Generator(device=generator_device)
+    generator.manual_seed(int(seed))
+    perm = torch.randperm(frame_count, generator=generator, device=device)
+    if mode == "random_permutation":
+        return perm
+    if mode != "random_derange":
+        raise ValueError(f"Unknown probe_spatial_feature_frame_swap_mode: {mode}")
+
+    for _ in range(16):
+        if not torch.any(perm == frame_ids):
+            return perm
+        perm = torch.randperm(frame_count, generator=generator, device=device)
+
+    fixed_idx = torch.nonzero(perm == frame_ids, as_tuple=False).flatten()
+    if int(fixed_idx.numel()) == frame_count:
+        return torch.roll(perm, shifts=1, dims=0)
+    if int(fixed_idx.numel()) == 1:
+        idx = fixed_idx[0]
+        swap_idx = (idx + 1) % frame_count
+        tmp = perm[idx].clone()
+        perm[idx] = perm[swap_idx]
+        perm[swap_idx] = tmp
+    elif int(fixed_idx.numel()) > 1:
+        perm[fixed_idx] = torch.roll(perm[fixed_idx], shifts=1, dims=0)
+    return perm
+
+
+def _maybe_swap_spatial_frame_features(config, camera_tokens, patch_tokens, camera_pose, training):
+    if training or not _as_bool_config(getattr(config, "probe_spatial_feature_frame_swap", False), False):
+        return camera_tokens, patch_tokens, camera_pose
+
+    if camera_tokens is None or patch_tokens is None:
+        raise RuntimeError("Spatial frame-swap probe requires both camera_tokens and patch_tokens.")
+
+    frame_count = int(camera_tokens.shape[0])
+    if int(patch_tokens.shape[0]) != frame_count:
+        raise RuntimeError(
+            "Spatial frame-swap probe requires camera_tokens and patch_tokens to have the same "
+            f"frame count, got {tuple(camera_tokens.shape)} and {tuple(patch_tokens.shape)}."
+        )
+    if camera_pose is not None and int(camera_pose.shape[0]) != frame_count:
+        raise RuntimeError(
+            "Spatial frame-swap probe requires camera_pose to match token frame count, "
+            f"got camera_pose={tuple(camera_pose.shape)} and F={frame_count}."
+        )
+
+    log_index = _probe_log_index(config, "_probe_spatial_feature_frame_swap_log_count", limit=5)
+    if frame_count <= 1:
+        if log_index is not None:
+            rank0_print("[Probe Spatial Frame Swap] Skip swap because F <= 1")
+        return camera_tokens, patch_tokens, camera_pose
+
+    sample_index = int(getattr(config, "_probe_spatial_feature_frame_swap_count", 0))
+    setattr(config, "_probe_spatial_feature_frame_swap_count", sample_index + 1)
+    base_seed = int(getattr(config, "probe_spatial_feature_frame_swap_seed", 0) or 0)
+    rank = 0
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        rank = int(torch.distributed.get_rank())
+    seed = base_seed + sample_index + rank * 1000003
+    mode = str(getattr(config, "probe_spatial_feature_frame_swap_mode", "random_derange") or "random_derange")
+    perm = _spatial_frame_swap_permutation(frame_count, camera_tokens.device, mode, seed)
+
+    if log_index is not None:
+        rank0_print(
+            "[Probe Spatial Frame Swap] "
+            f"sample_log_index={log_index}, sample_index={sample_index}, "
+            f"mode={mode}, seed={seed}, F={frame_count}, "
+            f"perm={perm.detach().cpu().tolist()}"
+        )
+    elif int(getattr(config, "_probe_spatial_feature_frame_swap_log_count", 0)) == 6:
+        rank0_print("[Probe Spatial Frame Swap] Further per-sample permutation logs suppressed.")
+
+    camera_tokens = camera_tokens.index_select(0, perm)
+    patch_tokens = patch_tokens.index_select(0, perm.to(device=patch_tokens.device))
+    if camera_pose is not None:
+        camera_pose = camera_pose.index_select(0, perm.to(device=camera_pose.device))
+    return camera_tokens, patch_tokens, camera_pose
+
+
 def _maybe_apply_cross_frame_geo_rope_probe(config, fusion_block, image_features, patch_tokens, pos_clip, pos_spatial, dtype, training):
     if training:
         return None
@@ -1925,6 +2016,14 @@ class LlavaMetaForCausalLM(ABC):
                         with torch.no_grad():
                             pose_4x4 = _cam_head(cam_tokens_for_pose, patch_side, patch_side)
                         camera_pose = pose_4x4[:, :3, :].reshape(pose_4x4.shape[0], 12)
+
+                camera_tokens, patch_tokens, camera_pose = _maybe_swap_spatial_frame_features(
+                    self.get_model().config,
+                    camera_tokens,
+                    patch_tokens,
+                    camera_pose,
+                    self.training,
+                )
                 
                 if fusion_block_type in ['cross_attention', 'svf_baseline']:
                     # Build spatial KV tokens.

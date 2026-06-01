@@ -43,6 +43,7 @@ CONV_TEMPLATE="${CONV_TEMPLATE:-qwen_1_5}"
 MODEL_NAME="${MODEL_NAME:-vlm-3r-llava-qwen2-lora}"
 RUN_NAME="${RUN_NAME:-sbatch_orig_same_model}"
 LIMIT="${LIMIT:-0}"
+EXTRA_MODEL_ARGS="${EXTRA_MODEL_ARGS:-}"
 
 cd "$REPO_DIR"
 
@@ -65,6 +66,7 @@ echo "MAX_FRAMES_NUM=$MAX_FRAMES_NUM"
 echo "MODEL_NAME=$MODEL_NAME"
 echo "RUN_NAME=$RUN_NAME"
 echo "LIMIT=$LIMIT"
+echo "EXTRA_MODEL_ARGS=$EXTRA_MODEL_ARGS"
 echo "=================="
 
 for path in "$REPO_DIR" "$SUBMODULE_DIR" "$TASK_DIR" "$PRETRAINED_LOCAL" "$MODEL_BASE_LOCAL" "$SIGLIP_LOCAL"; do
@@ -209,6 +211,9 @@ if [[ -n "$MODEL_NAME" ]]; then
   MODEL_ARGS+=",model_name=$MODEL_NAME"
 fi
 MODEL_ARGS+=",conv_template=$CONV_TEMPLATE,max_frames_num=$MAX_FRAMES_NUM"
+if [[ -n "$EXTRA_MODEL_ARGS" ]]; then
+  MODEL_ARGS+=",$EXTRA_MODEL_ARGS"
+fi
 
 echo "Running Leonardo offline evaluation"
 echo "PRETRAINED_RUNTIME=$PRETRAINED_RUNTIME"

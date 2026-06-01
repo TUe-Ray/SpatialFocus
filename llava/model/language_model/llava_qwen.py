@@ -854,6 +854,9 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
             ):
                 if hasattr(self, attr):
                     delattr(self, attr)
+        llm_geo_pos = None
+        llm_geo_mask = None
+        llm_geo_debug = None
         if images is not None:
             prepared = self.prepare_inputs_labels_for_multimodal(
                 inputs,
@@ -876,9 +879,6 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
                 (inputs, position_ids, attention_mask, _, inputs_embeds, _) = prepared
         else:
             inputs_embeds = self.get_model().embed_tokens(inputs)
-            llm_geo_pos = None
-            llm_geo_mask = None
-            llm_geo_debug = None
 
         try:
             return super().generate(
