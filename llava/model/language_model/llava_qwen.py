@@ -411,16 +411,34 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
         return LlavaQwenForCausalLM._point_map_payload_available(candidate, point_map_keys)
 
     @staticmethod
-    def _depth_payload_available(candidate):
+    def _depth_payload_available(candidate, *, allow_generic=False, allow_tensor=False):
+        if candidate is None:
+            return False
+        if isinstance(candidate, torch.Tensor):
+            return bool(allow_tensor)
         point_map_keys = (
             "point_maps_cam",
             "pts3d_in_self_view",
-            "point_maps",
-            "point_map",
-            "points",
-            "pts3d",
         )
-        return LlavaQwenForCausalLM._point_map_payload_available(candidate, point_map_keys)
+        if allow_generic:
+            point_map_keys = point_map_keys + (
+                "point_maps",
+                "point_map",
+                "points",
+                "pts3d",
+            )
+        if isinstance(candidate, dict):
+            return any(candidate.get(key) is not None for key in point_map_keys)
+        if isinstance(candidate, (list, tuple)):
+            return len(candidate) > 0 and any(
+                LlavaQwenForCausalLM._depth_payload_available(
+                    item,
+                    allow_generic=allow_generic,
+                    allow_tensor=allow_tensor,
+                )
+                for item in candidate
+            )
+        return False
 
     def _select_bev_point_map_payloads(self, spatial_features, point_maps, geometry_spatial_features):
         for candidate in (spatial_features, point_maps, geometry_spatial_features):
@@ -429,10 +447,82 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
         return None
 
     def _select_depth_point_map_payloads(self, spatial_features, point_maps, geometry_spatial_features):
+        allow_generic = self._as_bool_config(getattr(self.config, "depth_allow_generic_camera_assumed", False), False)
+        allow_tensor = self._as_bool_config(getattr(self.config, "depth_allow_tensor_camera_assumed", False), False)
         for candidate in (geometry_spatial_features, point_maps, spatial_features):
-            if self._depth_payload_available(candidate):
+            if self._depth_payload_available(candidate, allow_generic=allow_generic, allow_tensor=allow_tensor):
                 return candidate
         return None
+
+    def _shuffle_depth_targets(self, depth_gt_log, depth_valid_mask, visual_metadata):
+        if not self._as_bool_config(getattr(self.config, "depth_shuffle_target", False), False):
+            return depth_gt_log, depth_valid_mask, False, str(getattr(self.config, "depth_shuffle_mode", "none") or "none")
+
+        mode = str(getattr(self.config, "depth_shuffle_mode", "frame_shuffle") or "frame_shuffle")
+        mode = mode.strip().lower()
+        if mode in {"batch", "batch_shuffle"}:
+            if depth_gt_log.shape[0] <= 1:
+                return depth_gt_log, depth_valid_mask, False, "batch_shuffle"
+            perm = torch.randperm(depth_gt_log.shape[0], device=depth_gt_log.device)
+            if torch.equal(perm, torch.arange(depth_gt_log.shape[0], device=depth_gt_log.device)):
+                perm = torch.roll(perm, shifts=1, dims=0)
+            return depth_gt_log.index_select(0, perm), depth_valid_mask.index_select(0, perm), True, "batch_shuffle"
+
+        metadata_items = self._metadata_items(visual_metadata)
+        shuffled_gt = depth_gt_log.clone()
+        shuffled_mask = depth_valid_mask.clone()
+        applied = False
+
+        if mode in {"intra_sample_token_shuffle", "token_shuffle"}:
+            for batch_idx, metadata in enumerate(metadata_items):
+                indices = metadata.get("visual_token_indices") if isinstance(metadata, dict) else None
+                token_count = int(indices.numel()) if isinstance(indices, torch.Tensor) else 0
+                token_count = min(token_count, int(depth_gt_log.shape[1]))
+                if token_count <= 1:
+                    continue
+                perm = torch.randperm(token_count, device=depth_gt_log.device)
+                if torch.equal(perm, torch.arange(token_count, device=depth_gt_log.device)):
+                    perm = torch.roll(perm, shifts=1, dims=0)
+                shuffled_gt[batch_idx, :token_count] = depth_gt_log[batch_idx, :token_count].index_select(0, perm)
+                shuffled_mask[batch_idx, :token_count] = depth_valid_mask[batch_idx, :token_count].index_select(0, perm)
+                applied = True
+            return shuffled_gt, shuffled_mask, applied, "intra_sample_token_shuffle"
+
+        if mode in {"frame_shuffle", "intra_sample_frame_shuffle"}:
+            for batch_idx, metadata in enumerate(metadata_items):
+                frame_ids = metadata.get("visual_frame_ids") if isinstance(metadata, dict) else None
+                if not isinstance(frame_ids, torch.Tensor) or frame_ids.numel() <= 1:
+                    continue
+                frame_ids_cpu = frame_ids.detach().cpu().to(dtype=torch.long)
+                unique_frames = list(dict.fromkeys(int(x) for x in frame_ids_cpu.tolist()))
+                if len(unique_frames) <= 1:
+                    continue
+                perm = torch.randperm(len(unique_frames), device=depth_gt_log.device)
+                if torch.equal(perm, torch.arange(len(unique_frames), device=depth_gt_log.device)):
+                    perm = torch.roll(perm, shifts=1, dims=0)
+                source_frames = [unique_frames[int(idx)] for idx in perm.detach().cpu().tolist()]
+                frame_ids_device = frame_ids.to(device=depth_gt_log.device, dtype=torch.long)
+                for dst_frame, src_frame in zip(unique_frames, source_frames):
+                    dst_pos = torch.nonzero(frame_ids_device == int(dst_frame), as_tuple=False).flatten()
+                    src_pos = torch.nonzero(frame_ids_device == int(src_frame), as_tuple=False).flatten()
+                    dst_pos = dst_pos[dst_pos < depth_gt_log.shape[1]]
+                    src_pos = src_pos[src_pos < depth_gt_log.shape[1]]
+                    if dst_pos.numel() != src_pos.numel():
+                        raise RuntimeError(
+                            "depth_shuffle_mode='frame_shuffle' requires equal visual-token counts per frame, "
+                            f"got frame {dst_frame}: {dst_pos.numel()} and frame {src_frame}: {src_pos.numel()}."
+                        )
+                    if dst_pos.numel() == 0:
+                        continue
+                    shuffled_gt[batch_idx, dst_pos] = depth_gt_log[batch_idx, src_pos]
+                    shuffled_mask[batch_idx, dst_pos] = depth_valid_mask[batch_idx, src_pos]
+                    applied = True
+            return shuffled_gt, shuffled_mask, applied, "frame_shuffle"
+
+        raise ValueError(
+            "Unsupported depth_shuffle_mode. Expected batch_shuffle, "
+            f"intra_sample_token_shuffle, or frame_shuffle; got {mode!r}."
+        )
 
     def _compute_bev_supervision_loss(
         self,
@@ -563,6 +653,14 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
             ),
             depth_conf_threshold=float(getattr(self.config, "depth_conf_threshold", 0.0)),
             depth_max_gt=float(getattr(self.config, "depth_max_gt", 20.0)),
+            depth_allow_generic_camera_assumed=self._as_bool_config(
+                getattr(self.config, "depth_allow_generic_camera_assumed", False),
+                False,
+            ),
+            depth_allow_tensor_camera_assumed=self._as_bool_config(
+                getattr(self.config, "depth_allow_tensor_camera_assumed", False),
+                False,
+            ),
         )
         depth_gt_log = depth_gt_log.to(device=visual_hidden.device, dtype=visual_hidden.dtype)
         depth_valid_mask = depth_valid_mask.to(device=visual_hidden.device, dtype=torch.bool)
@@ -577,12 +675,11 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
                 "visual_token_indices include non-visual tokens, or frame order differs."
             )
 
-        shuffle_applied = False
-        if self._as_bool_config(getattr(self.config, "depth_shuffle_target", False), False) and depth_gt_log.shape[0] > 1:
-            perm = torch.randperm(depth_gt_log.shape[0], device=depth_gt_log.device)
-            depth_gt_log = depth_gt_log.index_select(0, perm)
-            depth_valid_mask = depth_valid_mask.index_select(0, perm)
-            shuffle_applied = True
+        depth_gt_log, depth_valid_mask, shuffle_applied, shuffle_mode_used = self._shuffle_depth_targets(
+            depth_gt_log,
+            depth_valid_mask,
+            visual_metadata,
+        )
 
         depth_head = getattr(self, "depth_head", None)
         if depth_head is None:
@@ -622,9 +719,12 @@ class LlavaQwenForCausalLM(Qwen2ForCausalLM, LlavaMetaForCausalLM):
             "depth_head_source": source,
             "depth_detach_hidden": float(self._as_bool_config(getattr(self.config, "depth_detach_hidden", False), False)),
             "depth_shuffle_target": float(self._as_bool_config(getattr(self.config, "depth_shuffle_target", False), False)),
+            "depth_shuffle_mode": shuffle_mode_used,
             "depth_shuffle_applied": float(shuffle_applied),
             "depth_max_gt": float(getattr(self.config, "depth_max_gt", 20.0)),
             "depth_conf_threshold": float(getattr(self.config, "depth_conf_threshold", 0.0)),
+            "depth_allow_generic_camera_assumed": float(self._as_bool_config(getattr(self.config, "depth_allow_generic_camera_assumed", False), False)),
+            "depth_allow_tensor_camera_assumed": float(self._as_bool_config(getattr(self.config, "depth_allow_tensor_camera_assumed", False), False)),
         }
         if isinstance(depth_debug, dict):
             metrics["depth_debug_valid_ratio_from_builder"] = float(depth_debug.get("valid_depth_token_ratio", 0.0) or 0.0)

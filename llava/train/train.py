@@ -338,11 +338,23 @@ class ModelArguments:
     )
     depth_detach_hidden: bool = field(default=False, metadata={"help": "Diagnostic: detach depth head inputs."})
     depth_shuffle_target: bool = field(default=False, metadata={"help": "Diagnostic negative control: shuffle depth targets across samples."})
+    depth_shuffle_mode: str = field(
+        default="frame_shuffle",
+        metadata={"help": "Depth negative-control shuffle mode: batch_shuffle, intra_sample_token_shuffle, or frame_shuffle."},
+    )
     depth_conf_threshold: float = field(
         default=0.0,
         metadata={"help": "Confidence threshold for depth token validity when confidence maps are available."},
     )
     depth_max_gt: float = field(default=20.0, metadata={"help": "Maximum valid ground-truth depth in meters; <=0 disables cap."})
+    depth_allow_generic_camera_assumed: bool = field(
+        default=False,
+        metadata={"help": "Allow generic point_maps/points keys as camera-space depth sources. Default False to avoid world-space z."},
+    )
+    depth_allow_tensor_camera_assumed: bool = field(
+        default=False,
+        metadata={"help": "Allow raw tensor point-map payloads as camera-space depth sources. Default False to avoid unknown coordinate spaces."},
+    )
     depth_visualize_debug: bool = field(default=False, metadata={"help": "Enable explicit depth debug visualization hooks."})
 
     unfreeze_mm_vision_tower: bool = field(default=False)
@@ -2650,8 +2662,11 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
         overwrite_config["depth_point_map_key"] = model_args.depth_point_map_key
         overwrite_config["depth_detach_hidden"] = model_args.depth_detach_hidden
         overwrite_config["depth_shuffle_target"] = model_args.depth_shuffle_target
+        overwrite_config["depth_shuffle_mode"] = model_args.depth_shuffle_mode
         overwrite_config["depth_conf_threshold"] = model_args.depth_conf_threshold
         overwrite_config["depth_max_gt"] = model_args.depth_max_gt
+        overwrite_config["depth_allow_generic_camera_assumed"] = model_args.depth_allow_generic_camera_assumed
+        overwrite_config["depth_allow_tensor_camera_assumed"] = model_args.depth_allow_tensor_camera_assumed
         overwrite_config["depth_visualize_debug"] = model_args.depth_visualize_debug
 
     if overwrite_config:
@@ -2856,8 +2871,11 @@ def train(attn_implementation=None):
         "depth_point_map_key",
         "depth_detach_hidden",
         "depth_shuffle_target",
+        "depth_shuffle_mode",
         "depth_conf_threshold",
         "depth_max_gt",
+        "depth_allow_generic_camera_assumed",
+        "depth_allow_tensor_camera_assumed",
         "depth_visualize_debug",
     ):
         setattr(model.config, attr, getattr(model_args, attr))

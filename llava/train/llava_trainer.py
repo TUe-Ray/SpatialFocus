@@ -542,7 +542,13 @@ class LLaVATrainer(Trainer):
             self._flatten_numeric("", depth_metrics, numeric_depth_metrics)
             logs = dict(logs)
             logs.update(numeric_depth_metrics)
-            for key in ("depth_point_map_key", "depth_head_source", "depth_point_map_key_used", "depth_target_space"):
+            for key in (
+                "depth_point_map_key",
+                "depth_head_source",
+                "depth_shuffle_mode",
+                "depth_point_map_key_used",
+                "depth_target_space",
+            ):
                 if key in depth_metrics:
                     logs[key] = str(depth_metrics[key])
         if geo_rope_metrics:

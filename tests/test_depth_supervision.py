@@ -86,16 +86,52 @@ def test_invalid_zero_nan_and_too_far_depths_are_masked():
     assert torch.isfinite(gt_log[mask]).all()
 
 
-def test_tensor_payload_is_supported_as_camera_space_depth():
+def test_tensor_payload_is_rejected_by_default_and_allowed_by_config():
     cam = torch.zeros(1, 1, 2, 3)
     cam[..., 2] = torch.tensor([[[1.0, 2.0]]])
+    try:
+        build_depth_targets_from_point_maps(
+            cam,
+            _metadata([0, 0], [(1, 2)]),
+        )
+    except ValueError as exc:
+        assert "raw tensor payload" in str(exc)
+    else:
+        raise AssertionError("Expected raw tensor depth payload to be rejected by default")
+
     gt_log, mask, debug = build_depth_targets_from_point_maps(
         cam,
         _metadata([0, 0], [(1, 2)]),
+        depth_allow_tensor_camera_assumed=True,
     )
     assert torch.allclose(gt_log[0], torch.log1p(torch.tensor([1.0, 2.0])))
     assert mask.tolist() == [[True, True]]
     assert debug["samples"][0]["depth_target_space"] == "camera_tensor_assumed"
+
+
+def test_generic_point_map_key_requires_explicit_camera_assumption():
+    cam = torch.zeros(1, 1, 2, 3)
+    cam[..., 2] = torch.tensor([[[1.0, 2.0]]])
+    try:
+        build_depth_targets_from_point_maps(
+            {"point_maps": cam},
+            _metadata([0, 0], [(1, 2)]),
+            depth_point_map_key="point_maps",
+        )
+    except ValueError as exc:
+        assert "generic point-map" in str(exc)
+    else:
+        raise AssertionError("Expected generic point_maps key to be rejected by default")
+
+    gt_log, mask, debug = build_depth_targets_from_point_maps(
+        {"point_maps": cam},
+        _metadata([0, 0], [(1, 2)]),
+        depth_point_map_key="point_maps",
+        depth_allow_generic_camera_assumed=True,
+    )
+    assert torch.allclose(gt_log[0], torch.log1p(torch.tensor([1.0, 2.0])))
+    assert mask.tolist() == [[True, True]]
+    assert debug["samples"][0]["depth_target_space"] == "generic_camera_assumed"
 
 
 def test_confidence_threshold_is_applied():

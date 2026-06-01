@@ -43,6 +43,8 @@ def _normalize_depth_point_map_key(key: Optional[str]) -> Tuple[Tuple[str, ...],
         "self": (CAMERA_POINT_MAP_KEYS, "camera"),
         "point_maps_cam": (CAMERA_POINT_MAP_KEYS, "camera"),
         "pts3d_in_self_view": (("pts3d_in_self_view", "point_maps_cam"), "camera"),
+    }
+    generic_aliases = {
         "point_maps": (("point_maps",), "generic_camera_assumed"),
         "point_map": (("point_map",), "generic_camera_assumed"),
         "points": (("points",), "generic_camera_assumed"),
@@ -62,10 +64,13 @@ def _normalize_depth_point_map_key(key: Optional[str]) -> Tuple[Tuple[str, ...],
             "(point_maps_cam or pts3d_in_self_view). Reference/world-frame "
             f"z is not valid depth; got depth_point_map_key={key!r}."
         )
+    if normalized in generic_aliases:
+        return generic_aliases[normalized]
     if normalized not in aliases:
         raise ValueError(
             "depth_point_map_key must be one of cam/point_maps_cam/"
-            "pts3d_in_self_view. Generic point_maps aliases are only valid "
+            "pts3d_in_self_view. Generic point_maps aliases require "
+            "depth_allow_generic_camera_assumed=True and are only valid "
             f"when they contain camera-space coordinates; got {key!r}."
         )
     return aliases[normalized]
@@ -74,10 +79,26 @@ def _normalize_depth_point_map_key(key: Optional[str]) -> Tuple[Tuple[str, ...],
 def _find_depth_point_map(
     payload: Any,
     depth_point_map_key: str,
+    *,
+    depth_allow_generic_camera_assumed: bool,
+    depth_allow_tensor_camera_assumed: bool,
 ) -> Tuple[torch.Tensor, str, str]:
     if isinstance(payload, torch.Tensor):
+        if not depth_allow_tensor_camera_assumed:
+            raise ValueError(
+                "Depth supervision received a raw tensor payload, but raw tensors do not encode "
+                "their coordinate space. Use geometry_spatial_features with point_maps_cam/"
+                "pts3d_in_self_view, or set depth_allow_tensor_camera_assumed=True only after "
+                "verifying the tensor is per-frame camera-space."
+            )
         return payload, "tensor", "camera_tensor_assumed"
     target_keys, target_space = _normalize_depth_point_map_key(depth_point_map_key)
+    if target_space == "generic_camera_assumed" and not depth_allow_generic_camera_assumed:
+        raise ValueError(
+            f"Depth supervision requested generic key {depth_point_map_key!r}, but generic point-map "
+            "keys do not encode coordinate space. Use point_maps_cam/pts3d_in_self_view, or set "
+            "depth_allow_generic_camera_assumed=True only after verifying the sidecar is camera-space."
+        )
     tensor, target_key = _find_tensor(payload, target_keys)
     if tensor is not None:
         return tensor, target_key or str(depth_point_map_key), target_space
@@ -165,11 +186,18 @@ def _build_one_sample(
     use_geometry_confidence_mask: bool,
     depth_conf_threshold: float,
     depth_max_gt: float,
+    depth_allow_generic_camera_assumed: bool,
+    depth_allow_tensor_camera_assumed: bool,
     existing_geometry_mask: Optional[torch.Tensor],
     sample_idx: int,
 ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, Any]]:
     _validate_visual_metadata(metadata, sample_idx)
-    target_tensor, target_key, target_space = _find_depth_point_map(payload, depth_point_map_key)
+    target_tensor, target_key, target_space = _find_depth_point_map(
+        payload,
+        depth_point_map_key,
+        depth_allow_generic_camera_assumed=depth_allow_generic_camera_assumed,
+        depth_allow_tensor_camera_assumed=depth_allow_tensor_camera_assumed,
+    )
     point_map = _point_map_to_fhwc(target_tensor)
     depth = point_map[..., 2]
     valid_dense, validity_debug = _build_dense_depth_validity(
@@ -268,6 +296,8 @@ def build_depth_targets_from_point_maps(
     use_geometry_confidence_mask: bool = True,
     depth_conf_threshold: float = 0.0,
     depth_max_gt: float = 20.0,
+    depth_allow_generic_camera_assumed: bool = False,
+    depth_allow_tensor_camera_assumed: bool = False,
     existing_geometry_mask: Optional[Any] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, Any]]:
     """Build log-depth targets aligned to LLM visual-token metadata.
@@ -300,6 +330,8 @@ def build_depth_targets_from_point_maps(
             use_geometry_confidence_mask=_as_bool(use_geometry_confidence_mask, True),
             depth_conf_threshold=float(depth_conf_threshold),
             depth_max_gt=float(depth_max_gt),
+            depth_allow_generic_camera_assumed=_as_bool(depth_allow_generic_camera_assumed, False),
+            depth_allow_tensor_camera_assumed=_as_bool(depth_allow_tensor_camera_assumed, False),
             existing_geometry_mask=mask,
             sample_idx=idx,
         )
@@ -326,6 +358,8 @@ def build_depth_targets_from_point_maps(
         "depth_point_map_key_requested": depth_point_map_key,
         "depth_conf_threshold": float(depth_conf_threshold),
         "depth_max_gt": float(depth_max_gt),
+        "depth_allow_generic_camera_assumed": bool(_as_bool(depth_allow_generic_camera_assumed, False)),
+        "depth_allow_tensor_camera_assumed": bool(_as_bool(depth_allow_tensor_camera_assumed, False)),
         "num_samples": len(sample_targets),
         "num_total_visual_tokens": total_tokens,
         "num_valid_depth_tokens": total_valid,
