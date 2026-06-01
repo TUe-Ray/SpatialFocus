@@ -76,6 +76,7 @@ BATCH_SIZE="${BATCH_SIZE:-1}"
 MAX_FRAMES_NUM="${MAX_FRAMES_NUM:-32}"
 CONV_TEMPLATE="${CONV_TEMPLATE:-qwen_1_5}"
 MODEL_NAME="${MODEL_NAME:-vlm-3r-llava-qwen2-lora}"
+MODEL_ATTN_IMPLEMENTATION="${MODEL_ATTN_IMPLEMENTATION:-sdpa}"
 RUN_NAME="${RUN_NAME:-$DEFAULT_RUN_NAME}"
 LIMIT="${LIMIT:-0}"
 
@@ -105,6 +106,7 @@ echo "NUM_PROCESSES=$NUM_PROCESSES"
 echo "BATCH_SIZE=$BATCH_SIZE"
 echo "MAX_FRAMES_NUM=$MAX_FRAMES_NUM"
 echo "MODEL_NAME=$MODEL_NAME"
+echo "MODEL_ATTN_IMPLEMENTATION=$MODEL_ATTN_IMPLEMENTATION"
 echo "RUN_NAME=$RUN_NAME"
 echo "LIMIT=$LIMIT"
 echo "=================="
@@ -340,7 +342,7 @@ MODEL_ARGS="pretrained=$PRETRAINED_RUNTIME,model_base=$MODEL_BASE_LOCAL"
 if [[ -n "$MODEL_NAME" ]]; then
   MODEL_ARGS+=",model_name=$MODEL_NAME"
 fi
-MODEL_ARGS+=",conv_template=$CONV_TEMPLATE,max_frames_num=$MAX_FRAMES_NUM"
+MODEL_ARGS+=",conv_template=$CONV_TEMPLATE,max_frames_num=$MAX_FRAMES_NUM,attn_implementation=$MODEL_ATTN_IMPLEMENTATION"
 if [[ "$USE_RUNTIME_CUT3R_FEATURES" == "True" ]]; then
   MODEL_ARGS+=",spatial_tower=cut3r,spatial_tower_select_feature=all_tokens"
 else
