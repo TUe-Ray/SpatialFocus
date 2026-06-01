@@ -40,6 +40,13 @@ class CrossAttentionFusion(nn.Module):
         Returns:
             fused_features: [B, N, D_clip]
         """
+        target_device = clip_features.device
+        param = next(self.parameters(), None)
+        if param is not None and param.device != target_device:
+            self.to(device=target_device)
+        if spatial_encoder_features.device != target_device:
+            spatial_encoder_features = spatial_encoder_features.to(device=target_device)
+
         # pre-norm
         clip_features_norm = self.clip_norm(clip_features)  # [B, N, D_clip]
         spatial_encoder_features_norm = self.spatial_encoder_norm(spatial_encoder_features)  # [B, N, D_spatial_encoder]
