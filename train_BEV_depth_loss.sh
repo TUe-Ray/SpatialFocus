@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=cut3r_bev_loss
+#SBATCH --job-name=cut3r_bev_depth_loss
 #SBATCH --nodes=4
 #SBATCH --gpus-per-node=4             # 依你的叢集格式：也可能是 --gpus-per-node=1
 #SBATCH --ntasks-per-node=1       # 通常 1 個 task，裡面用 torchrun 起多 GPU processes
@@ -17,7 +17,7 @@
 # ============================================================
 # User-defined variables: General
 # ============================================================
-NOTE="${NOTE:-Train VLM3R on VSI-Bench with CUT3R token sidecars, CUT3R point-map sidecars, cross-attention fusion, and BEV-only auxiliary supervision.}"
+NOTE="${NOTE:-Train VLM3R on VSI-Bench with CUT3R token sidecars, CUT3R point-map sidecars, cross-attention fusion, and BEV+depth auxiliary supervision.}"
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-vlm3r}"
 
 # ============================================================
@@ -72,7 +72,7 @@ SPATIAL_RANK_DEBUG_CHECKS="${SPATIAL_RANK_DEBUG_CHECKS:-False}"
 # ============================================================
 # User-defined variables: Model/Data/Training presets
 # ============================================================
-SUFFIX="${SUFFIX:-vlm_3r_vsibench_all_tokens_cross_attn_lora_bev_loss}"
+SUFFIX="${SUFFIX:-vlm_3r_vsibench_all_tokens_cross_attn_lora_bev_depth_loss}"
 
 MODEL_LORA_ENABLE="True"
 MODEL_LORA_R="128"
@@ -112,7 +112,7 @@ MODEL_BEV_SHUFFLE_TARGET="${MODEL_BEV_SHUFFLE_TARGET:-False}"
 MODEL_BEV_VISUALIZE_DEBUG="${MODEL_BEV_VISUALIZE_DEBUG:-False}"
 MODEL_BEV_POINT_MAP_KEY="${MODEL_BEV_POINT_MAP_KEY:-point_maps_ref}"
 MODEL_BEV_CONF_THRESHOLD="${MODEL_BEV_CONF_THRESHOLD:-0.0}"
-MODEL_USE_DEPTH_SUPERVISION="False"
+MODEL_USE_DEPTH_SUPERVISION="True"
 MODEL_DEPTH_HEAD_SOURCE="${MODEL_DEPTH_HEAD_SOURCE:-llm_output}"
 MODEL_LAMBDA_DEPTH="${MODEL_LAMBDA_DEPTH:-0.05}"
 MODEL_DEPTH_POINT_MAP_KEY="${MODEL_DEPTH_POINT_MAP_KEY:-point_maps_cam}"
