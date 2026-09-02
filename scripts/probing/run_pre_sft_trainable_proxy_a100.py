@@ -19,7 +19,7 @@ import socket
 import subprocess
 import sys
 import time
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -43,6 +43,7 @@ from llava.model.c1_structured_isometry import apply_c1_calibration_artifact  # 
 SCHEMA_VERSION = "pre_sft_trainable_proxy_a100_v1"
 BASELINE_ID = "c1_vlm3r_native"
 ALL_IDS = tuple(item.identifier for item in common.CANDIDATES)
+EXTENSION_IDS = ("ss_depth", "baseline_depth", "base_vlm_zero_spatial")
 EXPECTED_BASELINE_COUNTS = {
     "lora": 322_961_408,
     "fusion_block": 9_747_456,
@@ -62,6 +63,38 @@ C1_FILENAMES = {
     "c1_ss_add_123": ("c1_ss_add_123", "spatialstack_add.json"),
     "c1_ss_cross_attn_012": ("c1_ss_cross_attn_v1", "spatialstack_cross_attn_v1.json"),
     "c1_vlm3r_native": ("c1_vlm3r_v1", "vlm3r.json"),
+}
+
+
+@dataclass(frozen=True)
+class ExtensionCandidateSpec:
+    """A pre-SFT extension whose provenance is separate from the C1-five roster.
+
+    The two auxiliary-supervision variants reuse an audited C1 interface.
+    Their fresh supervision heads are deliberately not in the primary scope:
+    the mandated ``L_proxy = L_QA`` never executes them.  The base control has
+    no spatial interface at all, so it uses the plain-base loader and retains
+    only fresh LoRA plus the SFT-tuned projector.
+    """
+
+    identifier: str
+    vsi_model: str
+    vsi_avg: float
+    construction: str
+    source_c1_identifier: str | None = None
+    auxiliary_only_module: str | None = None
+
+
+EXTENSION_CANDIDATES = {
+    "ss_depth": ExtensionCandidateSpec(
+        "ss_depth", "SS + depth", 61.3, "c1_auxiliary", "c1_ss_add_012", "pointmap_head"
+    ),
+    "baseline_depth": ExtensionCandidateSpec(
+        "baseline_depth", "Baseline + depth", 59.6, "c1_auxiliary", "c1_vlm3r_native", "depth_head"
+    ),
+    "base_vlm_zero_spatial": ExtensionCandidateSpec(
+        "base_vlm_zero_spatial", "0 spatial / Base VLM", 56.4, "plain_base"
+    ),
 }
 
 
@@ -104,11 +137,11 @@ def candidate_specs(c1_root: Path) -> dict[str, common.CandidateSpec]:
     return output
 
 
-def parse_ids(value: str) -> list[str]:
+def parse_ids(value: str, allowed: tuple[str, ...]) -> list[str]:
     values = [part.strip() for part in value.split(",") if part.strip()]
-    unknown = sorted(set(values).difference(ALL_IDS))
+    unknown = sorted(set(values).difference(allowed))
     if unknown:
-        raise ValueError(f"Unknown candidate IDs: {unknown}; expected {list(ALL_IDS)}")
+        raise ValueError(f"Unknown candidate IDs: {unknown}; expected {list(allowed)}")
     if len(values) != len(set(values)):
         raise ValueError("Candidate IDs must not be repeated")
     return values
@@ -116,7 +149,11 @@ def parse_ids(value: str) -> list[str]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("preflight", "smoke", "formal"), required=True)
+    parser.add_argument(
+        "--mode",
+        choices=("preflight", "smoke", "formal", "extension-smoke", "extension-formal"),
+        required=True,
+    )
     parser.add_argument("--candidates", default=None)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--base-model", type=Path, required=True)
@@ -147,12 +184,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rng-seed", type=int, default=42)
     args = parser.parse_args()
     if args.candidates is None:
-        args.candidates = BASELINE_ID if args.mode == "smoke" else ",".join(ALL_IDS)
-    args.candidate_ids = parse_ids(args.candidates)
+        args.candidates = {
+            "smoke": BASELINE_ID,
+            "formal": ",".join(ALL_IDS),
+            "extension-smoke": "ss_depth",
+            "extension-formal": ",".join(EXTENSION_IDS),
+        }.get(args.mode, BASELINE_ID)
+    allowed = (
+        EXTENSION_IDS + ALL_IDS
+        if args.mode == "preflight"
+        else EXTENSION_IDS if args.mode.startswith("extension-") else ALL_IDS
+    )
+    args.candidate_ids = parse_ids(args.candidates, allowed)
     if args.mode == "smoke" and args.candidate_ids != [BASELINE_ID]:
         raise ValueError("The migration smoke must be exactly the C1 VLM3R Baseline")
     if args.mode == "formal" and set(args.candidate_ids) != set(ALL_IDS):
         raise ValueError("The formal run must contain exactly the audited five-candidate roster")
+    if args.mode == "extension-smoke" and args.candidate_ids != ["ss_depth"]:
+        raise ValueError("The extension smoke must be exactly SS + depth")
+    if args.mode == "extension-formal" and set(args.candidate_ids) != set(EXTENSION_IDS):
+        raise ValueError("The extension formal run must contain exactly the currently constructible extension roster")
     return args
 
 
@@ -165,6 +216,17 @@ def required_sidecars(candidate: common.CandidateSpec, feature_root: Path) -> li
         feature_root / "scannet" / "spatial_features_dec_9" / scene,
         feature_root / "scannet" / "spatial_features" / scene,
     ]
+
+
+def c1_source_candidate(
+    candidate: common.CandidateSpec | ExtensionCandidateSpec,
+    specs: dict[str, common.CandidateSpec],
+) -> common.CandidateSpec | None:
+    if isinstance(candidate, common.CandidateSpec):
+        return candidate
+    if candidate.source_c1_identifier is None:
+        return None
+    return specs[candidate.source_c1_identifier]
 
 
 def validate(args: argparse.Namespace, specs: dict[str, common.CandidateSpec]) -> dict[str, Any]:
@@ -183,18 +245,30 @@ def validate(args: argparse.Namespace, specs: dict[str, common.CandidateSpec]) -
         raise RuntimeError(f"Base model contains forbidden adapter/checkpoint artifacts: {[str(x) for x in forbidden]}")
     artifacts: dict[str, dict[str, str]] = {}
     for identifier in args.candidate_ids:
-        candidate = specs[identifier]
-        paths = [candidate.calibration_artifact, *required_sidecars(candidate, args.feature_root)]
+        candidate: common.CandidateSpec | ExtensionCandidateSpec = (
+            EXTENSION_CANDIDATES[identifier] if identifier in EXTENSION_CANDIDATES else specs[identifier]
+        )
+        source = c1_source_candidate(candidate, specs)
+        if source is None:
+            artifacts[identifier] = {
+                "path": None,
+                "sha256": None,
+                "construction": "plain pretrained base VLM; no spatial sidecar or C1 artifact",
+            }
+            continue
+        paths = [source.calibration_artifact, *required_sidecars(source, args.feature_root)]
         missing = [str(path) for path in paths if not path.is_file()]
         if missing:
             raise FileNotFoundError(f"{identifier} is missing C1/sidecar inputs: {missing}")
-        actual = sha256(candidate.calibration_artifact)
-        if actual != EXPECTED_C1_SHA256[identifier]:
-            raise RuntimeError(f"{identifier} C1 hash mismatch: {actual} != {EXPECTED_C1_SHA256[identifier]}")
-        payload = json.loads(candidate.calibration_artifact.read_text(encoding="utf-8"))
+        actual = sha256(source.calibration_artifact)
+        if actual != EXPECTED_C1_SHA256[source.identifier]:
+            raise RuntimeError(f"{identifier} C1 hash mismatch: {actual} != {EXPECTED_C1_SHA256[source.identifier]}")
+        payload = json.loads(source.calibration_artifact.read_text(encoding="utf-8"))
         if payload.get("schema_version") != "c1_calibration_v1" or payload.get("no_training") is not True:
             raise RuntimeError(f"{identifier} is not a verified no-training C1 calibration artifact")
-        artifacts[identifier] = {"path": str(candidate.calibration_artifact), "sha256": actual}
+        artifacts[identifier] = {
+            "path": str(source.calibration_artifact), "sha256": actual, "source_c1_identifier": source.identifier,
+        }
     if args.mode != "preflight" and not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for an A100 proxy execution")
     if args.output_root.exists() and any(args.output_root.iterdir()):
@@ -249,9 +323,110 @@ def finite_scores(scope: dict[str, Any]) -> bool:
     return all(math.isfinite(float(groups[name][metric])) for name in groups for metric in ("gradnorm", "snip", "fisher"))
 
 
-def run_candidate(args: argparse.Namespace, candidate: common.CandidateSpec, provenance: dict[str, Any]) -> dict[str, Any]:
-    cut3r_layers, llm_layers, artifact = common.candidate_schedule(candidate)
-    load_args = common.make_load_args(args, candidate, cut3r_layers, llm_layers)
+def base_load_args(args: argparse.Namespace, baseline: common.CandidateSpec) -> Any:
+    """Reuse the audited loader namespace, changing only to the plain-base mode."""
+    cut3r_layers, llm_layers, _artifact = common.candidate_schedule(baseline)
+    load_args = common.make_load_args(args, baseline, cut3r_layers, llm_layers)
+    load_args.model_label = "pre_sft_base_vlm"
+    load_args.model_loading_mode = "pre_sft_base_vlm"
+    load_args.pre_sft_fusion_variant = None
+    load_args.architecture = "base"
+    load_args.feature_preset = "original"
+    load_args.zero_spatial_features = False
+    return load_args
+
+
+def primary_trainable_groups(
+    model: torch.nn.Module,
+    *,
+    include_fusion: bool,
+) -> dict[str, list[torch.nn.Parameter]]:
+    """Return only trainable tensors reachable from the primary QA CE loss."""
+    lora = [
+        parameter for name, parameter in model.named_parameters()
+        if ".lora_A." in name or ".lora_B." in name
+    ]
+    if not lora:
+        raise RuntimeError("Fresh SFT LoRA construction produced no lora_A/lora_B parameters")
+    get_base_model = getattr(model, "get_base_model", None)
+    base_model = get_base_model() if hasattr(model, "peft_config") and callable(get_base_model) else model
+    projector = getattr(base_model.get_model(), "mm_projector", None)
+    if not isinstance(projector, torch.nn.Module):
+        raise RuntimeError("SFT recipe requires a materialized mm_projector")
+    groups: dict[str, list[torch.nn.Parameter]] = {"lora": lora}
+    if include_fusion:
+        fusion = list(common.fusion_module(model).parameters())
+        if not fusion:
+            raise RuntimeError("Candidate-specific fusion interface is unexpectedly empty")
+        groups["fusion_block"] = fusion
+    groups["mm_projector"] = list(projector.parameters())
+    identities = [id(parameter) for parameters in groups.values() for parameter in parameters]
+    if len(identities) != len(set(identities)):
+        raise RuntimeError("Primary LoRA/interface/projector scopes must be disjoint")
+    if not all(parameters for parameters in groups.values()):
+        empty = [name for name, parameters in groups.items() if not parameters]
+        raise RuntimeError(f"Primary trainable group is empty: {empty}")
+    return groups
+
+
+def initialize_auxiliary_only_module(
+    model: torch.nn.Module,
+    module_name: str | None,
+    *,
+    device: torch.device,
+    seed: int,
+) -> dict[str, Any] | None:
+    """Materialize a recipe auxiliary head without letting it enter ``L_QA``.
+
+    The head is a real candidate module and is retained for provenance, but
+    the primary study explicitly uses CE alone.  Turning its corresponding
+    supervision switch off is loss selection, not an architecture change:
+    neither head is called by the QA forward.
+    """
+    if module_name is None:
+        return None
+    common.reset_proxy_rng(seed)
+    if module_name == "depth_head":
+        module = model.initialize_depth_head(device=device, dtype=torch.float16)
+        model.config.use_depth_supervision = False
+        loss_flag = "use_depth_supervision"
+    elif module_name == "pointmap_head":
+        module = model.initialize_pointmap_head(device=device, dtype=torch.float16)
+        model.config.use_pointmap_supervision = False
+        loss_flag = "use_pointmap_supervision"
+    else:
+        raise ValueError(f"Unsupported auxiliary-only module: {module_name}")
+    parameters = list(module.parameters())
+    if not parameters or any(parameter.is_meta or parameter.device.type != "cuda" for parameter in parameters):
+        raise RuntimeError(f"Auxiliary-only {module_name} was not fully materialized on CUDA")
+    return {
+        "module": module_name,
+        "parameter_elements": common.parameter_count(parameters),
+        "construction_seed": int(seed),
+        "devices": sorted({str(parameter.device) for parameter in parameters}),
+        "qa_reachable": False,
+        "primary_scope_included": False,
+        "primary_loss": "L_QA only",
+        "loss_switch": loss_flag,
+        "loss_switch_value_during_proxy": False,
+        "reason": "supervision-only head is not executed by the ordinary QA CE forward",
+    }
+
+
+def run_candidate(
+    args: argparse.Namespace,
+    candidate: common.CandidateSpec | ExtensionCandidateSpec,
+    specs: dict[str, common.CandidateSpec],
+    provenance: dict[str, Any],
+) -> dict[str, Any]:
+    source = c1_source_candidate(candidate, specs)
+    extension = candidate if isinstance(candidate, ExtensionCandidateSpec) else None
+    if source is None:
+        load_args = base_load_args(args, specs[BASELINE_ID])
+        artifact = None
+    else:
+        cut3r_layers, llm_layers, artifact = common.candidate_schedule(source)
+        load_args = common.make_load_args(args, source, cut3r_layers, llm_layers)
     # Direct one-A100 placement.  Never activate the TITAN-V auto-map or CPU
     # offload/deferred dispatch path for this protocol.
     if load_args.device_map != "cuda:0":
@@ -270,15 +445,22 @@ def run_candidate(args: argparse.Namespace, candidate: common.CandidateSpec, pro
         # intended SFT-trainable module to the direct A100 placement before
         # C1 calibration; do not alter any pretrained model weights or the
         # frozen-backbone placement.
-        common.fusion_module(model).to(device=device, dtype=torch.float16)
-        apply_c1_calibration_artifact(model, artifact)
+        if source is not None:
+            common.fusion_module(model).to(device=device, dtype=torch.float16)
+            apply_c1_calibration_artifact(model, artifact)
+        auxiliary_only = initialize_auxiliary_only_module(
+            model,
+            extension.auxiliary_only_module if extension is not None else None,
+            device=device,
+            seed=args.rng_seed,
+        )
         if hasattr(model, "enable_input_require_grads"):
             model.enable_input_require_grads()
         if hasattr(model, "gradient_checkpointing_enable"):
             model.gradient_checkpointing_enable()
         model, lora_recipe = common.attach_intended_sft_lora(model, seed=args.rng_seed)
         lora_initialization = common.lora_initialization_summary(model)
-        groups = common.intended_sft_trainable_groups(model)
+        groups = primary_trainable_groups(model, include_fusion=source is not None)
         selected = common.configure_intended_sft_trainable_parameters(model, groups)
         residency = selected_residency(groups)
         if any(info["invalid_parameter_elements"] for info in residency.values()):
@@ -297,6 +479,10 @@ def run_candidate(args: argparse.Namespace, candidate: common.CandidateSpec, pro
             raise RuntimeError(f"Expected exactly one calibration minibatch, got {len(records)}")
         record = records[0]
         batch = common.prepare_batch(dataset, collator, by_video[str(record["video_path"])], model, device, torch.float16)
+        if source is None:
+            forbidden = [key for key in ("spatial_features", "point_maps", "geometry_spatial_features") if key in batch]
+            if forbidden:
+                raise RuntimeError(f"Plain Base VLM received forbidden spatial inputs: {forbidden}")
         batch_info = common.batch_metadata(batch, record)
         if batch_info.get("scene_id") != "scene0384_00" or batch_info.get("input_ids_shape") != [1, 424] or batch_info.get("supervised_label_tokens") != 13:
             raise RuntimeError(f"Fixed calibration contract failed: {batch_info}")
@@ -315,7 +501,7 @@ def run_candidate(args: argparse.Namespace, candidate: common.CandidateSpec, pro
             "schema_version": SCHEMA_VERSION,
             "candidate": {
                 **asdict(candidate),
-                "calibration_artifact": str(candidate.calibration_artifact),
+                "calibration_artifact": str(source.calibration_artifact) if source is not None else None,
                 "c1_artifact_sha256": provenance["c1_artifacts"][candidate.identifier]["sha256"],
                 "post_sft_weights_loaded": False,
             },
@@ -333,8 +519,12 @@ def run_candidate(args: argparse.Namespace, candidate: common.CandidateSpec, pro
                 "recipe": jsonable(lora_recipe),
                 "actual_state": lora_initialization,
             },
-            "scope_definition": "fresh LoRA + candidate-specific C1 fusion + mm_projector",
+            "scope_definition": (
+                "fresh LoRA + candidate-specific C1 fusion + mm_projector"
+                if source is not None else "fresh LoRA + mm_projector (plain Base VLM; no spatial interface)"
+            ),
             "selected_residency": residency,
+            "auxiliary_only": auxiliary_only,
             "primary_scope": scope,
             "wall_clock_seconds": wall_seconds,
             "no_training": {"optimizer_constructed": False, "optimizer_step_called": False, "parameter_updates": False},
@@ -427,7 +617,7 @@ def analysis(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "proxy_ranking_descending": [row["candidate"] for row in sorted(rows, key=lambda row: row[name], reverse=True)],
         }
     return {
-        "label": "preliminary/pilot statistics; n=5",
+        "label": f"preliminary/pilot statistics; n={len(rows)}",
         "vsi_ranking_descending": [row["candidate"] for row in sorted(rows, key=lambda row: row["vsi_avg"], reverse=True)],
         "metrics": metrics,
     }
@@ -471,13 +661,16 @@ def main() -> None:
         print(json.dumps({"status": "PASS", "output_root": str(args.output_root)})); return
     results: list[dict[str, Any]] = []
     for identifier in args.candidate_ids:
-        result = run_candidate(args, specs[identifier], provenance)
+        candidate: common.CandidateSpec | ExtensionCandidateSpec = (
+            EXTENSION_CANDIDATES[identifier] if identifier in EXTENSION_CANDIDATES else specs[identifier]
+        )
+        result = run_candidate(args, candidate, specs, provenance)
         results.append(result)
         candidate_dir = args.output_root / "per_candidate" / identifier
         candidate_dir.mkdir(parents=True, exist_ok=False)
         write_json(candidate_dir / "provenance.json", result)
     rows = flattened(results)
-    ranking = analysis(rows) if args.mode == "formal" else None
+    ranking = analysis(rows) if args.mode in {"formal", "extension-formal"} else None
     payload = {"schema_version": SCHEMA_VERSION, "status": "PASS", "provenance": provenance, "results": results, "ranking_analysis": ranking}
     write_json(args.output_root / "results.json", payload)
     write_csv(args.output_root / "results.csv", rows)

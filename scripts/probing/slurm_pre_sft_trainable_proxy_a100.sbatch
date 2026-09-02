@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Submit with: sbatch --partition=gpu_a100 --gpus=1 --ntasks=1 this-file
-# PHASE must be smoke, preflight, or formal.  No account/QoS is guessed here.
+# PHASE must be smoke, formal, extension-smoke, or extension-formal.
+# No account/QoS is guessed here.
 #SBATCH --partition=gpu_a100
 #SBATCH --gpus=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
-#SBATCH --time=08:00:00
+#SBATCH --cpus-per-task=18
+#SBATCH --mem=120G
+#SBATCH --time=00:30:00
 
 set -euo pipefail
 
