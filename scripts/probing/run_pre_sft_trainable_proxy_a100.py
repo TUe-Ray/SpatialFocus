@@ -1,9 +1,10 @@
 #!/usr/bin/env python
-"""One-A100 primary pre-SFT trainable-scope proxy for the audited C1 roster.
+"""One-A100 primary pre-SFT trainable-scope proxy and explicit extensions.
 
 This is deliberately narrower than the historical fusion-only evaluator.  It
-scores exactly fresh LoRA + the candidate C1 fusion module + mm_projector,
-using a single ordinary supervised QA CE backward and no optimizer.
+scores the candidate's exact QA-reachable SFT groups using a single ordinary
+supervised QA CE backward and no optimizer.  Extensions remain explicitly
+labelled and never alter the authoritative five-candidate roster.
 """
 
 from __future__ import annotations
@@ -34,16 +35,30 @@ if str(PROBING_DIR) not in sys.path:
 
 import evaluate_pre_sft_zero_cost_proxies as common  # noqa: E402
 from depth_probe_common import write_json  # noqa: E402
-from extract_depth_probe_features import build_dataset  # noqa: E402
+from extract_depth_probe_features import (  # noqa: E402
+    build_dataset,
+    full_geometry_point_maps,
+    load_eomt_consumer_cache,
+)
 from local_depth_probe_cache import install_forward_frame_loader  # noqa: E402
 from scripts.diagnose_layerwise_spatial_hidden_scan import load_model  # noqa: E402
-from llava.model.c1_structured_isometry import apply_c1_calibration_artifact  # noqa: E402
+from llava.model.c1_structured_isometry import (  # noqa: E402
+    apply_c1_calibration_artifact,
+    apply_geometry_c1_calibration_artifact,
+)
+from llava.model.controlled_fusion_pre_sft import (  # noqa: E402
+    CONTROLLED_FUSION_PRE_SFT_SPECS,
+    controlled_fusion_artifact_metadata,
+)
 
 
 SCHEMA_VERSION = "pre_sft_trainable_proxy_a100_v1"
 BASELINE_ID = "c1_vlm3r_native"
 ALL_IDS = tuple(item.identifier for item in common.CANDIDATES)
 EXTENSION_IDS = ("ss_depth", "baseline_depth", "base_vlm_zero_spatial")
+CONTROLLED_IDS = tuple(f"controlled_{identifier.lower()}" for identifier in CONTROLLED_FUSION_PRE_SFT_SPECS)
+VSI_MISSING_IDS = ("geo_rope_fusion", "visual_geo_rope", "extra_object_token", "selective_fusion")
+ADDITIONAL_IDS = CONTROLLED_IDS + VSI_MISSING_IDS
 EXPECTED_BASELINE_COUNTS = {
     "lora": 322_961_408,
     "fusion_block": 9_747_456,
@@ -96,6 +111,67 @@ EXTENSION_CANDIDATES = {
         "base_vlm_zero_spatial", "0 spatial / Base VLM", 56.4, "plain_base"
     ),
 }
+
+
+@dataclass(frozen=True)
+class ArchitectureCandidateSpec:
+    """A separately labelled pre-SFT architecture extension."""
+
+    identifier: str
+    vsi_model: str
+    vsi_avg: float | None
+    construction: str
+    fusion_variant: str
+    cut3r_source_layers: tuple[int, ...]
+    llm_injection_layers: tuple[int, ...]
+    interface_kind: str
+    include_mm_projector: bool
+    controlled_id: str | None = None
+    source_c1_identifier: str = BASELINE_ID
+    geometry_activation_name: str | None = None
+    requires_geometry: bool = False
+    eomt_mode: str | None = None
+    auxiliary_only_prefix: str | None = None
+
+
+ARCHITECTURE_CANDIDATES: dict[str, ArchitectureCandidateSpec] = {}
+for _controlled_id, _controlled in CONTROLLED_FUSION_PRE_SFT_SPECS.items():
+    _identifier = f"controlled_{_controlled_id.lower()}"
+    ARCHITECTURE_CANDIDATES[_identifier] = ArchitectureCandidateSpec(
+        identifier=_identifier,
+        vsi_model=_controlled.display_name,
+        vsi_avg=None,
+        construction="controlled_fusion_c1",
+        fusion_variant=_controlled.pre_sft_variant,
+        cut3r_source_layers=_controlled.cut3r_source_layers,
+        llm_injection_layers=_controlled.llm_injection_layers,
+        interface_kind="fusion_block",
+        include_mm_projector=_controlled_id == "B",
+        controlled_id=_controlled_id,
+    )
+
+ARCHITECTURE_CANDIDATES.update(
+    {
+        "geo_rope_fusion": ArchitectureCandidateSpec(
+            "geo_rope_fusion", "GeoRope Fusion", 60.2, "geometry_c1", "c1_geo_rope_fusion",
+            (12,), (), "fusion_block", True, geometry_activation_name="geo_rope_fusion",
+            requires_geometry=True,
+        ),
+        "visual_geo_rope": ArchitectureCandidateSpec(
+            "visual_geo_rope", "Visual geo-RoPE", 57.9, "geometry_c1", "c1_visual_geo_rope",
+            (), (), "geometry_aware_projection", True, geometry_activation_name="visual_geo_rope",
+            requires_geometry=True, auxiliary_only_prefix="aux_head.",
+        ),
+        "extra_object_token": ArchitectureCandidateSpec(
+            "extra_object_token", "Extra Object token", 58.6, "eomt_c1", "c1_eomt_object",
+            (12,), (), "fusion_block", True, eomt_mode="object",
+        ),
+        "selective_fusion": ArchitectureCandidateSpec(
+            "selective_fusion", "selective fusion", 57.2, "eomt_c1", "c1_vlm3r",
+            (12,), (), "fusion_block", True, eomt_mode="selective",
+        ),
+    }
+)
 
 
 def sha256(path: Path) -> str:
@@ -151,7 +227,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--mode",
-        choices=("preflight", "smoke", "formal", "extension-smoke", "extension-formal"),
+        choices=(
+            "preflight", "smoke", "formal", "extension-smoke", "extension-formal",
+            "additional-smoke", "additional-formal",
+        ),
         required=True,
     )
     parser.add_argument("--candidates", default=None)
@@ -164,6 +243,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-yaml", type=Path, required=True)
     parser.add_argument("--sample-indices", type=Path, required=True)
     parser.add_argument("--c1-root", type=Path, required=True)
+    parser.add_argument("--vsi-csv", type=Path, default=REPO_ROOT / "VSI result.csv")
+    parser.add_argument(
+        "--controlled-c1-root",
+        type=Path,
+        default=Path("/home/shuang/c1_artifacts/controlled_fusion_pre_sft_v1/c1"),
+    )
+    parser.add_argument(
+        "--geometry-c1-root",
+        type=Path,
+        default=Path("/home/shuang/c1_artifacts/c1_geometry_pre_sft_v1"),
+    )
+    parser.add_argument(
+        "--geometry-feature-root",
+        type=Path,
+        default=Path("/home/shuang/probing_data/cut3r_point_maps_32_v1"),
+    )
+    parser.add_argument(
+        "--eomt-cache-root",
+        type=Path,
+        default=Path("/home/shuang/probing_data/eomt_consumer_grid_v2"),
+    )
     parser.add_argument("--device", default="cuda:0")
     # ``make_load_args`` is shared with the historical evaluator and reads
     # this legacy placement field before ``run_candidate`` asserts the direct
@@ -189,12 +289,17 @@ def parse_args() -> argparse.Namespace:
             "formal": ",".join(ALL_IDS),
             "extension-smoke": "ss_depth",
             "extension-formal": ",".join(EXTENSION_IDS),
+            "additional-smoke": CONTROLLED_IDS[0],
+            "additional-formal": ",".join(ADDITIONAL_IDS),
         }.get(args.mode, BASELINE_ID)
-    allowed = (
-        EXTENSION_IDS + ALL_IDS
-        if args.mode == "preflight"
-        else EXTENSION_IDS if args.mode.startswith("extension-") else ALL_IDS
-    )
+    if args.mode == "preflight":
+        allowed = ALL_IDS + EXTENSION_IDS + ADDITIONAL_IDS
+    elif args.mode.startswith("extension-"):
+        allowed = EXTENSION_IDS
+    elif args.mode.startswith("additional-"):
+        allowed = ADDITIONAL_IDS
+    else:
+        allowed = ALL_IDS
     args.candidate_ids = parse_ids(args.candidates, allowed)
     if args.mode == "smoke" and args.candidate_ids != [BASELINE_ID]:
         raise ValueError("The migration smoke must be exactly the C1 VLM3R Baseline")
@@ -204,6 +309,10 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("The extension smoke must be exactly SS + depth")
     if args.mode == "extension-formal" and set(args.candidate_ids) != set(EXTENSION_IDS):
         raise ValueError("The extension formal run must contain exactly the currently constructible extension roster")
+    if args.mode == "additional-smoke" and len(args.candidate_ids) != 1:
+        raise ValueError("The additional-architecture smoke must contain exactly one candidate")
+    if args.mode == "additional-formal" and not args.candidate_ids:
+        raise ValueError("The additional-architecture formal run must contain at least one explicit candidate")
     return args
 
 
@@ -219,7 +328,7 @@ def required_sidecars(candidate: common.CandidateSpec, feature_root: Path) -> li
 
 
 def c1_source_candidate(
-    candidate: common.CandidateSpec | ExtensionCandidateSpec,
+    candidate: common.CandidateSpec | ExtensionCandidateSpec | ArchitectureCandidateSpec,
     specs: dict[str, common.CandidateSpec],
 ) -> common.CandidateSpec | None:
     if isinstance(candidate, common.CandidateSpec):
@@ -229,10 +338,123 @@ def c1_source_candidate(
     return specs[candidate.source_c1_identifier]
 
 
+def controlled_c1_artifact(args: argparse.Namespace, candidate: ArchitectureCandidateSpec) -> Path:
+    if candidate.controlled_id is None:
+        raise ValueError(f"{candidate.identifier} is not a controlled-fusion candidate")
+    return args.controlled_c1_root / candidate.controlled_id / "c1.json"
+
+
+def geometry_activation_artifact(args: argparse.Namespace, candidate: ArchitectureCandidateSpec) -> Path | None:
+    if candidate.geometry_activation_name is None:
+        return None
+    return args.geometry_c1_root / candidate.geometry_activation_name / "c1_activation.json"
+
+
+def architecture_c1_artifact(
+    args: argparse.Namespace,
+    candidate: ArchitectureCandidateSpec,
+    specs: dict[str, common.CandidateSpec],
+) -> Path:
+    if candidate.controlled_id is not None:
+        return controlled_c1_artifact(args, candidate)
+    return specs[candidate.source_c1_identifier].calibration_artifact
+
+
+def architecture_schedule(candidate: ArchitectureCandidateSpec) -> tuple[str, str]:
+    return (
+        ",".join(str(value) for value in candidate.cut3r_source_layers),
+        ",".join(str(value) for value in candidate.llm_injection_layers),
+    )
+
+
+def validate_controlled_artifact(
+    args: argparse.Namespace,
+    candidate: ArchitectureCandidateSpec,
+    artifact_path: Path,
+) -> dict[str, Any]:
+    manifest_path = args.controlled_c1_root / "artifact_manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"Missing locked controlled-fusion C1 manifest: {manifest_path}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if (
+        manifest.get("schema_version") != "controlled_fusion_c1_manifest_v1"
+        or manifest.get("post_sft_state_loaded") is not False
+        or manifest.get("no_optimizer_step") is not True
+    ):
+        raise RuntimeError("Controlled-fusion C1 manifest does not prove the no-training pre-SFT contract")
+    entry = (manifest.get("artifacts") or {}).get(candidate.controlled_id)
+    actual_sha = sha256(artifact_path)
+    if not isinstance(entry, dict) or entry.get("sha256") != actual_sha:
+        raise RuntimeError(f"{candidate.identifier} C1 SHA-256 does not match the locked manifest")
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    controlled_spec = CONTROLLED_FUSION_PRE_SFT_SPECS[str(candidate.controlled_id)]
+    if (
+        artifact.get("schema_version") != "c1_calibration_v1"
+        or artifact.get("no_training") is not True
+        or artifact.get("controlled_fusion") != controlled_fusion_artifact_metadata(controlled_spec)
+    ):
+        raise RuntimeError(f"{candidate.identifier} is not the canonical no-training controlled C1 artifact")
+    return {
+        "path": str(artifact_path),
+        "sha256": actual_sha,
+        "manifest": str(manifest_path),
+        "manifest_sha256": sha256(manifest_path),
+        "artifact_source_git_commit": manifest.get("git_commit"),
+        "source_c1_identifier": candidate.controlled_id,
+    }
+
+
+def validate_geometry_activation(
+    candidate: ArchitectureCandidateSpec,
+    activation_path: Path,
+    reference_sha256: str,
+) -> dict[str, Any]:
+    activation = json.loads(activation_path.read_text(encoding="utf-8"))
+    expected_architecture = (
+        "geo_rope_fusion" if candidate.identifier == "geo_rope_fusion" else "visual_geo_rope"
+    )
+    if (
+        activation.get("schema_version") != "c1_geometry_activation_v1"
+        or activation.get("architecture") != expected_architecture
+        or activation.get("reference_c1_artifact_sha256") != reference_sha256
+    ):
+        raise RuntimeError(f"{candidate.identifier} geometry activation provenance is incompatible")
+    achieved = float((activation.get("achieved_ratio") or {}).get("median", float("nan")))
+    target = float(activation.get("r0", float("nan")))
+    if not math.isfinite(achieved) or not math.isfinite(target) or abs(achieved - target) > 2e-4:
+        raise RuntimeError(f"{candidate.identifier} geometry activation did not meet its frozen C1 target")
+    return {"path": str(activation_path), "sha256": sha256(activation_path)}
+
+
+def additional_required_files(
+    args: argparse.Namespace,
+    candidate: ArchitectureCandidateSpec,
+) -> list[Path]:
+    scene = "scene0384_00.pt"
+    paths: list[Path] = []
+    if candidate.cut3r_source_layers:
+        paths.append(args.feature_root / "scannet" / "spatial_features" / scene)
+    if candidate.requires_geometry:
+        paths.append(
+            args.geometry_feature_root / "scannet" / "spatial_features_points" / scene
+        )
+    if candidate.eomt_mode is not None:
+        mask_name = "object_masks" if candidate.eomt_mode == "object" else "selective_masks"
+        paths.extend(
+            [
+                args.eomt_cache_root / "validation.json",
+                args.eomt_cache_root / "checksums.json",
+                args.eomt_cache_root / "class_logits" / "scannet" / scene,
+                args.eomt_cache_root / mask_name / "scannet" / scene,
+            ]
+        )
+    return paths
+
+
 def validate(args: argparse.Namespace, specs: dict[str, common.CandidateSpec]) -> dict[str, Any]:
     required = (
         args.base_model / "config.json", args.siglip_model / "config.json", args.forward_frames_root,
-        args.probe_targets_root, args.feature_root, args.data_yaml, args.sample_indices,
+        args.probe_targets_root, args.feature_root, args.data_yaml, args.sample_indices, args.vsi_csv,
     )
     missing = [str(path) for path in required if not path.exists()]
     if missing:
@@ -243,11 +465,53 @@ def validate(args: argparse.Namespace, specs: dict[str, common.CandidateSpec]) -
     ]
     if forbidden:
         raise RuntimeError(f"Base model contains forbidden adapter/checkpoint artifacts: {[str(x) for x in forbidden]}")
-    artifacts: dict[str, dict[str, str]] = {}
+    with args.vsi_csv.open("r", encoding="utf-8-sig", newline="") as handle:
+        vsi_scores = {row["Model"]: float(row["Avg."]) for row in csv.DictReader(handle)}
+    for candidate in ARCHITECTURE_CANDIDATES.values():
+        if candidate.vsi_avg is None:
+            continue
+        actual_vsi = vsi_scores.get(candidate.vsi_model)
+        if actual_vsi != candidate.vsi_avg:
+            raise RuntimeError(
+                f"Frozen VSI mismatch for {candidate.identifier}: runner={candidate.vsi_avg}, csv={actual_vsi}"
+            )
+    artifacts: dict[str, dict[str, Any]] = {}
     for identifier in args.candidate_ids:
-        candidate: common.CandidateSpec | ExtensionCandidateSpec = (
-            EXTENSION_CANDIDATES[identifier] if identifier in EXTENSION_CANDIDATES else specs[identifier]
-        )
+        candidate: common.CandidateSpec | ExtensionCandidateSpec | ArchitectureCandidateSpec
+        if identifier in ARCHITECTURE_CANDIDATES:
+            candidate = ARCHITECTURE_CANDIDATES[identifier]
+        elif identifier in EXTENSION_CANDIDATES:
+            candidate = EXTENSION_CANDIDATES[identifier]
+        else:
+            candidate = specs[identifier]
+        if isinstance(candidate, ArchitectureCandidateSpec):
+            artifact_path = architecture_c1_artifact(args, candidate, specs)
+            paths = [artifact_path, *additional_required_files(args, candidate)]
+            if candidate.controlled_id is not None:
+                paths.append(args.controlled_c1_root / "artifact_manifest.json")
+            activation_path = geometry_activation_artifact(args, candidate)
+            if activation_path is not None:
+                paths.append(activation_path)
+            absent = [str(path) for path in paths if not path.is_file()]
+            if absent:
+                raise FileNotFoundError(f"{identifier} is missing pre-SFT inputs: {absent}")
+            if candidate.controlled_id is not None:
+                artifacts[identifier] = validate_controlled_artifact(args, candidate, artifact_path)
+            else:
+                actual = sha256(artifact_path)
+                expected = EXPECTED_C1_SHA256[candidate.source_c1_identifier]
+                if actual != expected:
+                    raise RuntimeError(f"{identifier} reference C1 hash mismatch: {actual} != {expected}")
+                artifacts[identifier] = {
+                    "path": str(artifact_path),
+                    "sha256": actual,
+                    "source_c1_identifier": candidate.source_c1_identifier,
+                }
+            if activation_path is not None:
+                artifacts[identifier]["geometry_activation"] = validate_geometry_activation(
+                    candidate, activation_path, artifacts[identifier]["sha256"]
+                )
+            continue
         source = c1_source_candidate(candidate, specs)
         if source is None:
             artifacts[identifier] = {
@@ -280,6 +544,8 @@ def validate(args: argparse.Namespace, specs: dict[str, common.CandidateSpec]) -
         "c1_artifacts": artifacts,
         "sample_indices": str(args.sample_indices),
         "sample_indices_sha256": sha256(args.sample_indices),
+        "vsi_csv": str(args.vsi_csv),
+        "vsi_csv_sha256": sha256(args.vsi_csv),
     }
 
 
@@ -336,10 +602,92 @@ def base_load_args(args: argparse.Namespace, baseline: common.CandidateSpec) -> 
     return load_args
 
 
+def architecture_load_args(
+    args: argparse.Namespace,
+    candidate: ArchitectureCandidateSpec,
+    specs: dict[str, common.CandidateSpec],
+) -> tuple[Any, dict[str, Any], dict[str, Any] | None]:
+    """Build the shared loader Namespace for an explicit architecture extension."""
+    artifact_path = architecture_c1_artifact(args, candidate, specs)
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    cut3r_layers, llm_layers = architecture_schedule(candidate)
+    # ``install_pre_sft_fusion`` parses these legacy SpatialStack fields before
+    # branching to the native fusion implementation.  GeoRoPE, EoMT object,
+    # and selective VLM3R consume decoder-12 through their fusion block rather
+    # than injecting a SpatialStack residual into an LLM layer, but the parser
+    # still requires equal-length lists.  Supply an ignored, explicitly
+    # recorded placeholder solely for that parser; the canonical candidate
+    # schedule above and the actual non-SpatialStack forward remain unchanged.
+    loader_llm_layers = llm_layers
+    legacy_schedule_placeholder = None
+    if candidate.controlled_id is None and cut3r_layers and not llm_layers:
+        loader_llm_layers = ",".join("0" for _ in candidate.cut3r_source_layers)
+        legacy_schedule_placeholder = {
+            "spatialstack_cut3r_layers": cut3r_layers,
+            "spatialstack_llm_layers": loader_llm_layers,
+            "used_by_candidate_forward": False,
+        }
+    adapter = common.CandidateSpec(
+        candidate.identifier,
+        candidate.identifier,
+        candidate.fusion_variant,
+        artifact_path,
+        candidate.vsi_model,
+        float(candidate.vsi_avg) if candidate.vsi_avg is not None else float("nan"),
+    )
+    load_args = common.make_load_args(args, adapter, cut3r_layers, loader_llm_layers)
+    load_args.proxy_legacy_schedule_placeholder = legacy_schedule_placeholder
+    load_args.architecture = None
+    load_args.feature_preset = "original"
+    load_args.spatial_features_subdir = (
+        "12:spatial_features" if candidate.controlled_id is not None else "spatial_features"
+    )
+    load_args.geometry_spatial_features_root = (
+        str(args.geometry_feature_root) if candidate.requires_geometry else None
+    )
+    load_args.geometry_spatial_features_subdir = (
+        "spatial_features_points" if candidate.requires_geometry else None
+    )
+    load_args.geometry_point_map_key = "point_maps_ref"
+    load_args.post_sft_architecture = None
+    load_args.eomt_consumer_cache_root = str(args.eomt_cache_root)
+    load_args.eomt_cache_validation = str(args.eomt_cache_root / "validation.json")
+    load_args.verify_eomt_file_checksum = candidate.eomt_mode is not None
+    load_args.eomt_selective_kv_gate = candidate.eomt_mode == "selective"
+    activation_path = geometry_activation_artifact(args, candidate)
+    activation = (
+        json.loads(activation_path.read_text(encoding="utf-8"))
+        if activation_path is not None else None
+    )
+    return load_args, artifact, activation
+
+
+def architecture_interface_module(
+    model: torch.nn.Module,
+    candidate: ArchitectureCandidateSpec,
+) -> torch.nn.Module:
+    get_base_model = getattr(model, "get_base_model", None)
+    base_model = get_base_model() if hasattr(model, "peft_config") and callable(get_base_model) else model
+    base = base_model.get_model()
+    if candidate.interface_kind == "fusion_block":
+        module = common.fusion_module(model)
+    elif candidate.interface_kind == "geometry_aware_projection":
+        module = base.get_geometry_aware_projection()
+    else:
+        raise ValueError(f"Unsupported interface kind: {candidate.interface_kind}")
+    if not isinstance(module, torch.nn.Module):
+        raise RuntimeError(f"{candidate.identifier} did not construct {candidate.interface_kind}")
+    return module
+
+
 def primary_trainable_groups(
     model: torch.nn.Module,
     *,
     include_fusion: bool,
+    interface_module: torch.nn.Module | None = None,
+    interface_group_name: str = "fusion_block",
+    include_mm_projector: bool = True,
+    exclude_interface_prefix: str | None = None,
 ) -> dict[str, list[torch.nn.Parameter]]:
     """Return only trainable tensors reachable from the primary QA CE loss."""
     lora = [
@@ -355,11 +703,16 @@ def primary_trainable_groups(
         raise RuntimeError("SFT recipe requires a materialized mm_projector")
     groups: dict[str, list[torch.nn.Parameter]] = {"lora": lora}
     if include_fusion:
-        fusion = list(common.fusion_module(model).parameters())
+        module = interface_module if interface_module is not None else common.fusion_module(model)
+        fusion = [
+            parameter for name, parameter in module.named_parameters()
+            if exclude_interface_prefix is None or not name.startswith(exclude_interface_prefix)
+        ]
         if not fusion:
             raise RuntimeError("Candidate-specific fusion interface is unexpectedly empty")
-        groups["fusion_block"] = fusion
-    groups["mm_projector"] = list(projector.parameters())
+        groups[interface_group_name] = fusion
+    if include_mm_projector:
+        groups["mm_projector"] = list(projector.parameters())
     identities = [id(parameter) for parameters in groups.values() for parameter in parameters]
     if len(identities) != len(set(identities)):
         raise RuntimeError("Primary LoRA/interface/projector scopes must be disjoint")
@@ -413,15 +766,141 @@ def initialize_auxiliary_only_module(
     }
 
 
+def existing_auxiliary_only_module(
+    module: torch.nn.Module,
+    prefix: str | None,
+) -> dict[str, Any] | None:
+    if prefix is None:
+        return None
+    parameters = [
+        parameter for name, parameter in module.named_parameters() if name.startswith(prefix)
+    ]
+    if not parameters:
+        raise RuntimeError(f"Expected auxiliary-only interface prefix {prefix!r}, but it is empty")
+    return {
+        "module": prefix.rstrip("."),
+        "parameter_elements": common.parameter_count(parameters),
+        "devices": sorted({"meta" if p.is_meta else str(p.device) for p in parameters}),
+        "qa_reachable": False,
+        "primary_scope_included": False,
+        "primary_loss": "L_QA only",
+        "reason": "architecture auxiliary head is not reached by ordinary QA CE",
+    }
+
+
+def configure_architecture_runtime(
+    model: torch.nn.Module,
+    candidate: ArchitectureCandidateSpec,
+    artifact: dict[str, Any],
+    activation: dict[str, Any] | None,
+    *,
+    device: torch.device,
+) -> tuple[torch.nn.Module, dict[str, Any] | None, dict[str, Any] | None]:
+    interface = architecture_interface_module(model, candidate)
+    interface.to(device=device, dtype=torch.float16)
+    apply_c1_calibration_artifact(model, artifact)
+    if activation is not None:
+        apply_geometry_c1_calibration_artifact(model, activation)
+    selective_settings = None
+    if candidate.eomt_mode == "selective":
+        from llava.model.multimodal_eomt import configure_selective_kv_gate
+
+        selective_settings = configure_selective_kv_gate(model.get_model().config, enabled=True)
+    if candidate.identifier == "visual_geo_rope":
+        # The canonical architecture contains an auxiliary geometry head, but
+        # the shared primary comparison is strictly L_QA.
+        model.config.use_auxiliary_geometry_loss = False
+    auxiliary = existing_auxiliary_only_module(interface, candidate.auxiliary_only_prefix)
+    return interface, auxiliary, selective_settings
+
+
+def add_architecture_batch_inputs(
+    args: argparse.Namespace,
+    load_args: Any,
+    candidate: ArchitectureCandidateSpec,
+    record: dict[str, Any],
+    batch: dict[str, Any],
+    device: torch.device,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    evidence: dict[str, Any] = {
+        "geometry_spatial_features": False,
+        "geometry_point_map_shape": None,
+    }
+    if candidate.requires_geometry:
+        if "geometry_spatial_features" not in batch:
+            raise RuntimeError(
+                f"{candidate.identifier} requires its separate full-frame geometry sidecar"
+            )
+        geometry_point_maps = full_geometry_point_maps(
+            batch["geometry_spatial_features"],
+            load_args.geometry_point_map_key,
+            expected_frames=32,
+        )
+        evidence["geometry_spatial_features"] = True
+        evidence["geometry_point_map_shape"] = list(geometry_point_maps.shape)
+        # This is the same adapter contract used by the validated geometry
+        # feature extractor: Visual geo-RoPE consumes the full point map as
+        # visual-token positions, while GeoRoPE fusion reads the separately
+        # retained geometry_spatial_features payload.
+        if candidate.identifier == "visual_geo_rope":
+            batch["point_maps"] = geometry_point_maps
+    if "geometry_spatial_features" in batch:
+        batch["geometry_spatial_features"] = common.move_value(
+            batch["geometry_spatial_features"], device
+        )
+    if "point_maps" in batch:
+        batch["point_maps"] = common.move_value(batch["point_maps"], device)
+    eomt_payload = None
+    if candidate.eomt_mode is not None:
+        eomt_payload = load_eomt_consumer_cache(load_args, record)
+        if eomt_payload is None:
+            raise RuntimeError(f"{candidate.identifier} did not resolve its required EoMT cache")
+        batch["eomt_cached_outputs"] = [eomt_payload]
+        evidence["eomt_cache_scene"] = eomt_payload.get("scene_id")
+    return eomt_payload, evidence
+
+
+def architecture_forward_evidence(
+    model: torch.nn.Module,
+    candidate: ArchitectureCandidateSpec,
+    batch_evidence: dict[str, Any],
+) -> dict[str, Any]:
+    """Prove architecture-specific inputs were exercised by the shared QA forward."""
+    evidence = dict(batch_evidence)
+    if candidate.eomt_mode == "object":
+        debug = getattr(model, "_last_eomt_object_debug", None)
+        if not isinstance(debug, list) or not debug:
+            raise RuntimeError("Extra Object Token forward did not consume cached EoMT outputs")
+        selected = sum(int(item.get("selected_count", 0)) for item in debug)
+        inserted = sum(int(item.get("object_block_token_count", 0)) for item in debug)
+        if selected <= 0 or inserted <= 0:
+            raise RuntimeError("Extra Object Token forward selected no QA-reachable object tokens")
+        evidence["eomt_forward_debug_entries"] = len(debug)
+        evidence["eomt_selected_objects"] = selected
+        evidence["eomt_inserted_tokens"] = inserted
+    elif candidate.eomt_mode == "selective":
+        debug = getattr(model, "_last_eomt_selective_debug", None)
+        if not isinstance(debug, list) or len(debug) != 32:
+            raise RuntimeError("Selective fusion forward did not execute its 32-frame cached gate")
+        evidence["eomt_forward_debug_entries"] = len(debug)
+    return evidence
+
+
 def run_candidate(
     args: argparse.Namespace,
-    candidate: common.CandidateSpec | ExtensionCandidateSpec,
+    candidate: common.CandidateSpec | ExtensionCandidateSpec | ArchitectureCandidateSpec,
     specs: dict[str, common.CandidateSpec],
     provenance: dict[str, Any],
 ) -> dict[str, Any]:
+    architecture = candidate if isinstance(candidate, ArchitectureCandidateSpec) else None
     source = c1_source_candidate(candidate, specs)
     extension = candidate if isinstance(candidate, ExtensionCandidateSpec) else None
-    if source is None:
+    architecture_activation = None
+    if architecture is not None:
+        load_args, artifact, architecture_activation = architecture_load_args(
+            args, architecture, specs
+        )
+    elif source is None:
         load_args = base_load_args(args, specs[BASELINE_ID])
         artifact = None
     else:
@@ -445,7 +924,18 @@ def run_candidate(
         # intended SFT-trainable module to the direct A100 placement before
         # C1 calibration; do not alter any pretrained model weights or the
         # frozen-backbone placement.
-        if source is not None:
+        interface_module = None
+        architecture_auxiliary = None
+        selective_settings = None
+        if architecture is not None:
+            interface_module, architecture_auxiliary, selective_settings = configure_architecture_runtime(
+                model,
+                architecture,
+                artifact,
+                architecture_activation,
+                device=device,
+            )
+        elif source is not None:
             common.fusion_module(model).to(device=device, dtype=torch.float16)
             apply_c1_calibration_artifact(model, artifact)
         auxiliary_only = initialize_auxiliary_only_module(
@@ -460,7 +950,22 @@ def run_candidate(
             model.gradient_checkpointing_enable()
         model, lora_recipe = common.attach_intended_sft_lora(model, seed=args.rng_seed)
         lora_initialization = common.lora_initialization_summary(model)
-        groups = primary_trainable_groups(model, include_fusion=source is not None)
+        groups = primary_trainable_groups(
+            model,
+            include_fusion=source is not None or architecture is not None,
+            interface_module=interface_module,
+            interface_group_name=(
+                "geometry_aware_projection"
+                if architecture is not None and architecture.interface_kind == "geometry_aware_projection"
+                else "fusion_block"
+            ),
+            include_mm_projector=(
+                architecture.include_mm_projector if architecture is not None else True
+            ),
+            exclude_interface_prefix=(
+                architecture.auxiliary_only_prefix if architecture is not None else None
+            ),
+        )
         selected = common.configure_intended_sft_trainable_parameters(model, groups)
         residency = selected_residency(groups)
         if any(info["invalid_parameter_elements"] for info in residency.values()):
@@ -479,6 +984,12 @@ def run_candidate(
             raise RuntimeError(f"Expected exactly one calibration minibatch, got {len(records)}")
         record = records[0]
         batch = common.prepare_batch(dataset, collator, by_video[str(record["video_path"])], model, device, torch.float16)
+        eomt_payload = None
+        architecture_input_evidence: dict[str, Any] = {}
+        if architecture is not None:
+            eomt_payload, architecture_input_evidence = add_architecture_batch_inputs(
+                args, load_args, architecture, record, batch, device
+            )
         if source is None:
             forbidden = [key for key in ("spatial_features", "point_maps", "geometry_spatial_features") if key in batch]
             if forbidden:
@@ -495,13 +1006,21 @@ def run_candidate(
             raise RuntimeError(f"{candidate.identifier} primary scope did not pass: {scope['status']}")
         if not finite_scores(scope):
             raise RuntimeError(f"{candidate.identifier} produced non-finite proxy scores")
+        architecture_execution_evidence = (
+            architecture_forward_evidence(model, architecture, architecture_input_evidence)
+            if architecture is not None else None
+        )
         runtime = runtime_metadata(model)
         runtime["cpu_or_meta_offload"] = any(info["invalid_parameter_elements"] for info in residency.values())
         return {
             "schema_version": SCHEMA_VERSION,
             "candidate": {
                 **asdict(candidate),
-                "calibration_artifact": str(source.calibration_artifact) if source is not None else None,
+                "calibration_artifact": (
+                    str(architecture_c1_artifact(args, architecture, specs))
+                    if architecture is not None
+                    else str(source.calibration_artifact) if source is not None else None
+                ),
                 "c1_artifact_sha256": provenance["c1_artifacts"][candidate.identifier]["sha256"],
                 "post_sft_weights_loaded": False,
             },
@@ -520,11 +1039,24 @@ def run_candidate(
                 "actual_state": lora_initialization,
             },
             "scope_definition": (
-                "fresh LoRA + candidate-specific C1 fusion + mm_projector"
-                if source is not None else "fresh LoRA + mm_projector (plain Base VLM; no spatial interface)"
+                " + ".join(groups)
+                if source is not None or architecture is not None
+                else "fresh LoRA + mm_projector (plain Base VLM; no spatial interface)"
             ),
             "selected_residency": residency,
-            "auxiliary_only": auxiliary_only,
+            "auxiliary_only": architecture_auxiliary or auxiliary_only,
+            "architecture_runtime": {
+                "interface_kind": architecture.interface_kind if architecture is not None else None,
+                "mm_projector_in_primary_scope": architecture.include_mm_projector if architecture is not None else True,
+                "geometry_activation": provenance["c1_artifacts"][candidate.identifier].get("geometry_activation"),
+                "eomt_mode": architecture.eomt_mode if architecture is not None else None,
+                "eomt_cache_scene": eomt_payload.get("scene_id") if eomt_payload is not None else None,
+                "eomt_selective_settings": selective_settings,
+                "legacy_loader_schedule_placeholder": (
+                    getattr(load_args, "proxy_legacy_schedule_placeholder", None)
+                ),
+                "forward_evidence": architecture_execution_evidence,
+            },
             "primary_scope": scope,
             "wall_clock_seconds": wall_seconds,
             "no_training": {"optimizer_constructed": False, "optimizer_step_called": False, "parameter_updates": False},
@@ -607,24 +1139,30 @@ def flattened(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def analysis(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    vsi = [float(row["vsi_avg"]) for row in rows]
+    scored_rows = [row for row in rows if row.get("vsi_avg") is not None]
+    vsi = [float(row["vsi_avg"]) for row in scored_rows]
     metrics: dict[str, Any] = {}
     for name in ("gradnorm", "snip", "fisher"):
-        values = [float(row[name]) for row in rows]
+        values = [float(row[name]) for row in scored_rows]
         metrics[name] = {
             "spearman_rho": spearman(values, vsi), "kendall_tau_b": kendall_tau_b(values, vsi),
             "pairwise_ordering_accuracy": pairwise_accuracy(values, vsi),
-            "proxy_ranking_descending": [row["candidate"] for row in sorted(rows, key=lambda row: row[name], reverse=True)],
+            "proxy_ranking_descending": [row["candidate"] for row in sorted(scored_rows, key=lambda row: row[name], reverse=True)],
         }
     return {
-        "label": f"preliminary/pilot statistics; n={len(rows)}",
-        "vsi_ranking_descending": [row["candidate"] for row in sorted(rows, key=lambda row: row["vsi_avg"], reverse=True)],
+        "label": f"preliminary/pilot statistics; n={len(scored_rows)} with frozen VSI values",
+        "unscored_candidates": [row["candidate"] for row in rows if row.get("vsi_avg") is None],
+        "vsi_ranking_descending": [row["candidate"] for row in sorted(scored_rows, key=lambda row: row["vsi_avg"], reverse=True)],
         "metrics": metrics,
     }
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
-    keys = list(rows[0]) if rows else []
+    keys: list[str] = []
+    for row in rows:
+        for key in row:
+            if key not in keys:
+                keys.append(key)
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=keys)
         writer.writeheader(); writer.writerows(rows)
@@ -635,7 +1173,7 @@ def write_summary(path: Path, rows: list[dict[str, Any]], ranking: dict[str, Any
     for row in rows:
         lines.append(f"| {row['display_name']} | {row['selected_params']} | {row['gradient_covered_params']} | {row['ce_loss']:.8g} | {row['gradnorm']:.8g} | {row['snip']:.8g} | {row['fisher']:.8g} | {row['peak_vram_bytes']} | {row['runtime_seconds']:.3f} |")
     if ranking is not None:
-        lines.extend(["", "## Preliminary/pilot ranking analysis (n=5)", "", f"VSI ranking: `{', '.join(ranking['vsi_ranking_descending'])}`", "", "| Proxy | Spearman rho | Kendall tau-b | Pairwise ordering accuracy | Proxy ranking |", "|---|---:|---:|---:|---|"])
+        lines.extend(["", f"## {ranking['label']}", "", f"VSI ranking: `{', '.join(ranking['vsi_ranking_descending'])}`", "", "| Proxy | Spearman rho | Kendall tau-b | Pairwise ordering accuracy | Proxy ranking |", "|---|---:|---:|---:|---|"])
         for name, values in ranking["metrics"].items():
             lines.append(f"| {name} | {values['spearman_rho']:.6g} | {values['kendall_tau_b']:.6g} | {values['pairwise_ordering_accuracy']:.6g} | {', '.join(values['proxy_ranking_descending'])} |")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -661,16 +1199,20 @@ def main() -> None:
         print(json.dumps({"status": "PASS", "output_root": str(args.output_root)})); return
     results: list[dict[str, Any]] = []
     for identifier in args.candidate_ids:
-        candidate: common.CandidateSpec | ExtensionCandidateSpec = (
-            EXTENSION_CANDIDATES[identifier] if identifier in EXTENSION_CANDIDATES else specs[identifier]
-        )
+        candidate: common.CandidateSpec | ExtensionCandidateSpec | ArchitectureCandidateSpec
+        if identifier in ARCHITECTURE_CANDIDATES:
+            candidate = ARCHITECTURE_CANDIDATES[identifier]
+        elif identifier in EXTENSION_CANDIDATES:
+            candidate = EXTENSION_CANDIDATES[identifier]
+        else:
+            candidate = specs[identifier]
         result = run_candidate(args, candidate, specs, provenance)
         results.append(result)
         candidate_dir = args.output_root / "per_candidate" / identifier
         candidate_dir.mkdir(parents=True, exist_ok=False)
         write_json(candidate_dir / "provenance.json", result)
     rows = flattened(results)
-    ranking = analysis(rows) if args.mode in {"formal", "extension-formal"} else None
+    ranking = analysis(rows) if args.mode in {"formal", "extension-formal", "additional-formal"} else None
     payload = {"schema_version": SCHEMA_VERSION, "status": "PASS", "provenance": provenance, "results": results, "ranking_analysis": ranking}
     write_json(args.output_root / "results.json", payload)
     write_csv(args.output_root / "results.csv", rows)
