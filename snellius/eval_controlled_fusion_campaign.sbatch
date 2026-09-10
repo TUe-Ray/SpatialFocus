@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Official VSI-Bench evaluation array for the controlled B/C/D/E/H campaign.
-# Submit with TRAIN_ARRAY_JOB_ID and --dependency=aftercorr:<training-array-id>.
+# Submit each task with TRAIN_ARRAY_JOB_ID and
+# --dependency=afterany:<training-array-id>_<task-index>.  `afterany` only
+# releases the evaluation; the checkpoint-completeness gate below refuses to
+# evaluate a failed or partial training output.  This keeps a final model
+# evaluable when distributed teardown reports a non-zero Slurm state after all
+# training artifacts were durably saved.
 #SBATCH --job-name=eval_controlled_fusion_BCDEH
 #SBATCH --account=tesei2748
 #SBATCH --partition=gpu_a100
@@ -55,7 +60,7 @@ case "${CONTROLLED_FUSION_EVAL_CONFIG_ONLY:-False}" in
         exit 0
         ;;
 esac
-for required_file in config.json adapter_config.json non_lora_trainables.bin generation_config.json; do
+for required_file in config.json adapter_config.json non_lora_trainables.bin generation_config.json trainer_state.json checkpoint_milestones.json; do
     [[ -s "$PRETRAINED_LOCAL/$required_file" ]] || {
         echo "Missing or empty official checkpoint artifact: $PRETRAINED_LOCAL/$required_file" >&2
         exit 3
@@ -89,6 +94,62 @@ export HF_DATASETS_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export CUDA_HOME="${CUDA_HOME:?CUDA module did not set CUDA_HOME}"
 export TORCH_CUDA_ARCH_LIST=8.0
+
+# `afterany` handles the known multi-node torchrun teardown race, but must not
+# make an incomplete root checkpoint eligible for evaluation.  Validate the
+# final trainer state plus every immutable milestone before creating task files
+# or invoking the GPU evaluation wrapper.
+"$VLM3R_CONDA_PREFIX/bin/python" - "$PRETRAINED_LOCAL" <<'PY'
+import json
+import math
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+trainer_state = json.loads((root / "trainer_state.json").read_text(encoding="utf-8"))
+manifest = json.loads((root / "checkpoint_milestones.json").read_text(encoding="utf-8"))
+
+max_steps = manifest.get("max_steps")
+if not isinstance(max_steps, int) or max_steps <= 0:
+    raise SystemExit(f"invalid milestone max_steps: {max_steps!r}")
+if trainer_state.get("max_steps") != max_steps:
+    raise SystemExit(
+        "trainer/manifest max-step mismatch: "
+        f"trainer={trainer_state.get('max_steps')!r}, manifest={max_steps!r}"
+    )
+if trainer_state.get("global_step") != max_steps:
+    raise SystemExit(
+        "training did not reach its final optimizer step: "
+        f"global_step={trainer_state.get('global_step')!r}, expected={max_steps}"
+    )
+
+expected_ratios = (0.01, 0.05, 0.25, 0.50)
+entries = manifest.get("milestones")
+if not isinstance(entries, list) or len(entries) != len(expected_ratios):
+    raise SystemExit(f"unexpected milestone manifest: {manifest}")
+for entry, ratio in zip(entries, expected_ratios):
+    expected_step = math.ceil(ratio * max_steps)
+    expected_checkpoint = f"checkpoint-{expected_step}"
+    if entry.get("ratio") != ratio or entry.get("step") != expected_step:
+        raise SystemExit(
+            "milestone mismatch: "
+            f"expected ratio={ratio}, step={expected_step}; got {entry!r}"
+        )
+    if entry.get("checkpoint") != expected_checkpoint or entry.get("saved") is not True:
+        raise SystemExit(f"milestone was not durably saved: {entry!r}")
+    checkpoint = root / expected_checkpoint
+    for name in ("config.json", "adapter_config.json", "non_lora_trainables.bin", "trainer_state.json"):
+        if not (checkpoint / name).is_file():
+            raise SystemExit(f"missing milestone artifact: {checkpoint / name}")
+    if not any((checkpoint / name).is_file() for name in ("adapter_model.bin", "adapter_model.safetensors")):
+        raise SystemExit(f"missing milestone LoRA adapter: {checkpoint}")
+
+print(
+    "[CHECKPOINT COMPLETENESS PASS] "
+    f"root={root} global_step={max_steps} "
+    f"milestones={','.join(str(math.ceil(ratio * max_steps)) for ratio in expected_ratios)}"
+)
+PY
 
 JOB_TMP_ROOT="/scratch-local/${SLURM_JOB_ID}/controlled_fusion_eval_${ARRAY_INDEX}"
 export TMPDIR="$JOB_TMP_ROOT/tmp"
