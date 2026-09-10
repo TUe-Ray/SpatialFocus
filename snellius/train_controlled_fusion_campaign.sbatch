@@ -103,7 +103,7 @@ else
         export SPATIAL_FEATURES_SUBDIR=spatial_features
     else
         export SPATIAL_FEATURES_ROOT="$CUT3R_FEATURE_ROOT"
-        export SPATIAL_FEATURES_SUBDIR="6:$CUT3R_DEC6_ROOT:spatial_features,9:$CUT3R_DEC9_ROOT:spatial_features,12:$CUT3R_DEC12_ROOT:spatial_features"
+        export SPATIAL_FEATURES_SUBDIR="6:$CUT3R_DEC6_ROOT:spatial_features_dec_6,9:$CUT3R_DEC9_ROOT:spatial_features_dec_9,12:$CUT3R_DEC12_ROOT:spatial_features"
     fi
     # shellcheck source=/dev/null
     source "$REPO_DIR/train_reference_fusion_variant.sh"
@@ -132,9 +132,10 @@ export WEIGHT_DECAY=0.0
 export WARMUP_RATIO=0.03
 export LR_SCHEDULER_TYPE=cosine
 export LOGGING_STEPS=5
-# Eight workers per rank caused observed 16-rank CPU-cgroup OOMs. Two keeps
-# deterministic sample order and the optimizer recipe while bounding host RAM.
-export DATALOADER_NUM_WORKERS="${CONTROLLED_FUSION_DATALOADER_NUM_WORKERS:-2}"
+# Eight workers per rank caused observed 16-rank CPU-cgroup OOMs, while two
+# made sidecar-bound recovery runs too slow for their walltime. Four keeps
+# deterministic sample order while bounding host RAM and restoring overlap.
+export DATALOADER_NUM_WORKERS="${CONTROLLED_FUSION_DATALOADER_NUM_WORKERS:-4}"
 export DATALOADER_DROP_LAST=True
 export DATA_GROUP_BY_MODALITY_LENGTH=True
 export SPATIAL_RANK_LOSS_ENABLE=False
@@ -249,7 +250,11 @@ else
     export HF_DATASETS_OFFLINE=1
     export TRANSFORMERS_OFFLINE=1
     export CUDA_HOME="${CUDA_HOME:?CUDA module did not set CUDA_HOME}"
-    export TORCH_CUDA_ARCH_LIST=8.0
+    if [[ "${SLURM_JOB_PARTITION:-}" == gpu_h100 ]]; then
+        export TORCH_CUDA_ARCH_LIST=9.0
+    else
+        export TORCH_CUDA_ARCH_LIST=8.0
+    fi
     export NCCL_NVLS_ENABLE=0
     export HF_HOME HF_DATASETS_CACHE HUGGINGFACE_HUB_CACHE
     export WANDB_DIR="$VLM3R_LOG_ROOT/wandb"

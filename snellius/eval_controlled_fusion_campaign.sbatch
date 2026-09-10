@@ -132,7 +132,11 @@ export HF_HUB_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export CUDA_HOME="${CUDA_HOME:?CUDA module did not set CUDA_HOME}"
-export TORCH_CUDA_ARCH_LIST=8.0
+if [[ "${SLURM_JOB_PARTITION:-}" == gpu_h100 ]]; then
+    export TORCH_CUDA_ARCH_LIST=9.0
+else
+    export TORCH_CUDA_ARCH_LIST=8.0
+fi
 
 # `afterany` handles the known multi-node torchrun teardown race, but must not
 # make an incomplete checkpoint eligible for evaluation. A milestone eval only
@@ -273,7 +277,7 @@ if [[ "$CAMPAIGN_KIND" == controlled ]]; then
     export SPATIAL_FEATURES_SUBDIR="12:$CUT3R_DEC12_ROOT:spatial_features"
 else
     export SPATIAL_FEATURES_ROOT="$CUT3R_FEATURE_ROOT"
-    export SPATIAL_FEATURES_SUBDIR="6:$CUT3R_DEC6_ROOT:spatial_features;9:$CUT3R_DEC9_ROOT:spatial_features;12:$CUT3R_DEC12_ROOT:spatial_features"
+    export SPATIAL_FEATURES_SUBDIR="6:$CUT3R_DEC6_ROOT:spatial_features_dec_6;9:$CUT3R_DEC9_ROOT:spatial_features_dec_9;12:$CUT3R_DEC12_ROOT:spatial_features"
 fi
 export NUM_PROCESSES=4
 export BATCH_SIZE=1

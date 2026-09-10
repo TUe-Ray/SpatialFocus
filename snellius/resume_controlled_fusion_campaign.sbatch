@@ -11,7 +11,7 @@
 #SBATCH --cpus-per-task=72
 #SBATCH --exclusive
 #SBATCH --qos=normal
-#SBATCH --time=12:00:00
+#SBATCH --time=24:00:00
 #SBATCH --mem=0
 #SBATCH --output=/gpfs/home4/geusdd/shuang/SpatialFocus/logs/train/%x_%j.out
 #SBATCH --error=/gpfs/home4/geusdd/shuang/SpatialFocus/logs/train/%x_%j.err
