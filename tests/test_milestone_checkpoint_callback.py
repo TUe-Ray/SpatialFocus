@@ -54,6 +54,28 @@ def test_milestone_callback_uses_ceil_for_discrete_training_steps(tmp_path):
     assert list(callback.milestones) == [2, 6, 11]
 
 
+def test_milestone_callback_stops_only_after_protected_checkpoint_is_saved(tmp_path):
+    callback = MilestoneCheckpointCallback("0.01,0.05,0.25,0.50", stop_after_ratio=0.5)
+    args = _args(tmp_path, save_total_limit=4)
+    state = _state(max_steps=1622)
+    callback.on_train_begin(args, state, TrainerControl())
+
+    assert callback.stop_step == 811
+    state.global_step = 811
+    control = callback.on_step_end(args, state, TrainerControl())
+    assert control.should_save
+    assert not control.should_training_stop
+
+    (tmp_path / "checkpoint-811").mkdir()
+    control = callback.on_save(args, state, control)
+    assert control.should_training_stop
+
+
+def test_milestone_callback_rejects_stop_ratio_outside_save_plan():
+    with pytest.raises(ValueError, match="must be one of"):
+        MilestoneCheckpointCallback("0.01,0.05,0.25,0.50", stop_after_ratio=0.1)
+
+
 @pytest.mark.parametrize(
     ("save_strategy", "save_total_limit", "message"),
     [("steps", 3, "save_strategy no"), ("no", 2, "cannot preserve")],

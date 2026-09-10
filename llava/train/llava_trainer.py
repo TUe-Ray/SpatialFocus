@@ -130,7 +130,7 @@ class MilestoneCheckpointCallback(TrainerCallback):
 
     MANIFEST_NAME = "checkpoint_milestones.json"
 
-    def __init__(self, ratios):
+    def __init__(self, ratios, stop_after_ratio=0.0):
         super().__init__()
         if isinstance(ratios, str):
             ratios = [part.strip() for part in ratios.split(",") if part.strip()]
@@ -144,8 +144,14 @@ class MilestoneCheckpointCallback(TrainerCallback):
         if not parsed or any(not math.isfinite(ratio) or ratio <= 0.0 or ratio > 1.0 for ratio in parsed):
             raise ValueError("checkpoint_milestone_ratios must contain fractions in (0, 1].")
         self.ratios = sorted(set(parsed))
+        self.stop_after_ratio = float(stop_after_ratio or 0.0)
+        if self.stop_after_ratio and self.stop_after_ratio not in self.ratios:
+            raise ValueError(
+                "checkpoint_stop_after_ratio must be one of checkpoint_milestone_ratios."
+            )
         self.milestones = {}
         self.saved_steps = set()
+        self.stop_step = None
 
     def _manifest_path(self, args):
         return os.path.join(args.output_dir, self.MANIFEST_NAME)
@@ -187,9 +193,12 @@ class MilestoneCheckpointCallback(TrainerCallback):
 
         max_steps = int(state.max_steps)
         self.milestones = {}
+        self.stop_step = None
         for ratio in self.ratios:
             step = max(1, int(math.ceil(ratio * max_steps)))
             self.milestones.setdefault(step, []).append(ratio)
+            if ratio == self.stop_after_ratio:
+                self.stop_step = step
 
         required_slots = len(self.milestones)
         if args.save_total_limit is not None and int(args.save_total_limit) < required_slots:
@@ -226,6 +235,14 @@ class MilestoneCheckpointCallback(TrainerCallback):
             self._write_manifest(args, state)
             if state.is_world_process_zero:
                 print(f"[CHECKPOINT MILESTONE] saved checkpoint-{step}", flush=True)
+            if step == self.stop_step:
+                control.should_training_stop = True
+                if state.is_world_process_zero:
+                    print(
+                        f"[CHECKPOINT MILESTONE] stopping after protected checkpoint-{step}",
+                        flush=True,
+                    )
+        return control
 
     def on_train_end(self, args, state: TrainerState, control: TrainerControl, **kwargs):
         missing = [

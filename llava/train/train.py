@@ -623,6 +623,13 @@ class TrainingArguments(transformers.TrainingArguments):
             "for example '0.05,0.25,0.50'. Requires save_strategy=no."
         },
     )
+    checkpoint_stop_after_ratio: float = field(
+        default=0.0,
+        metadata={
+            "help": "Optional milestone ratio after whose protected checkpoint training stops. "
+            "The resolved full-run max_steps and LR schedule remain unchanged."
+        },
+    )
     negative_bottom_percent: float = field(default=30.0, metadata={"help": "Teacher-similarity bottom percent used as negative pool."})
     spatial_rank_head_path: str = field(default="", metadata={"help": "Optional path to a saved spatial_rank_head/P_geo state dict."})
     freeze_spatial_rank_head: bool = field(default=False, metadata={"help": "Freeze spatial_rank_head/P_geo parameters while keeping its forward pass differentiable."})
@@ -4393,7 +4400,12 @@ def train(attn_implementation=None):
     trainer.remove_callback(transformers.trainer_callback.PrinterCallback)
     trainer.add_callback(ProgressLoggerCallback())
     if training_args.checkpoint_milestone_ratios.strip():
-        trainer.add_callback(MilestoneCheckpointCallback(training_args.checkpoint_milestone_ratios))
+        trainer.add_callback(
+            MilestoneCheckpointCallback(
+                training_args.checkpoint_milestone_ratios,
+                stop_after_ratio=training_args.checkpoint_stop_after_ratio,
+            )
+        )
 
     # Resume logic: controlled by env var RESUME_CHECKPOINT_PATH (set in bash script).
     #   - "none" or not set  → fresh training

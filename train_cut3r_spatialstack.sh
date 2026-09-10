@@ -278,6 +278,7 @@ SAVE_TOTAL_LIMIT="${SAVE_TOTAL_LIMIT:-2}"
 SAVE_STRATEGY="${SAVE_STRATEGY:-steps}"
 SAVE_STEPS="${SAVE_STEPS:-100}"
 CHECKPOINT_MILESTONE_RATIOS="${CHECKPOINT_MILESTONE_RATIOS:-}"
+CHECKPOINT_STOP_AFTER_RATIO="${CHECKPOINT_STOP_AFTER_RATIO:-0.0}"
 LEARNING_RATE="${LEARNING_RATE:-2e-5}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-0.}"
 WARMUP_RATIO="${WARMUP_RATIO:-0.03}"
@@ -628,6 +629,7 @@ declare -A TRAINING_ARGS=(
     [save_strategy]="$SAVE_STRATEGY"
     [save_steps]="$SAVE_STEPS"
     [checkpoint_milestone_ratios]="$CHECKPOINT_MILESTONE_RATIOS"
+    [checkpoint_stop_after_ratio]="$CHECKPOINT_STOP_AFTER_RATIO"
     [learning_rate]="$LEARNING_RATE"
     [weight_decay]="$WEIGHT_DECAY"
     [warmup_ratio]="$WARMUP_RATIO"
@@ -701,12 +703,19 @@ elif [[ "$MODEL_FUSION_BLOCK" == "pre_projector_add" ]]; then
     assert_arg_value tune_fusion_block True
     assert_arg_value tune_mm_mlp_adapter True
     echo "[PRE_PROJECTOR_ADD] OK: CUT3R dec12 residual fusion enabled before mm_projector; fusion block and mm_projector are trainable."
-else
+elif is_true "$MODEL_USE_CUT3R_SPATIALSTACK"; then
     assert_arg_value use_cut3r_spatialstack True
     assert_arg_value tune_cut3r_spatialstack True
     assert_arg_value tune_fusion_block False
     assert_arg_value tune_mm_mlp_adapter False
     assert_no_torchrun_arg "--fusion_block"
+else
+    assert_arg_value use_cut3r_spatialstack False
+    assert_arg_value tune_cut3r_spatialstack False
+    assert_arg_value fusion_block cross_attention
+    assert_arg_value tune_fusion_block True
+    assert_arg_value tune_mm_mlp_adapter True
+    echo "[LEGACY VLM3R] OK: CUT3R cross-attention fusion and mm_projector are trainable; SpatialStack is disabled."
 fi
 assert_arg_value llm_visual_3d_rope_enable False
 assert_arg_value use_geometry_aware_projection False
@@ -717,7 +726,7 @@ assert_arg_value use_depth_supervision False
 if ! is_true "$MODEL_USE_POINTMAP_SUPERVISION"; then
     assert_arg_value use_pointmap_supervision False
 fi
-if [[ "$MODEL_FUSION_BLOCK" != "pre_projector_add" ]]; then
+if is_true "$MODEL_USE_CUT3R_SPATIALSTACK"; then
     echo "[SPATIALSTACK] OK: fusion_type=${MODEL_ARGS[cut3r_spatialstack_fusion_type]}; projector_binding=${MODEL_ARGS[cut3r_spatialstack_projector_binding]}; tune_fusion_block=False; use/tune_cut3r_spatialstack=True."
 fi
 

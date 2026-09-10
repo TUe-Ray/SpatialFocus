@@ -50,8 +50,12 @@ trap cleanup_on_failure EXIT TERM INT ERR
 DRY_RUN="${CONTROLLED_FUSION_DRY_RUN:-False}"
 SMOKE_RUN="${CONTROLLED_FUSION_SMOKE:-False}"
 RUN_NODES="$PRODUCTION_NODES"
+CAMPAIGN_KIND=controlled
 ARCH_IDS=(B C D E H)
-if [[ -n "${CONTROLLED_FUSION_ID:-}" ]]; then
+if [[ -n "${REFERENCE_FUSION_ID:-}" ]]; then
+    CAMPAIGN_KIND=reference_half
+    ARCH_ID="$REFERENCE_FUSION_ID"
+elif [[ -n "${CONTROLLED_FUSION_ID:-}" ]]; then
     ARCH_ID="$CONTROLLED_FUSION_ID"
 else
     ARRAY_INDEX="${SLURM_ARRAY_TASK_ID:?Set CONTROLLED_FUSION_ID or submit as an array task.}"
@@ -61,10 +65,17 @@ else
     fi
     ARCH_ID="${ARCH_IDS[$ARRAY_INDEX]}"
 fi
-case "$ARCH_ID" in
-    B|C|D|E|H) ;;
-    *) echo "Unsupported controlled-fusion architecture: $ARCH_ID" >&2; exit 2 ;;
-esac
+if [[ "$CAMPAIGN_KIND" == controlled ]]; then
+    case "$ARCH_ID" in
+        B|C|D|E|H) ;;
+        *) echo "Unsupported controlled-fusion architecture: $ARCH_ID" >&2; exit 2 ;;
+    esac
+else
+    case "$ARCH_ID" in
+        A|F|G) ;;
+        *) echo "Unsupported reference-fusion architecture: $ARCH_ID" >&2; exit 2 ;;
+    esac
+fi
 
 # Reuse the validated Snellius asset mapping, but execute the active feature
 # branch rather than the reference checkout.
@@ -74,13 +85,30 @@ REPO_DIR="$ACTIVE_REPO_DIR"
 export REPO_DIR
 SNELLIUS_CHECKPOINT_ROOT="$TRAIN_SAVE_ROOT"
 
-export CONTROLLED_FUSION_ID="$ARCH_ID"
-export CONTROLLED_FUSION_CONFIG_ONLY=True
-export SPATIAL_FEATURES_ROOT="$CUT3R_DEC12_ROOT"
-export SPATIAL_FEATURES_SUBDIR="12:$CUT3R_DEC12_ROOT:spatial_features"
-# shellcheck source=/dev/null
-source "$REPO_DIR/train_controlled_fusion_variant.sh"
-unset CONTROLLED_FUSION_CONFIG_ONLY
+if [[ "$CAMPAIGN_KIND" == controlled ]]; then
+    export CONTROLLED_FUSION_ID="$ARCH_ID"
+    export CONTROLLED_FUSION_CONFIG_ONLY=True
+    export SPATIAL_FEATURES_ROOT="$CUT3R_DEC12_ROOT"
+    export SPATIAL_FEATURES_SUBDIR="12:$CUT3R_DEC12_ROOT:spatial_features"
+    # shellcheck source=/dev/null
+    source "$REPO_DIR/train_controlled_fusion_variant.sh"
+    unset CONTROLLED_FUSION_CONFIG_ONLY
+else
+    export REFERENCE_FUSION_ID="$ARCH_ID"
+    export REFERENCE_FUSION_CONFIG_ONLY=True
+    if [[ "$ARCH_ID" == A ]]; then
+        # Legacy VLM3R expects the direct camera_tokens/patch_tokens payload,
+        # not the layered SpatialStack container.
+        export SPATIAL_FEATURES_ROOT="$CUT3R_DEC12_ROOT"
+        export SPATIAL_FEATURES_SUBDIR=spatial_features
+    else
+        export SPATIAL_FEATURES_ROOT="$CUT3R_FEATURE_ROOT"
+        export SPATIAL_FEATURES_SUBDIR="6:$CUT3R_DEC6_ROOT:spatial_features,9:$CUT3R_DEC9_ROOT:spatial_features,12:$CUT3R_DEC12_ROOT:spatial_features"
+    fi
+    # shellcheck source=/dev/null
+    source "$REPO_DIR/train_reference_fusion_variant.sh"
+    unset REFERENCE_FUSION_CONFIG_ONLY
+fi
 
 export LOCAL_MODEL_BASE LOCAL_SIGLIP DATA_ROOT
 export DATA_PATH_YAML="$REPO_DIR/snellius/vsibench_data.snellius.yaml"
@@ -109,6 +137,12 @@ export DATALOADER_DROP_LAST=True
 export DATA_GROUP_BY_MODALITY_LENGTH=True
 export SPATIAL_RANK_LOSS_ENABLE=False
 export CHECKPOINT_MILESTONE_RATIOS="$MILESTONE_RATIOS"
+if [[ "$CAMPAIGN_KIND" == reference_half ]]; then
+    # Stop only after checkpoint-811 has been protected.  The trainer still
+    # resolves the full 1622-step epoch, so LR/scheduler state matches a true
+    # 50% prefix of the official recipe.
+    export CHECKPOINT_STOP_AFTER_RATIO=0.50
+fi
 export SAVE_STRATEGY=no
 export SAVE_TOTAL_LIMIT=4
 export RESUME_MODE=fresh
@@ -154,7 +188,11 @@ else
         exit 2
     }
     RUN_TOKEN="${SLURM_ARRAY_JOB_ID:-${SLURM_JOB_ID:-dry}}_${SLURM_ARRAY_TASK_ID:-$ARCH_ID}"
-    export TRAIN_SAVE_ROOT="$SNELLIUS_CHECKPOINT_ROOT/controlled_fusion_official"
+    if [[ "$CAMPAIGN_KIND" == controlled ]]; then
+        export TRAIN_SAVE_ROOT="$SNELLIUS_CHECKPOINT_ROOT/controlled_fusion_official"
+    else
+        export TRAIN_SAVE_ROOT="$SNELLIUS_CHECKPOINT_ROOT/reference_fusion_half_official"
+    fi
     export TRAIN_RUN_NAME="official_${SUFFIX}_4n4g_16gpu_${RUN_TOKEN}"
     export MAX_STEPS=""
     export TRAIN_DATA_MAX_SAMPLES=""
@@ -225,6 +263,11 @@ fi
 for required_dir in "$LOCAL_MODEL_BASE" "$LOCAL_SIGLIP" "$DATA_ROOT" "$CUT3R_DEC12_ROOT"; do
     [[ -d "$required_dir" ]] || { echo "Missing required directory: $required_dir" >&2; exit 2; }
 done
+if [[ "$CAMPAIGN_KIND" == reference_half ]]; then
+    for required_dir in "$CUT3R_DEC6_ROOT" "$CUT3R_DEC9_ROOT"; do
+        [[ -d "$required_dir" ]] || { echo "Missing required reference sidecar directory: $required_dir" >&2; exit 2; }
+    done
+fi
 [[ -f "$DATA_PATH_YAML" ]] || { echo "Missing formal data YAML: $DATA_PATH_YAML" >&2; exit 2; }
 
 EXPECTED_WORLD_SIZE=$((RUN_NODES * GPUS_PER_NODE))
@@ -239,6 +282,7 @@ fi
 echo "[TOPOLOGY] nodes=$RUN_NODES gpus_per_node=$GPUS_PER_NODE world_size=$EXPECTED_WORLD_SIZE"
 echo "[BATCH] per_device=$PER_DEVICE_BATCH target_global=$TARGET_GLOBAL_BATCH gradient_accumulation=$EXPECTED_GRAD_ACCUM"
 echo "[ARCH] id=$ARCH_ID suffix=$SUFFIX output=$OUTPUT_DIR"
+echo "[CAMPAIGN] kind=$CAMPAIGN_KIND stop_after_ratio=${CHECKPOINT_STOP_AFTER_RATIO:-none}"
 echo "[ARCH] layers=$MODEL_CUT3R_SPATIALSTACK_LAYERS llm_layers=$MODEL_CUT3R_SPATIALSTACK_LLM_LAYERS fusion=${MODEL_CUT3R_SPATIALSTACK_FUSION_TYPE:-none} projector_binding=$MODEL_CUT3R_SPATIALSTACK_PROJECTOR_BINDING tune_fusion=$MODEL_TUNE_FUSION_BLOCK tune_mm=$MODEL_TUNE_MM_MLP_ADAPTER"
 
 python - "$DATA_PATH_YAML" "$EXPECTED_WORLD_SIZE" "$EXPECTED_GRAD_ACCUM" \
