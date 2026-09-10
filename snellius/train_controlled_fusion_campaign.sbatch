@@ -132,7 +132,9 @@ export WEIGHT_DECAY=0.0
 export WARMUP_RATIO=0.03
 export LR_SCHEDULER_TYPE=cosine
 export LOGGING_STEPS=5
-export DATALOADER_NUM_WORKERS=8
+# Eight workers per rank caused observed 16-rank CPU-cgroup OOMs. Two keeps
+# deterministic sample order and the optimizer recipe while bounding host RAM.
+export DATALOADER_NUM_WORKERS="${CONTROLLED_FUSION_DATALOADER_NUM_WORKERS:-2}"
 export DATALOADER_DROP_LAST=True
 export DATA_GROUP_BY_MODALITY_LENGTH=True
 export SPATIAL_RANK_LOSS_ENABLE=False
@@ -145,7 +147,8 @@ if [[ "$CAMPAIGN_KIND" == reference_half ]]; then
 fi
 export SAVE_STRATEGY=no
 export SAVE_TOTAL_LIMIT=4
-export RESUME_MODE=fresh
+export RESUME_MODE="${CONTROLLED_FUSION_RESUME_MODE:-fresh}"
+export RESUME_CHECKPOINT_PATH="${CONTROLLED_FUSION_RESUME_CHECKPOINT_PATH:-none}"
 export REQUIRE_SPATIAL_FEATURES=True
 export STRICT_VIDEO_LOADING=True
 export TRAIN_DATA_SHUFFLE=True
@@ -187,7 +190,7 @@ else
         echo "Official campaign training must be launched by Slurm." >&2
         exit 2
     }
-    RUN_TOKEN="${SLURM_ARRAY_JOB_ID:-${SLURM_JOB_ID:-dry}}_${SLURM_ARRAY_TASK_ID:-$ARCH_ID}"
+    RUN_TOKEN="${CONTROLLED_FUSION_RUN_TOKEN_OVERRIDE:-${SLURM_ARRAY_JOB_ID:-${SLURM_JOB_ID:-dry}}_${SLURM_ARRAY_TASK_ID:-$ARCH_ID}}"
     if [[ "$CAMPAIGN_KIND" == controlled ]]; then
         export TRAIN_SAVE_ROOT="$SNELLIUS_CHECKPOINT_ROOT/controlled_fusion_official"
     else
@@ -211,10 +214,21 @@ else
         echo "Expected $RUN_NODES allocated nodes, got ${SLURM_JOB_NUM_NODES:-unset}." >&2
         exit 2
     }
-    [[ ! -e "$OUTPUT_DIR" ]] || {
-        echo "Refusing to overwrite existing output: $OUTPUT_DIR" >&2
-        exit 2
-    }
+    if [[ "$RESUME_MODE" == continue ]]; then
+        [[ -d "$OUTPUT_DIR" ]] || {
+            echo "Resume output directory does not exist: $OUTPUT_DIR" >&2
+            exit 2
+        }
+        [[ "$RESUME_CHECKPOINT_PATH" != none && -d "$RESUME_CHECKPOINT_PATH" ]] || {
+            echo "Resume checkpoint does not exist: $RESUME_CHECKPOINT_PATH" >&2
+            exit 2
+        }
+    else
+        [[ ! -e "$OUTPUT_DIR" ]] || {
+            echo "Refusing to overwrite existing output: $OUTPUT_DIR" >&2
+            exit 2
+        }
+    fi
 
     module purge
     module load 2023
