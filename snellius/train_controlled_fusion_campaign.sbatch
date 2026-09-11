@@ -133,9 +133,9 @@ export WARMUP_RATIO=0.03
 export LR_SCHEDULER_TYPE=cosine
 export LOGGING_STEPS=5
 # Eight workers per rank caused observed 16-rank CPU-cgroup OOMs, while two
-# made sidecar-bound recovery runs too slow for their walltime. Four keeps
-# deterministic sample order while bounding host RAM and restoring overlap.
-export DATALOADER_NUM_WORKERS="${CONTROLLED_FUSION_DATALOADER_NUM_WORKERS:-4}"
+# made sidecar-bound recovery runs too slow for their walltime. Six preserves
+# more sidecar I/O overlap while retaining headroom below the failed setting.
+export DATALOADER_NUM_WORKERS="${CONTROLLED_FUSION_DATALOADER_NUM_WORKERS:-6}"
 export DATALOADER_DROP_LAST=True
 export DATA_GROUP_BY_MODALITY_LENGTH=True
 export SPATIAL_RANK_LOSS_ENABLE=False
