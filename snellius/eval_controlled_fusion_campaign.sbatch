@@ -224,9 +224,12 @@ expected = {
     "tune_mm_mlp_adapter": True,
 }
 for key, value in expected.items():
-    if config.get(key) != value:
+    # Legacy VLM3R configs predate the explicit SpatialStack flag; absence is
+    # the backward-compatible False value used by model construction.
+    actual = config.get(key, False) if key == "use_cut3r_spatialstack" else config.get(key)
+    if actual != value:
         raise SystemExit(
-            f"reference A config mismatch {key}: expected={value!r}, got={config.get(key)!r}"
+            f"reference A config mismatch {key}: expected={value!r}, got={actual!r}"
         )
 print("[REFERENCE A CONFIG PASS] legacy CUT3R cross-attention topology verified")
 PY
