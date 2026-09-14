@@ -181,17 +181,33 @@ def load_selected_camera_depths(
 
 
 def assert_baseline_or_zero_spatial_forward_contract(model: torch.nn.Module) -> None:
-    """Reject checkpoints that need full point-map geometry at model forward."""
+    """Accept only sidecar-backed post-SFT forwards supported by local probing.
+
+    The historical name is retained because existing baseline/zero-spatial
+    runners import it.  Controlled pre-projector Add is also safe here: it
+    consumes the same full 32-frame CUT3R token sidecar as legacy fusion and
+    does not require full point-map geometry.
+    """
     config = model.config
     fusion_block = str(getattr(config, "fusion_block", "") or "").strip().lower()
     spatial_tower = str(getattr(config, "spatial_tower", getattr(config, "mm_spatial_tower", "")) or "").lower()
     use_cut3r_spatialstack = getattr(config, "use_cut3r_spatialstack", False)
     if isinstance(use_cut3r_spatialstack, str):
         use_cut3r_spatialstack = use_cut3r_spatialstack.lower() in {"1", "true", "yes", "y", "on"}
-    if "cut3r" not in spatial_tower or (fusion_block != "cross_attention" and not bool(use_cut3r_spatialstack)):
+    pre_projector_add = (
+        fusion_block == "pre_projector_add"
+        and int(getattr(config, "pre_projector_add_source_layer", -1)) == 12
+        and not bool(use_cut3r_spatialstack)
+    )
+    supported_token_fusion = (
+        fusion_block == "cross_attention"
+        or bool(use_cut3r_spatialstack)
+        or pre_projector_add
+    )
+    if "cut3r" not in spatial_tower or not supported_token_fusion:
         raise RuntimeError(
-            "The local compact-target adapter supports CUT3R cross_attention or explicit "
-            "CUT3R SpatialStack forward contracts, "
+            "The local compact-target adapter supports CUT3R cross_attention, "
+            "controlled pre_projector_add(dec12), or explicit CUT3R SpatialStack forwards, "
             f"got fusion_block={fusion_block!r}, spatial_tower={spatial_tower!r}, "
             f"use_cut3r_spatialstack={use_cut3r_spatialstack!r}."
         )
