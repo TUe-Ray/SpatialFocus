@@ -4,6 +4,12 @@
 # probe metrics/checkpoints/provenance pass completeness verification.
 set -euo pipefail
 
+export PATH="/home/shaoruei/miniconda3/bin:${PATH:-}"
+if [[ -f /home/shaoruei/miniconda3/etc/profile.d/conda.sh ]]; then
+  # shellcheck disable=SC1091
+  source /home/shaoruei/miniconda3/etc/profile.d/conda.sh
+fi
+
 MODE="${1:-}"
 CANDIDATE="${2:-}"
 if [[ ! "$MODE" =~ ^(preflight|smoke-one|smoke-all|run-one|run-all|summarize|status)$ ]]; then
