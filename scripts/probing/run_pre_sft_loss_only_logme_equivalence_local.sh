@@ -5,6 +5,11 @@
 set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-/home/shaoruei/SpatialFocus}"
+export PATH="/home/shaoruei/miniconda3/bin:${PATH:-}"
+if [[ -f /home/shaoruei/miniconda3/etc/profile.d/conda.sh ]]; then
+  # shellcheck disable=SC1091
+  source /home/shaoruei/miniconda3/etc/profile.d/conda.sh
+fi
 ENV_NAME="${ENV_NAME:-vlm3r}"
 CUDA_DEVICES="${CUDA_DEVICES:-0,1}"
 BASE_MODEL="/mnt/DATA_SSD/shaoruei/models/base/LLaVA-NeXT-Video-7B-Qwen2"

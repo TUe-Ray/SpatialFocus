@@ -4,6 +4,11 @@
 set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-/home/shaoruei/SpatialFocus}"
+export PATH="/home/shaoruei/miniconda3/bin:${PATH:-}"
+if [[ -f /home/shaoruei/miniconda3/etc/profile.d/conda.sh ]]; then
+  # shellcheck disable=SC1091
+  source /home/shaoruei/miniconda3/etc/profile.d/conda.sh
+fi
 BLOCKING_UNIT="${BLOCKING_UNIT:-spatialfocus-controlled-fusion-post-sft-depth.service}"
 LOG_DIR="$REPO_ROOT/logs/pre_sft_logme_proxy_remaining_diagnostics_v1"
 QUEUE_LOG="$LOG_DIR/queue.log"
