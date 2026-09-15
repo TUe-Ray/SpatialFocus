@@ -1604,6 +1604,7 @@ def assert_first_post_sft_geometry_runtime(
     if architecture == "eomt_selective" and isinstance(eomt_object_indices, torch.Tensor) and eomt_object_indices.numel():
         raise RuntimeError("eomt_selective must not append EoMT auxiliary sequence tokens")
     expected_pre_llm_shapes = {
+        "siglip_output": (32, 196, 1152),
         "fusion_output": (32, 196, 1152),
         "projected_features": (32, 196, 3584),
     }
