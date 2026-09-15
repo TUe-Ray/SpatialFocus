@@ -87,7 +87,14 @@ else
 fi
 
 if [[ "$ARCH_ID" == A_prime && "${FUSION_EXPECTED_MAX_STEPS:-1622}" == 1 ]]; then
-    TRAIN_OUTPUT_ROOT="$TRAIN_SAVE_ROOT/controlled_fusion_smoke/SMOKE_${SUFFIX}_4n4g_16gpu_${TRAIN_ARRAY_JOB_ID}"
+    SMOKE_NODES="${FUSION_SMOKE_NODES:-4}"
+    [[ "$SMOKE_NODES" =~ ^[1-9][0-9]*$ ]] || {
+        echo "FUSION_SMOKE_NODES must be a positive integer, got: $SMOKE_NODES" >&2
+        exit 2
+    }
+    SMOKE_GPUS_PER_NODE=4
+    SMOKE_WORLD_SIZE=$((SMOKE_NODES * SMOKE_GPUS_PER_NODE))
+    TRAIN_OUTPUT_ROOT="$TRAIN_SAVE_ROOT/controlled_fusion_smoke/SMOKE_${SUFFIX}_${SMOKE_NODES}n${SMOKE_GPUS_PER_NODE}g_${SMOKE_WORLD_SIZE}gpu_${TRAIN_ARRAY_JOB_ID}"
     CAMPAIGN_EVAL_ROOT=controlled_fusion_smoke
 else
     TRAIN_OUTPUT_ROOT="$CAMPAIGN_CHECKPOINT_ROOT/official_${SUFFIX}_4n4g_16gpu_${TRAIN_ARRAY_JOB_ID}_${TASK_TOKEN}"
