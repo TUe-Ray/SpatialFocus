@@ -25,6 +25,7 @@ CACHE_ROOT="${CACHE_ROOT:-/scratch-shared/shuang/legacy_pre_sft_completion_a100_
 DURABLE_ROOT="${DURABLE_ROOT:-/home/shuang/proxy_outputs/legacy_pre_sft_completion_a100_v1}"
 LOG_ROOT="${LOG_ROOT:-$DURABLE_ROOT/logs}"
 ARTIFACT_MANIFEST="$DURABLE_ROOT/provenance/artifact_manifest.json"
+INPUT_COVERAGE="$DURABLE_ROOT/provenance/input_coverage.json"
 SMOKE_MANIFEST="$DURABLE_ROOT/provenance/smoke_1train_1val.json"
 SMOKE_MARKER="$DURABLE_ROOT/provenance/smoke_verification.json"
 CANDIDATES="SSCROSS VLM3R GEOROPE SELECTIVE"
@@ -57,29 +58,16 @@ require_clean_commit() {
   [[ -z "$(git -C "$REPO_ROOT" status --porcelain)" ]] || { echo "Formal completion requires a clean worktree" >&2; exit 1; }
 }
 
-require_count() {
-  local directory="$1" expected="$2" actual
-  [[ -d "$directory" ]] || { echo "Missing input directory: $directory" >&2; exit 1; }
-  actual="$(find "$directory" -maxdepth 1 -type f -name '*.pt' | wc -l)"
-  [[ "$actual" -eq "$expected" ]] || { echo "Expected $expected .pt inputs at $directory, found $actual" >&2; exit 1; }
-}
-
 require_inputs() {
   local id c1 forbidden
   [[ -x "$PYTHON" ]] || { echo "Missing proxy Python: $PYTHON" >&2; exit 1; }
   for c1 in "$BASE_MODEL/config.json" "$SIGLIP_MODEL/config.json" "$SAMPLE_INDICES" "$DATA_YAML"; do
     [[ -f "$c1" ]] || { echo "Missing required input: $c1" >&2; exit 1; }
   done
-  require_count "$FORWARD_ROOT/frames/scannet" 1199
-  require_count "$TARGET_ROOT/targets/scannet/spatial_features_points" 1199
-  require_count "$FEATURE_ROOT/scannet/spatial_features" 1199
-  require_count "$FEATURE_ROOT/scannet/spatial_features_dec_6" 1199
-  require_count "$FEATURE_ROOT/scannet/spatial_features_dec_9" 1199
-  require_count "$GEOMETRY_ROOT/scannet/spatial_features_points" 1199
-  require_count "$EOMT_ROOT/class_logits/scannet" 1199
-  require_count "$EOMT_ROOT/object_masks/scannet" 1199
-  require_count "$EOMT_ROOT/selective_masks/scannet" 1199
-  [[ -f "$EOMT_ROOT/validation.json" && -f "$EOMT_ROOT/checksums.json" ]] || { echo "Missing EoMT validation/checksum manifest" >&2; exit 1; }
+  run "$PYTHON" -u "$REPO_ROOT/scripts/probing/verify_legacy_pre_sft_completion_inputs.py" \
+    --sample-indices "$SAMPLE_INDICES" --forward-root "$FORWARD_ROOT" --target-root "$TARGET_ROOT" \
+    --feature-root "$FEATURE_ROOT" --geometry-root "$GEOMETRY_ROOT" --eomt-root "$EOMT_ROOT" \
+    --output "$INPUT_COVERAGE" --reuse-existing
   for id in $CANDIDATES; do
     c1="$(candidate_field "$id" c1)"
     [[ -f "$c1" ]] || { echo "Missing C1 artifact for $id: $c1" >&2; exit 1; }
@@ -104,6 +92,7 @@ preflight() {
   run "$PYTHON" -m py_compile \
     "$REPO_ROOT/scripts/probing/legacy_pre_sft_completion_specs.py" \
     "$REPO_ROOT/scripts/probing/prepare_legacy_pre_sft_completion.py" \
+    "$REPO_ROOT/scripts/probing/verify_legacy_pre_sft_completion_inputs.py" \
     "$REPO_ROOT/scripts/probing/verify_legacy_pre_sft_completion_smoke.py" \
     "$REPO_ROOT/scripts/probing/summarize_legacy_pre_sft_completion.py"
   "$PYTHON" - <<'PY'
