@@ -76,41 +76,64 @@ elif [[ "$KEY" == "visual_geo_rope" ]]; then
 fi
 
 mkdir -p "$FULL_ROOT" "$LOG_DIR"
-echo "[RUN] key=$KEY GPUs=$CUDA_DEVICES cache=$FULL_ROOT output=$OUTPUT_DIR"
-env CUDA_VISIBLE_DEVICES="$CUDA_DEVICES" conda run --no-capture-output -n "$ENV_NAME" python -u \
-  "${PROGRAM[@]}" \
-  --model-loading-mode pre_sft_fusion \
-  --pre-sft-fusion-variant "$VARIANT" \
-  --c1-calibration-json "$C1_ARTIFACT" \
-  --model-label "$LABEL" \
-  --model-path "$BASE_MODEL" \
-  --siglip-path "$SIGLIP_MODEL" \
-  --feature-levels "$FULL_FEATURES" \
-  --output-root "$FULL_ROOT" \
-  --sample-indices "$SAMPLE_INDICES" \
-  --train-data-json "$LOCAL_DATA" \
-  --feature-root "$CUT3R_ROOT" \
-  --spatial-features-subdir "$SPATIAL_SUBDIR" \
-  --forward-frames-root "$FORWARD_ROOT" \
-  --probe-targets-root "$TARGET_ROOT" \
-  --image-folder "$FORWARD_ROOT" \
-  --video-folder "$FORWARD_ROOT" \
-  --frames-upbound 32 \
-  --device cuda:0 \
-  --device-map auto \
-  --dtype float16 \
-  --cache-dtype float16 \
-  --runtime-root "$FULL_ROOT/runtime" \
-  --pre-sft-gpu-weight-budget 4GiB \
-  --pre-sft-cpu-offload-budget 45GiB \
-  --assert-first-video \
-  --resume \
-  "${EXTRA_ARGS[@]}" 2>&1 | tee "$LOG_DIR/${KEY}_extraction.log"
+RESULT_COMPLETE=false
+if [[ -f "$OUTPUT_DIR/source_provenance_${KEY}.json" && -f "$OUTPUT_DIR/logme_summary.json" ]] && \
+  jq -e --arg model_label "$LABEL" '
+    (.protocol.schema_version == "pre_sft_logme_proxy_remaining_diagnostics_v1")
+    and (.protocol.primary_layers == [1, 3, 6, 9, 15, 21, 27])
+    and (.protocol.dtype == "float64")
+    and (.protocol.training_videos == 1006)
+    and (.protocol.training_frames == 2012)
+    and (.protocol.formal_target_signature == "b48e025fefb19e5d7414d2d540b9904a4e21d6de883552699d5e4dc194956d37")
+    and (([.scores[] | select(
+      .architecture == $model_label
+      and .common7_mean_logme != null
+      and .valid_tokens_per_layer == 394352
+      and .training_videos == 1006
+      and .target_signature == "b48e025fefb19e5d7414d2d540b9904a4e21d6de883552699d5e4dc194956d37"
+    )] | length) == 1)
+  ' "$OUTPUT_DIR/logme_summary.json" >/dev/null; then
+  RESULT_COMPLETE=true
+  echo "[REUSE] complete provenance-verified Common-7 result: $KEY/$LABEL"
+fi
 
-env CUDA_VISIBLE_DEVICES=0 conda run --no-capture-output -n "$ENV_NAME" python -u \
-  "$REPO_ROOT/scripts/probing/run_pre_sft_logme_remaining_diagnostics.py" \
-  --candidate "$KEY" --output-dir "$OUTPUT_DIR" --device cuda:0 --block-frames 8 \
-  2>&1 | tee "$LOG_DIR/${KEY}_logme.log"
+if [[ "$RESULT_COMPLETE" != true ]]; then
+  echo "[RUN] key=$KEY GPUs=$CUDA_DEVICES cache=$FULL_ROOT output=$OUTPUT_DIR"
+  env CUDA_VISIBLE_DEVICES="$CUDA_DEVICES" conda run --no-capture-output -n "$ENV_NAME" python -u \
+    "${PROGRAM[@]}" \
+    --model-loading-mode pre_sft_fusion \
+    --pre-sft-fusion-variant "$VARIANT" \
+    --c1-calibration-json "$C1_ARTIFACT" \
+    --model-label "$LABEL" \
+    --model-path "$BASE_MODEL" \
+    --siglip-path "$SIGLIP_MODEL" \
+    --feature-levels "$FULL_FEATURES" \
+    --output-root "$FULL_ROOT" \
+    --sample-indices "$SAMPLE_INDICES" \
+    --train-data-json "$LOCAL_DATA" \
+    --feature-root "$CUT3R_ROOT" \
+    --spatial-features-subdir "$SPATIAL_SUBDIR" \
+    --forward-frames-root "$FORWARD_ROOT" \
+    --probe-targets-root "$TARGET_ROOT" \
+    --image-folder "$FORWARD_ROOT" \
+    --video-folder "$FORWARD_ROOT" \
+    --frames-upbound 32 \
+    --device cuda:0 \
+    --device-map auto \
+    --dtype float16 \
+    --cache-dtype float16 \
+    --runtime-root "$FULL_ROOT/runtime" \
+    --pre-sft-gpu-weight-budget 4GiB \
+    --pre-sft-cpu-offload-budget 45GiB \
+    --assert-first-video \
+    --resume \
+    "${EXTRA_ARGS[@]}" 2>&1 | tee "$LOG_DIR/${KEY}_extraction.log"
+
+  env CUDA_VISIBLE_DEVICES=0 conda run --no-capture-output -n "$ENV_NAME" python -u \
+    "$REPO_ROOT/scripts/probing/run_pre_sft_logme_remaining_diagnostics.py" \
+    --candidate "$KEY" --output-dir "$OUTPUT_DIR" --device cuda:0 --block-frames 8 \
+    2>&1 | tee "$LOG_DIR/${KEY}_logme.log"
+fi
 
 test -f "$OUTPUT_DIR/source_provenance_${KEY}.json"
 jq -e --arg model_label "$LABEL" '
