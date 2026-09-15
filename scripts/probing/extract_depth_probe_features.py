@@ -252,29 +252,46 @@ def git_metadata() -> dict[str, Any]:
     }
 
 
+def json_ready_device_metadata(value: Any) -> Any:
+    """Preserve placement structure while canonicalizing torch.device leaves."""
+    if isinstance(value, torch.device):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): json_ready_device_metadata(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_ready_device_metadata(item) for item in value]
+    return value
+
+
 def model_placement_metadata(model: torch.nn.Module) -> dict[str, Any]:
     device_map = getattr(model, "hf_device_map", None)
     if isinstance(device_map, dict):
         values = [str(value) for value in device_map.values()]
+        serializable_device_map = json_ready_device_metadata(device_map)
         cpu_keys = sorted(str(key) for key, value in device_map.items() if str(value) in {"cpu", "disk"})
         gpu_keys = sorted(str(key) for key, value in device_map.items() if str(value).startswith("cuda") or str(value).isdigit())
     else:
         values, cpu_keys, gpu_keys = [], [], []
+        serializable_device_map = json_ready_device_metadata(device_map)
     backend = (
         getattr(model.config, "_attn_implementation", None)
         or getattr(model.config, "_attn_implementation_internal", None)
         or getattr(model.config, "attn_implementation", None)
     )
-    effective_device_map = dict(device_map) if isinstance(device_map, dict) else device_map
-    effective_vision_placement = getattr(model, "_pre_sft_vision_placement", None)
+    effective_device_map = dict(serializable_device_map) if isinstance(serializable_device_map, dict) else serializable_device_map
+    effective_vision_placement = json_ready_device_metadata(
+        getattr(model, "_pre_sft_vision_placement", None)
+    )
     if isinstance(effective_device_map, dict) and isinstance(effective_vision_placement, dict):
         effective_device = effective_vision_placement.get("vision_tower_effective_device")
         if effective_device:
-            effective_device_map["model.vision_tower"] = effective_device
+            effective_device_map["model.vision_tower"] = str(effective_device)
     return {
-        "hf_device_map": device_map,
+        "hf_device_map": serializable_device_map,
         "effective_hf_device_map": effective_device_map,
-        "effective_placement_policy": getattr(model, "_pre_sft_placement_policy", None),
+        "effective_placement_policy": json_ready_device_metadata(
+            getattr(model, "_pre_sft_placement_policy", None)
+        ),
         "effective_vision_placement": effective_vision_placement,
         "cpu_offload_used": bool(cpu_keys),
         "cpu_or_disk_modules": cpu_keys,
