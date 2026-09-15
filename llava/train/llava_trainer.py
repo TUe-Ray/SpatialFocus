@@ -518,6 +518,8 @@ class LLaVATrainer(Trainer):
         self._cut3r_token_only_optimizer_evidence = {}
         self._controlled_fusion_optimizer_hook_installed = False
         self._controlled_fusion_optimizer_evidence = {}
+        self._controlled_fusion_gradient_observations = {}
+        self._controlled_fusion_gradient_hook_handles = []
         self.add_callback(Cut3RTokenOnlyOptimizerTelemetryCallback(self))
 
     def _cut3r_token_only_base_model(self):
@@ -764,6 +766,14 @@ class LLaVATrainer(Trainer):
     def _controlled_fusion_named_parameter_groups(self):
         named_parameters = sorted(self.model.named_parameters(), key=lambda item: item[0])
 
+        def evenly_bounded(items, limit):
+            if len(items) <= limit:
+                return list(items)
+            if limit == 1:
+                return [items[len(items) // 2]]
+            indices = [round(index * (len(items) - 1) / (limit - 1)) for index in range(limit)]
+            return [items[index] for index in indices]
+
         def bounded_sample(fragment):
             candidates = [
                 (name, parameter)
@@ -771,16 +781,58 @@ class LLaVATrainer(Trainer):
                 if fragment in name and parameter.requires_grad
             ]
             weights = [item for item in candidates if item[0].endswith("weight")]
-            candidates = weights or candidates
-            if len(candidates) <= 6:
-                return candidates
-            middle = len(candidates) // 2
-            return [*candidates[:2], *candidates[middle : middle + 2], *candidates[-2:]]
+            non_weights = [item for item in candidates if not item[0].endswith("weight")]
+            # Include bias/norm scalars as well as representative matrices. A
+            # single 2e-5 BF16 update can round back to the same value for a
+            # normally initialised weight, whereas zero-initialised biases
+            # retain the same real optimizer update. This remains a bounded
+            # diagnostic sample and does not alter optimizer membership.
+            return evenly_bounded(weights, 3) + evenly_bounded(non_weights, 3)
 
         return {
             "fusion": bounded_sample("fusion_block"),
             "mm_projector": bounded_sample("mm_projector"),
         }
+
+    def _record_controlled_fusion_gradient(self, group_name, parameter_name, gradient):
+        sample = gradient.detach().reshape(-1)[: min(int(gradient.numel()), 256)].float()
+        observation = self._controlled_fusion_gradient_observations[group_name]
+        observation["gradient_sq"] += float(sample.square().sum().item())
+        observation["gradient_finite"] = bool(
+            observation["gradient_finite"] and torch.isfinite(sample).all().item()
+        )
+        observation["gradient_nonzero"] = bool(
+            observation["gradient_nonzero"] or sample.abs().sum().item() > 0.0
+        )
+        observation["seen_parameter_names"].add(parameter_name)
+        return gradient
+
+    def _install_controlled_fusion_gradient_hooks(self, groups):
+        if self._controlled_fusion_gradient_hook_handles:
+            return
+        self._controlled_fusion_gradient_observations = {
+            group_name: {
+                "gradient_sq": 0.0,
+                "gradient_finite": True,
+                "gradient_nonzero": False,
+                "seen_parameter_names": set(),
+            }
+            for group_name in groups
+        }
+        for group_name, parameters in groups.items():
+            for parameter_name, parameter in parameters:
+                def record_gradient(gradient, group=group_name, name=parameter_name):
+                    return self._record_controlled_fusion_gradient(group, name, gradient)
+
+                handle = parameter.register_hook(
+                    record_gradient
+                )
+                self._controlled_fusion_gradient_hook_handles.append(handle)
+
+    def _remove_controlled_fusion_gradient_hooks(self):
+        for handle in self._controlled_fusion_gradient_hook_handles:
+            handle.remove()
+        self._controlled_fusion_gradient_hook_handles = []
 
     def _write_controlled_fusion_optimizer_evidence(self, evidence):
         if not self.is_world_process_zero():
@@ -801,13 +853,26 @@ class LLaVATrainer(Trainer):
                 "Controlled A-prime smoke telemetry found an empty trainable group: "
                 + ", ".join(name for name, parameters in groups.items() if not parameters)
             )
-        return {
-            name: {
+        captured = {}
+        for name, parameters in groups.items():
+            stats = self._cut3r_group_stats(parameters, include_grad=True)
+            observation = self._controlled_fusion_gradient_observations.get(name, {})
+            seen_parameter_names = sorted(observation.get("seen_parameter_names", set()))
+            if seen_parameter_names:
+                stats.update(
+                    {
+                        "gradient_norm": float(observation["gradient_sq"]) ** 0.5,
+                        "gradient_finite": bool(observation["gradient_finite"]),
+                        "gradient_nonzero": bool(observation["gradient_nonzero"]),
+                    }
+                )
+            stats["requires_grad"] = all(parameter.requires_grad for _, parameter in parameters)
+            stats["gradient_observed_parameter_names"] = seen_parameter_names
+            captured[name] = {
                 "before": self._cut3r_group_snapshot(parameters),
-                "stats": self._cut3r_group_stats(parameters, include_grad=True),
+                "stats": stats,
             }
-            for name, parameters in groups.items()
-        }
+        return captured
 
     def _capture_controlled_fusion_post_update(self, optimizer_step, before, optimizer_was_run):
         groups = self._controlled_fusion_named_parameter_groups()
@@ -827,6 +892,7 @@ class LLaVATrainer(Trainer):
                     f"{name}_parameter_finite": bool(
                         pre["parameter_finite"] and post["parameter_finite"]
                     ),
+                    f"{name}_requires_grad": bool(pre["requires_grad"]),
                     f"{name}_grad_norm": pre["gradient_norm"],
                     f"{name}_grad_finite": bool(pre["gradient_finite"]),
                     f"{name}_grad_nonzero": bool(pre["gradient_nonzero"]),
@@ -837,6 +903,9 @@ class LLaVATrainer(Trainer):
                     ),
                     f"{name}_sampled_parameter_names": [
                         parameter_name for parameter_name, _ in parameters
+                    ],
+                    f"{name}_gradient_observed_parameter_names": pre[
+                        "gradient_observed_parameter_names"
                     ],
                 }
             )
@@ -854,6 +923,7 @@ class LLaVATrainer(Trainer):
             )
         )
         self._write_controlled_fusion_optimizer_evidence(evidence)
+        self._remove_controlled_fusion_gradient_hooks()
 
     def _install_controlled_fusion_optimizer_hook(self, optimizer=None):
         if not self._controlled_fusion_smoke_active():
@@ -862,6 +932,13 @@ class LLaVATrainer(Trainer):
             rank0_print("[CONTROLLED_FUSION][TELEMETRY] A_prime optimizer step 1 enabled")
         if self._controlled_fusion_optimizer_hook_installed:
             return
+        groups = self._controlled_fusion_named_parameter_groups()
+        if any(not parameters for parameters in groups.values()):
+            raise RuntimeError(
+                "Controlled A-prime smoke telemetry found an empty trainable group: "
+                + ", ".join(name for name, parameters in groups.items() if not parameters)
+            )
+        self._install_controlled_fusion_gradient_hooks(groups)
         engine = getattr(self, "deepspeed", None)
         if engine is None:
             wrapped_engine = getattr(self.accelerator, "deepspeed_engine_wrapped", None)

@@ -164,7 +164,7 @@ fi
 # requires its own protected checkpoint; a final eval requires the completed
 # root plus every milestone.
 "$VLM3R_CONDA_PREFIX/bin/python" - \
-    "$TRAIN_OUTPUT_ROOT" "$PRETRAINED_LOCAL" "$EVAL_STAGE" "$EXPECTED_RATIO" "$EXPECTED_STEP" "$EXPECTED_MAX_STEPS" <<'PY'
+    "$TRAIN_OUTPUT_ROOT" "$PRETRAINED_LOCAL" "$EVAL_STAGE" "$EXPECTED_RATIO" "$EXPECTED_STEP" "$EXPECTED_MAX_STEPS" "$ARCH_ID" <<'PY'
 import json
 import math
 import sys
@@ -176,6 +176,7 @@ stage = sys.argv[3]
 expected_ratio = float(sys.argv[4]) if sys.argv[4] else None
 requested_step = int(sys.argv[5])
 expected_max_steps = int(sys.argv[6])
+arch_id = sys.argv[7]
 trainer_state = json.loads((checkpoint / "trainer_state.json").read_text(encoding="utf-8"))
 manifest = json.loads((root / "checkpoint_milestones.json").read_text(encoding="utf-8"))
 
@@ -192,6 +193,53 @@ if trainer_state.get("global_step") != required_global_step:
     raise SystemExit(
         "checkpoint did not reach its declared optimizer step: "
         f"global_step={trainer_state.get('global_step')!r}, expected={required_global_step}"
+    )
+
+# The A-prime reload smoke is the hard success gate after an `afterany`
+# dependency. Multi-node torchrun can report a rendezvous teardown failure
+# after durable saving, so validate the real optimizer evidence here rather
+# than trusting the parent Slurm exit code. Official (1622-step) evaluations
+# do not enable or require this smoke-only telemetry file.
+if arch_id == "A_prime" and expected_max_steps == 1:
+    evidence_path = root / "controlled_fusion_optimizer_steps.jsonl"
+    evidence_lines = [
+        line for line in evidence_path.read_text(encoding="utf-8").splitlines() if line
+    ]
+    if len(evidence_lines) != 1:
+        raise SystemExit(
+            f"expected one A-prime optimizer evidence record, got {len(evidence_lines)}"
+        )
+    evidence = json.loads(evidence_lines[0])
+    for key in (
+        "optimizer_was_run",
+        "all_finite",
+        "fusion_requires_grad",
+        "fusion_grad_nonzero",
+        "fusion_weight_updated",
+        "mm_projector_requires_grad",
+        "mm_projector_grad_nonzero",
+        "mm_projector_weight_updated",
+    ):
+        if evidence.get(key) is not True:
+            raise SystemExit(f"A-prime optimizer evidence failed {key}: {evidence}")
+    metrics = evidence.get("forward_metrics", {})
+    expected_metrics = {
+        "fusion_stage": "pre_mm_projector",
+        "cut3r_source_layer": 12,
+        "geometry_tokens": "patch_only",
+        "camera_token_count": 0,
+        "finite": True,
+    }
+    for key, expected_value in expected_metrics.items():
+        if metrics.get(key) != expected_value:
+            raise SystemExit(
+                f"A-prime forward evidence mismatch {key}: "
+                f"expected={expected_value!r}, actual={metrics.get(key)!r}"
+            )
+    print(
+        "[A_PRIME OPTIMIZER EVIDENCE PASS] "
+        f"fusion_delta={evidence['fusion_update_delta_norm']} "
+        f"mm_projector_delta={evidence['mm_projector_update_delta_norm']}"
     )
 
 expected_ratios = (0.01, 0.05, 0.25, 0.50)
@@ -307,6 +355,16 @@ fi
 export NUM_PROCESSES=4
 export BATCH_SIZE=1
 export LIMIT="${FUSION_EVAL_LIMIT:-0}"
+if [[ "$ARCH_ID" == A_prime && "$EXPECTED_MAX_STEPS" == 1 ]]; then
+    [[ "$LIMIT" =~ ^[0-9]+$ ]] || {
+        echo "A-prime reload smoke limit must be an integer, got: $LIMIT" >&2
+        exit 2
+    }
+    if (( LIMIT > 0 && LIMIT < NUM_PROCESSES )); then
+        echo "A-prime reload smoke needs at least one document per data-parallel rank: limit=$LIMIT ranks=$NUM_PROCESSES" >&2
+        exit 2
+    fi
+fi
 export MAX_FRAMES_NUM=32
 export CHECK_SPATIAL_SIDECARS=True
 export MODEL_ATTN_IMPLEMENTATION=sdpa

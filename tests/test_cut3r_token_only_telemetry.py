@@ -54,6 +54,30 @@ class _FakeDeepSpeedEngine:
         self._step_applied = True
         return None
 
+
+class _ControlledFusionTelemetryModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.config = SimpleNamespace(
+            fusion_block="pre_projector_cross_attention_patch_only"
+        )
+        self.fusion_block = nn.Sequential(
+            nn.Linear(2, 2),
+            nn.LayerNorm(2),
+            nn.Linear(2, 2),
+        )
+        self.mm_projector = nn.Sequential(nn.Linear(2, 2), nn.GELU(), nn.Linear(2, 2))
+        self._last_pre_projector_cross_attention_patch_only_metrics = {
+            "fusion_stage": "pre_mm_projector",
+            "cut3r_source_layer": 12,
+            "geometry_tokens": "patch_only",
+            "camera_token_count": 0,
+            "finite": True,
+        }
+
+    def get_model(self):
+        return self
+
 class Cut3RTokenOnlyTelemetryTest(unittest.TestCase):
     def _trainer_harness(self, directory, *, smoke=True, rank0=True):
         trainer = object.__new__(LLaVATrainer)
@@ -123,6 +147,42 @@ class Cut3RTokenOnlyTelemetryTest(unittest.TestCase):
             self.assertGreater(evidence["lora_update_delta_norm"], 0.0)
             self.assertIsNone(trainer.model.cut3r_token_projector.weight.grad)
             self.assertIsNone(trainer.model.language_model.lora_A.grad)
+
+    def test_controlled_fusion_hook_proves_gradients_and_real_parameter_updates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trainer = object.__new__(LLaVATrainer)
+            trainer.model = _ControlledFusionTelemetryModel()
+            trainer.args = SimpleNamespace(
+                output_dir=directory,
+                controlled_fusion_smoke_telemetry=True,
+            )
+            trainer.state = SimpleNamespace(global_step=0)
+            trainer.accelerator = SimpleNamespace(optimizer_step_was_skipped=False)
+            trainer.is_world_process_zero = lambda: True
+            trainer._controlled_fusion_optimizer_hook_installed = False
+            trainer._controlled_fusion_optimizer_evidence = {}
+            trainer._controlled_fusion_gradient_observations = {}
+            trainer._controlled_fusion_gradient_hook_handles = []
+            trainer.optimizer = torch.optim.SGD(trainer.model.parameters(), lr=0.1)
+            trainer.deepspeed = _FakeDeepSpeedEngine(trainer.model)
+
+            trainer._install_controlled_fusion_optimizer_hook(trainer.optimizer)
+            values = torch.ones(2, 2)
+            loss = trainer.model.mm_projector(trainer.model.fusion_block(values)).square().sum()
+            loss.backward()
+            trainer.deepspeed.step()
+
+            evidence = trainer._controlled_fusion_optimizer_evidence[1]
+            self.assertTrue(evidence["optimizer_was_run"])
+            for group in ("fusion", "mm_projector"):
+                self.assertTrue(evidence[f"{group}_requires_grad"])
+                self.assertTrue(evidence[f"{group}_grad_nonzero"])
+                self.assertGreater(evidence[f"{group}_grad_norm"], 0.0)
+                self.assertTrue(evidence[f"{group}_weight_updated"])
+                self.assertGreater(evidence[f"{group}_update_delta_norm"], 0.0)
+                self.assertTrue(evidence[f"{group}_gradient_observed_parameter_names"])
+            self.assertTrue(evidence["all_finite"])
+            self.assertEqual(trainer._controlled_fusion_gradient_hook_handles, [])
 
     def test_non_smoke_or_nonzero_rank_does_not_scan(self):
         with tempfile.TemporaryDirectory() as directory:
