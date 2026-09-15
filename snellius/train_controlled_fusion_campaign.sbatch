@@ -185,6 +185,11 @@ if is_true "$SMOKE_RUN"; then
     export LOGGING_STEPS=1
     export DATALOADER_NUM_WORKERS=2
     export MODEL_TORCH_COMPILE=False
+    # A one-step run with the production warmup ratio resolves to one warmup
+    # step, so its only optimizer update uses LR=0.  Disable warmup for smoke
+    # only so the required single step can prove that trainable parameters
+    # actually change; official SFT keeps WARMUP_RATIO=0.03 above.
+    export WARMUP_RATIO=0.0
     export MODEL_CUT3R_SPATIALSTACK_LOG_FIRST_N=1
     if [[ "$ARCH_ID" == A_prime ]]; then
         export CONTROLLED_FUSION_SMOKE_TELEMETRY=True
