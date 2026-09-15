@@ -113,7 +113,13 @@ env CUDA_VISIBLE_DEVICES=0 conda run --no-capture-output -n "$ENV_NAME" python -
   2>&1 | tee "$LOG_DIR/${KEY}_logme.log"
 
 test -f "$OUTPUT_DIR/source_provenance_${KEY}.json"
-test "$(awk -F, -v label="$LABEL" 'NR>1 && $1==label && $7=="complete" {count++} END {print count+0}' "$OUTPUT_DIR/logme_per_layer.csv")" -eq 7
+jq -e --arg model_label "$LABEL" '
+  ([.scores[] | select(.architecture == $model_label)]) as $rows
+  | ($rows | length) == 1
+    and ($rows[0].common7_mean_logme != null)
+    and ($rows[0].valid_tokens_per_layer == 394352)
+    and ($rows[0].training_videos == 1006)
+' "$OUTPUT_DIR/logme_summary.json" >/dev/null
 
 # The exact target is constrained to this wrapper-owned, regeneratable cache.
 # Preserve targets/runtime until final audit but release the large tensors.
