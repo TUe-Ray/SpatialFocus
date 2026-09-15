@@ -75,6 +75,11 @@ def parse_args() -> argparse.Namespace:
         default=REPO_OUTPUTS,
         help="Relocated root containing the candidate C1 trees recorded by the immutable specifications.",
     )
+    parser.add_argument(
+        "--candidates",
+        default=",".join(candidate.identifier for candidate in LEGACY_PARTIAL_CANDIDATES),
+        help="Comma-separated candidate subset; defaults to the complete seven-candidate campaign.",
+    )
     parser.add_argument("--reuse-existing", action="store_true")
     return parser.parse_args()
 
@@ -150,6 +155,14 @@ def validate_eomt(root: Path) -> dict[str, Any]:
 
 def main() -> None:
     args = parse_args()
+    selected_ids = [value.strip() for value in args.candidates.split(",") if value.strip()]
+    known_ids = {candidate.identifier for candidate in LEGACY_PARTIAL_CANDIDATES}
+    unknown_ids = sorted(set(selected_ids).difference(known_ids))
+    if unknown_ids or not selected_ids or len(selected_ids) != len(set(selected_ids)):
+        raise ValueError(
+            f"Candidates must be a non-empty unique subset of {sorted(known_ids)}; "
+            f"unknown={unknown_ids}, requested={selected_ids}"
+        )
     if args.output.exists() and not args.reuse_existing:
         raise FileExistsError(f"Refusing to overwrite locked completion manifest: {args.output}")
 
@@ -163,6 +176,8 @@ def main() -> None:
 
     candidates: dict[str, dict[str, Any]] = {}
     for candidate in LEGACY_PARTIAL_CANDIDATES:
+        if candidate.identifier not in selected_ids:
+            continue
         c1_path = args.c1_root / candidate.c1_artifact.relative_to(REPO_OUTPUTS)
         record: dict[str, Any] = {
             "label": candidate.label,

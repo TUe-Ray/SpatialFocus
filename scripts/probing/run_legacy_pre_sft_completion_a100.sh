@@ -27,7 +27,7 @@ LOG_ROOT="${LOG_ROOT:-$DURABLE_ROOT/logs}"
 ARTIFACT_MANIFEST="$DURABLE_ROOT/provenance/artifact_manifest.json"
 SMOKE_MANIFEST="$DURABLE_ROOT/provenance/smoke_1train_1val.json"
 SMOKE_MARKER="$DURABLE_ROOT/provenance/smoke_verification.json"
-CANDIDATES="SS012 SS123 SS036 SSCROSS VLM3R GEOROPE SELECTIVE"
+CANDIDATES="SSCROSS VLM3R GEOROPE SELECTIVE"
 RECYCLE_FEATURE_CACHE="${RECYCLE_FEATURE_CACHE:-1}"
 
 source "$REPO_ROOT/scripts/probing/common_probe_layers.sh"
@@ -93,7 +93,8 @@ lock_artifacts() {
   run "$PYTHON" -u "$REPO_ROOT/scripts/probing/prepare_legacy_pre_sft_completion.py" \
     --output "$ARTIFACT_MANIFEST" --reuse-existing --git-commit "$(git -C "$REPO_ROOT" rev-parse HEAD)" \
     --base-model "$BASE_MODEL" --siglip-model "$SIGLIP_MODEL" --sample-indices "$SAMPLE_INDICES" \
-    --geometry-root "$GEOMETRY_ROOT" --eomt-root "$EOMT_ROOT" --c1-root "$C1_ROOT"
+    --geometry-root "$GEOMETRY_ROOT" --eomt-root "$EOMT_ROOT" --c1-root "$C1_ROOT" \
+    --candidates "${CANDIDATES// /,}"
 }
 
 preflight() {

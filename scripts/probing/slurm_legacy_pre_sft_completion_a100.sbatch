@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=18
 #SBATCH --mem=120G
-#SBATCH --time=2-00:00:00
+#SBATCH --time=01:30:00
 #SBATCH --output=/home/shuang/proxy_outputs/legacy_pre_sft_completion_a100_v1/logs/slurm_%x_%j.out
 
 set -euo pipefail
