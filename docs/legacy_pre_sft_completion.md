@@ -35,6 +35,13 @@ the relevant GeoRoPE or EoMT sidecar identities. It saves compact results and
 provenance before recycling only the regenerated feature tensors under its own
 cache root.
 
+For a budget-aware split across machines, set `CANDIDATES`, `CACHE_ROOT`,
+`DURABLE_ROOT`, and `LOG_ROOT` to isolated values. The local wrapper records
+exactly that candidate subset in its immutable artifact manifest, so a subset
+smoke and summary never claim results for candidates assigned to another
+machine. Do not reuse a durable root whose manifest was locked at a different
+commit or for a different candidate set.
+
 Current asset audit:
 
 - Geometry-RoPE has 1,199 full ScanNet CUT3R point-map sidecars at

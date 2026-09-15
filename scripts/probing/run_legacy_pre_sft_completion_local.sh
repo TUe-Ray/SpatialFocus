@@ -87,7 +87,8 @@ lock_artifacts() {
   run conda run -n "$ENV_NAME" python -u "$REPO_ROOT/scripts/probing/prepare_legacy_pre_sft_completion.py" \
     --output "$ARTIFACT_MANIFEST" --reuse-existing --git-commit "$(git -C "$REPO_ROOT" rev-parse HEAD)" \
     --base-model "$BASE_MODEL" --siglip-model "$SIGLIP_MODEL" --sample-indices "$SAMPLE_INDICES" \
-    --geometry-root "$GEOMETRY_ROOT" --eomt-root "$EOMT_ROOT"
+    --geometry-root "$GEOMETRY_ROOT" --eomt-root "$EOMT_ROOT" \
+    --candidates "${CANDIDATES// /,}"
 }
 
 require_gpu() {
