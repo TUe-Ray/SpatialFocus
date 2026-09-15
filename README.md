@@ -62,6 +62,9 @@ Leonardo paths in archived scripts are provenance on the other machines.
 The controlled-fusion B/C/D/E/H pre-SFT C1 and depth-probe extension is
 documented in [`docs/controlled_fusion_pre_sft.md`](docs/controlled_fusion_pre_sft.md).
 
+The seven retained legacy partial pre-SFT probes have a separate completion
+campaign documented in [`docs/legacy_pre_sft_completion.md`](docs/legacy_pre_sft_completion.md).
+
 ## Installation 🛠️
 
 ### 1. Clone the repository
