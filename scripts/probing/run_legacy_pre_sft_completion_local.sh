@@ -115,7 +115,8 @@ make_smoke_manifest() {
 }
 
 extract_baseline() {
-  local namespace="$1" manifest="$2" output="$CACHE_ROOT/$namespace/BASE" log="$LOG_ROOT/${namespace}_BASE_extract.log"
+  local namespace="$1" manifest="$2" output log
+  output="$CACHE_ROOT/$namespace/BASE"; log="$LOG_ROOT/${namespace}_BASE_extract.log"
   mkdir -p "$output"
   env CUDA_VISIBLE_DEVICES="$CUDA_DEVICES" MPLCONFIGDIR=/tmp/legacy_presft_mpl conda run -n "$ENV_NAME" python -u \
     "$REPO_ROOT/scripts/probing/extract_depth_probe_features.py" \
@@ -162,7 +163,8 @@ train_level() {
 }
 
 train_candidate() {
-  local namespace="$1" id="$2" epochs="$3" manifest="$4" root="$CACHE_ROOT/$namespace/$id" levels index first second first_pid second_pid
+  local namespace="$1" id="$2" epochs="$3" manifest="$4" root levels index first second first_pid second_pid
+  root="$CACHE_ROOT/$namespace/$id"
   IFS=',' read -r -a levels <<< "$PRE_SFT_FULL_FEATURE_LEVELS_CSV"; index=0
   while [[ "$index" -lt "${#levels[@]}" ]]; do
     first="${levels[$index]}"; train_level "$root" "$id" "$first" 0 "$epochs" "$manifest" & first_pid=$!; index=$((index + 1))
@@ -184,13 +186,15 @@ smoke() {
 }
 
 preserve_results() {
-  local id="$1" label="$(candidate_field "$id" label)" root="$CACHE_ROOT/full/$id" destination="$DURABLE_ROOT/results/$id"
+  local id="$1" label root destination
+  label="$(candidate_field "$id" label)"; root="$CACHE_ROOT/full/$id"; destination="$DURABLE_ROOT/results/$id"
   [[ ! -e "$destination" ]] || { echo "Refusing to overwrite durable result: $destination" >&2; exit 1; }
   mkdir -p "$destination"; cp -a "$root/probes/$label" "$destination/probes"; cp -a "$root/features/$label/extraction_provenance.json" "$destination/extraction_provenance.json"
 }
 
 recycle_features() {
-  local id="$1" label="$(candidate_field "$id" label)" target="$CACHE_ROOT/full/$id/features/$label"
+  local id="$1" label target
+  label="$(candidate_field "$id" label)"; target="$CACHE_ROOT/full/$id/features/$label"
   [[ "$RECYCLE_FEATURE_CACHE" == 1 ]] || return 0
   case "$target" in "$CACHE_ROOT"/full/SS012/features/c1_spatialstack_add|"$CACHE_ROOT"/full/SS123/features/c1_spatialstack_add_123|"$CACHE_ROOT"/full/SS036/features/c1_spatialstack_add_036|"$CACHE_ROOT"/full/SSCROSS/features/c1_spatialstack_cross_attn_v1|"$CACHE_ROOT"/full/VLM3R/features/c1_vlm3r|"$CACHE_ROOT"/full/GEOROPE/features/c1_geo_rope_fusion|"$CACHE_ROOT"/full/SELECTIVE/features/c1_vlm3r_eomt_selective) ;; *) echo "Refusing unexpected cleanup target: $target" >&2; exit 1;; esac
   [[ -d "$target" ]] || return 0
