@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Shared configuration for controlled fusion candidates B/C/D/E/H.
+# Shared configuration for controlled fusion candidates A_prime/B/C/D/E/H.
 set -euo pipefail
 
-ARCH_ID="${CONTROLLED_FUSION_ID:?Set CONTROLLED_FUSION_ID to B, C, D, E, or H}"
+ARCH_ID="${CONTROLLED_FUSION_ID:?Set CONTROLLED_FUSION_ID to A_prime, B, C, D, E, or H}"
 FAST_FEATURE_ROOT="${FAST_DATA_ROOT:-/leonardo_scratch/fast/EUHPC_D32_006/data/vlm3r}"
 
 export SPATIAL_FEATURES_ROOT="${SPATIAL_FEATURES_ROOT:-$FAST_FEATURE_ROOT}"
@@ -26,6 +26,18 @@ export SAVE_STRATEGY="${SAVE_STRATEGY:-no}"
 export SAVE_TOTAL_LIMIT="${SAVE_TOTAL_LIMIT:-4}"
 
 case "$ARCH_ID" in
+    A_prime)
+        export NOTE="Controlled fusion A-prime: original VLM3R cross-attention over aligned CUT3R dec12 patch-only K/V before mm_projector."
+        export SUFFIX="controlled_A_prime_preprojector_crossattn_patchonly_dec12"
+        export MODEL_USE_CUT3R_SPATIALSTACK="False"
+        export MODEL_TUNE_CUT3R_SPATIALSTACK="False"
+        export MODEL_CUT3R_SPATIALSTACK_LLM_LAYERS="0"
+        export MODEL_FUSION_BLOCK="pre_projector_cross_attention_patch_only"
+        export MODEL_TUNE_FUSION_BLOCK="True"
+        export MODEL_TUNE_MM_MLP_ADAPTER="True"
+        export MODEL_PRE_PROJECTOR_CROSS_ATTENTION_SOURCE_LAYER="12"
+        export MODEL_SPATIAL_TOWER_SELECT_FEATURE="patch_tokens"
+        ;;
     B)
         export NOTE="Controlled fusion B: CUT3R dec12 patch tokens add to SigLIP features before mm_projector."
         export SUFFIX="controlled_B_pre_projector_add_dec12_once"
@@ -83,7 +95,7 @@ case "$ARCH_ID" in
         export MODEL_TUNE_FUSION_BLOCK="False"
         ;;
     *)
-        echo "[ERROR] Unsupported CONTROLLED_FUSION_ID=$ARCH_ID (expected B/C/D/E/H)."
+        echo "[ERROR] Unsupported CONTROLLED_FUSION_ID=$ARCH_ID (expected A_prime/B/C/D/E/H)."
         exit 2
         ;;
 esac

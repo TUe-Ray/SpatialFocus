@@ -229,12 +229,14 @@ class ModelArguments:
     fusion_block: Optional[str] = field(
         default=None,
         metadata={
-            "help": "Fusion strategy. Controlled pre-projector Add: pre_projector_add. Other ablations: svf_baseline, svf_patch_cam_concat, svf_geometry_bridge, svf_geo_rope_fusion"
+            "help": "Fusion strategy. Controlled pre-projector modes: pre_projector_add, "
+            "pre_projector_cross_attention_patch_only. Other ablations: svf_baseline, svf_patch_cam_concat, svf_geometry_bridge, svf_geo_rope_fusion"
             ", svf_geo_rope_fusion_forced, svf_geo_rope_fusion_per_head_gate"
         },
     )
     pre_projector_add_source_layer: int = field(default=12)
     pre_projector_add_zero_init: bool = field(default=True)
+    pre_projector_cross_attention_source_layer: int = field(default=12)
     geo_rope_fusion_mode: Optional[str] = field(
         default=None,
         metadata={"help": "GeoRoPE Fusion mode for svf_geo_rope_fusion: depth, xyz, or spherical."},
@@ -615,6 +617,12 @@ class TrainingArguments(transformers.TrainingArguments):
     cut3r_token_checkpoint_delta_validation: bool = field(
         default=False,
         metadata={"help": "Save bounded initial CUT3R-projector/LoRA samples for checkpoint-based smoke validation."},
+    )
+    controlled_fusion_smoke_telemetry: bool = field(
+        default=False,
+        metadata={
+            "help": "Smoke-only optimizer telemetry for controlled fusion_block and mm_projector updates."
+        },
     )
     checkpoint_milestone_ratios: str = field(
         default="",
@@ -3242,6 +3250,9 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
         overwrite_config["fusion_block"] = model_args.fusion_block
         overwrite_config["pre_projector_add_source_layer"] = model_args.pre_projector_add_source_layer
         overwrite_config["pre_projector_add_zero_init"] = model_args.pre_projector_add_zero_init
+        overwrite_config["pre_projector_cross_attention_source_layer"] = (
+            model_args.pre_projector_cross_attention_source_layer
+        )
         overwrite_config["geo_rope_fusion_log_stats"] = model_args.geo_rope_fusion_log_stats
         overwrite_config["geo_rope_fusion_log_attention_stats"] = model_args.geo_rope_fusion_log_attention_stats
         if model_args.geo_rope_gate_type is not None:
@@ -3547,6 +3558,27 @@ def train(attn_implementation=None):
             raise ValueError("pre_projector_add and CUT3R SpatialStack must not be enabled together.")
         data_args.spatial_tower_type = "cut3r"
         data_args.require_spatial_features = True
+    if model_args.fusion_block == "pre_projector_cross_attention_patch_only":
+        if int(model_args.pre_projector_cross_attention_source_layer) != 12:
+            raise ValueError(
+                "Controlled pre_projector_cross_attention_patch_only requires "
+                "--pre_projector_cross_attention_source_layer 12."
+            )
+        if model_args.spatial_tower != "cut3r":
+            raise ValueError(
+                "pre_projector_cross_attention_patch_only requires --spatial_tower cut3r."
+            )
+        if model_args.use_cut3r_spatialstack or model_args.tune_cut3r_spatialstack:
+            raise ValueError(
+                "pre_projector_cross_attention_patch_only and CUT3R SpatialStack must not be enabled together."
+            )
+        if model_args.spatial_tower_select_feature != "patch_tokens":
+            raise ValueError(
+                "pre_projector_cross_attention_patch_only requires "
+                "--spatial_tower_select_feature patch_tokens."
+            )
+        data_args.spatial_tower_type = "cut3r"
+        data_args.require_spatial_features = True
     if model_args.visual_token_source not in {"siglip_only", "cut3r_only"}:
         raise ValueError("--visual_token_source must be siglip_only or cut3r_only.")
     if model_args.visual_token_source == "cut3r_only":
@@ -3822,6 +3854,9 @@ def train(attn_implementation=None):
         model.config.fusion_block = model_args.fusion_block
         model.config.pre_projector_add_source_layer = model_args.pre_projector_add_source_layer
         model.config.pre_projector_add_zero_init = model_args.pre_projector_add_zero_init
+        model.config.pre_projector_cross_attention_source_layer = (
+            model_args.pre_projector_cross_attention_source_layer
+        )
         if model_args.geo_rope_fusion_mode is not None:
             model.config.geo_rope_fusion_mode = model_args.geo_rope_fusion_mode
         if model_args.geo_rope_fusion_max_depth is not None:

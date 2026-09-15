@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Official controlled-fusion campaign. Array indices: 0=B, 1=C, 2=D, 3=E, 4=H.
+# Official controlled-fusion campaign. Array indices remain 0=B, 1=C, 2=D, 3=E, 4=H.
+# A_prime is submitted as one explicit non-array job through its thin wrapper.
 # Official runs remain fixed at 4 nodes. Smoke wrappers may select a smaller
 # node count while exercising the same launcher and global-batch target.
 #SBATCH --job-name=controlled_fusion_BCDEH_4n16g
@@ -67,7 +68,7 @@ else
 fi
 if [[ "$CAMPAIGN_KIND" == controlled ]]; then
     case "$ARCH_ID" in
-        B|C|D|E|H) ;;
+        A_prime|B|C|D|E|H) ;;
         *) echo "Unsupported controlled-fusion architecture: $ARCH_ID" >&2; exit 2 ;;
     esac
 else
@@ -159,7 +160,10 @@ export TRAIN_ENV_PREACTIVATED=True
 export SEED=42
 
 if is_true "$SMOKE_RUN"; then
-    [[ "$ARCH_ID" == E ]] || { echo "The production-topology smoke is restricted to E." >&2; exit 2; }
+    [[ "$ARCH_ID" == E || "$ARCH_ID" == A_prime ]] || {
+        echo "The production-topology smoke is restricted to E or A_prime." >&2
+        exit 2
+    }
     [[ "${SLURM_JOB_NAME:-}" == SMOKE* ]] || {
         echo "Smoke Slurm job names must start with SMOKE, got: ${SLURM_JOB_NAME:-unset}" >&2
         exit 2
@@ -182,6 +186,9 @@ if is_true "$SMOKE_RUN"; then
     export DATALOADER_NUM_WORKERS=2
     export MODEL_TORCH_COMPILE=False
     export MODEL_CUT3R_SPATIALSTACK_LOG_FIRST_N=1
+    if [[ "$ARCH_ID" == A_prime ]]; then
+        export CONTROLLED_FUSION_SMOKE_TELEMETRY=True
+    fi
 else
     [[ "$RUN_NODES" == "$PRODUCTION_NODES" ]] || {
         echo "Official runs must use $PRODUCTION_NODES nodes." >&2
@@ -261,7 +268,7 @@ else
     export WANDB_CACHE_DIR="$VLM3R_LOG_ROOT/wandb_cache"
     export WANDB_CONFIG_DIR="$VLM3R_LOG_ROOT/wandb_config"
 
-    JOB_TMP_ROOT="/scratch-local/${SLURM_JOB_ID}/controlled_fusion_${SLURM_ARRAY_TASK_ID:-E}"
+    JOB_TMP_ROOT="/scratch-local/${SLURM_JOB_ID}/controlled_fusion_${SLURM_ARRAY_TASK_ID:-$ARCH_ID}"
     export TMPDIR="$JOB_TMP_ROOT/tmp"
     export XDG_CACHE_HOME="$JOB_TMP_ROOT/xdg_cache"
     export TRITON_CACHE_DIR="$JOB_TMP_ROOT/triton_cache"
@@ -302,7 +309,7 @@ echo "[TOPOLOGY] nodes=$RUN_NODES gpus_per_node=$GPUS_PER_NODE world_size=$EXPEC
 echo "[BATCH] per_device=$PER_DEVICE_BATCH target_global=$TARGET_GLOBAL_BATCH gradient_accumulation=$EXPECTED_GRAD_ACCUM"
 echo "[ARCH] id=$ARCH_ID suffix=$SUFFIX output=$OUTPUT_DIR"
 echo "[CAMPAIGN] kind=$CAMPAIGN_KIND stop_after_ratio=${CHECKPOINT_STOP_AFTER_RATIO:-none}"
-echo "[ARCH] layers=$MODEL_CUT3R_SPATIALSTACK_LAYERS llm_layers=$MODEL_CUT3R_SPATIALSTACK_LLM_LAYERS fusion=${MODEL_CUT3R_SPATIALSTACK_FUSION_TYPE:-none} projector_binding=$MODEL_CUT3R_SPATIALSTACK_PROJECTOR_BINDING tune_fusion=$MODEL_TUNE_FUSION_BLOCK tune_mm=$MODEL_TUNE_MM_MLP_ADAPTER"
+echo "[ARCH] layers=$MODEL_CUT3R_SPATIALSTACK_LAYERS llm_layers=$MODEL_CUT3R_SPATIALSTACK_LLM_LAYERS spatialstack_fusion=${MODEL_CUT3R_SPATIALSTACK_FUSION_TYPE:-none} preprojector_fusion=${MODEL_FUSION_BLOCK:-none} projector_binding=$MODEL_CUT3R_SPATIALSTACK_PROJECTOR_BINDING tune_fusion=$MODEL_TUNE_FUSION_BLOCK tune_mm=$MODEL_TUNE_MM_MLP_ADAPTER"
 
 python - "$DATA_PATH_YAML" "$EXPECTED_WORLD_SIZE" "$EXPECTED_GRAD_ACCUM" \
     "${TRAIN_DATA_MAX_SAMPLES:-}" "${MAX_STEPS:-}" "$NUM_TRAIN_EPOCHS" "$MILESTONE_RATIOS" <<'PY'
@@ -364,7 +371,7 @@ fi
 echo "[GIT] commit=$(git -C "$REPO_DIR" rev-parse HEAD) branch=$(git -C "$REPO_DIR" branch --show-current)"
 bash "$REPO_DIR/train_cut3r_spatialstack.sh"
 
-if is_true "$SMOKE_RUN" && ! is_true "$DRY_RUN"; then
+if is_true "$SMOKE_RUN" && ! is_true "$DRY_RUN" && [[ "$ARCH_ID" == E ]]; then
     python - "$OUTPUT_DIR" <<'PY'
 import json
 import math
@@ -438,6 +445,116 @@ print(json.dumps({
 }, indent=2, sort_keys=True))
 PY
     echo "[SMOKE PASS] E completed one optimizer step on $RUN_NODES nodes x $GPUS_PER_NODE GPUs: $OUTPUT_DIR"
+fi
+
+if is_true "$SMOKE_RUN" && ! is_true "$DRY_RUN" && [[ "$ARCH_ID" == A_prime ]]; then
+    python - "$OUTPUT_DIR" <<'PY'
+import json
+import math
+import sys
+from pathlib import Path
+
+import torch
+
+output = Path(sys.argv[1])
+for name in (
+    "config.json",
+    "adapter_config.json",
+    "non_lora_trainables.bin",
+    "trainer_state.json",
+    "checkpoint_milestones.json",
+    "controlled_fusion_optimizer_steps.jsonl",
+):
+    if not (output / name).is_file():
+        raise SystemExit(f"missing A-prime smoke artifact: {output / name}")
+if not any((output / name).is_file() for name in ("adapter_model.bin", "adapter_model.safetensors")):
+    raise SystemExit("missing final LoRA adapter")
+
+trainer_state = json.loads((output / "trainer_state.json").read_text(encoding="utf-8"))
+if trainer_state.get("global_step") != 1:
+    raise SystemExit(f"expected global_step=1, got {trainer_state.get('global_step')!r}")
+losses = [item["loss"] for item in trainer_state.get("log_history", []) if "loss" in item]
+if not losses or not all(math.isfinite(float(loss)) for loss in losses):
+    raise SystemExit(f"missing or non-finite training loss: {losses}")
+
+config = json.loads((output / "config.json").read_text(encoding="utf-8"))
+expected = {
+    "fusion_block": "pre_projector_cross_attention_patch_only",
+    "pre_projector_cross_attention_source_layer": 12,
+    "spatial_tower_select_feature": "patch_tokens",
+    "use_cut3r_spatialstack": False,
+    "use_cut3r_camera_tokens": False,
+    "tune_fusion_block": True,
+    "tune_mm_mlp_adapter": True,
+}
+for key, expected_value in expected.items():
+    actual = config.get(key, False) if expected_value is False else config.get(key)
+    if actual != expected_value:
+        raise SystemExit(
+            f"A-prime config mismatch {key}: expected={expected_value!r}, actual={actual!r}"
+        )
+
+lines = [line for line in (output / "controlled_fusion_optimizer_steps.jsonl").read_text().splitlines() if line]
+if len(lines) != 1:
+    raise SystemExit(f"expected one optimizer evidence record, got {len(lines)}")
+evidence = json.loads(lines[0])
+for key in (
+    "optimizer_was_run",
+    "all_finite",
+    "fusion_grad_nonzero",
+    "fusion_weight_updated",
+    "mm_projector_grad_nonzero",
+    "mm_projector_weight_updated",
+):
+    if evidence.get(key) is not True:
+        raise SystemExit(f"A-prime optimizer evidence failed {key}: {evidence}")
+metrics = evidence.get("forward_metrics", {})
+expected_metrics = {
+    "fusion_stage": "pre_mm_projector",
+    "cut3r_source_layer": 12,
+    "geometry_tokens": "patch_only",
+    "camera_token_count": 0,
+    "finite": True,
+}
+for key, expected_value in expected_metrics.items():
+    if metrics.get(key) != expected_value:
+        raise SystemExit(
+            f"A-prime forward metric mismatch {key}: expected={expected_value!r}, got={metrics.get(key)!r}"
+        )
+query_shape = metrics.get("visual_query_shape")
+kv_shape = metrics.get("geometry_kv_shape")
+projector_input_shape = metrics.get("mm_projector_input_shape")
+if not query_shape or not kv_shape or not projector_input_shape:
+    raise SystemExit(f"A-prime forward shapes are missing: {metrics}")
+if query_shape[:2] != kv_shape[:2] or query_shape != projector_input_shape:
+    raise SystemExit(f"A-prime alignment/pre-projector shapes disagree: {metrics}")
+
+state = torch.load(output / "non_lora_trainables.bin", map_location="cpu")
+fusion = [value for key, value in state.items() if "fusion_block" in key]
+projector = [value for key, value in state.items() if "mm_projector" in key]
+if not fusion or not projector:
+    raise SystemExit("saved A-prime checkpoint lacks fusion_block or mm_projector tensors")
+if not all(torch.isfinite(value).all() for value in (*fusion, *projector)):
+    raise SystemExit("saved A-prime fusion/mm_projector tensors contain non-finite values")
+
+manifest = json.loads((output / "checkpoint_milestones.json").read_text(encoding="utf-8"))
+entries = manifest.get("milestones", [])
+if manifest.get("max_steps") != 1 or [entry.get("ratio") for entry in entries] != [0.01, 0.05, 0.25, 0.5]:
+    raise SystemExit(f"unexpected milestone manifest: {manifest}")
+if any(entry.get("step") != 1 or entry.get("saved") is not True for entry in entries):
+    raise SystemExit(f"milestone checkpoint was not saved correctly: {entries}")
+
+print(json.dumps({
+    "status": "pass",
+    "global_step": 1,
+    "losses": losses,
+    "output": str(output),
+    "forward_metrics": metrics,
+    "fusion_update_delta_norm": evidence["fusion_update_delta_norm"],
+    "mm_projector_update_delta_norm": evidence["mm_projector_update_delta_norm"],
+}, indent=2, sort_keys=True))
+PY
+    echo "[SMOKE TRAIN PASS] A_prime completed one finite optimizer step and saved reloadable artifacts on $RUN_NODES nodes x $GPUS_PER_NODE GPUs: $OUTPUT_DIR"
 fi
 
 exit 0

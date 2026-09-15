@@ -29,27 +29,42 @@ source "$SNELLIUS_REFERENCE_REPO/snellius/paths.env"
 REPO_DIR="$ACTIVE_REPO_DIR"
 export REPO_DIR
 
-TRAIN_ARRAY_JOB_ID="${TRAIN_ARRAY_JOB_ID:?Set TRAIN_ARRAY_JOB_ID to the official training array job ID.}"
+TRAIN_ARRAY_JOB_ID="${TRAIN_ARRAY_JOB_ID:-${TRAIN_JOB_ID:-}}"
+: "${TRAIN_ARRAY_JOB_ID:?Set TRAIN_ARRAY_JOB_ID (array campaign) or TRAIN_JOB_ID (single A_prime run).}"
 [[ "$TRAIN_ARRAY_JOB_ID" =~ ^[1-9][0-9]*$ ]] || {
     echo "TRAIN_ARRAY_JOB_ID must be numeric, got: $TRAIN_ARRAY_JOB_ID" >&2
     exit 2
 }
 
-ARRAY_INDEX="${SLURM_ARRAY_TASK_ID:?Submit this launcher as an array task.}"
 CAMPAIGN_KIND="${FUSION_CAMPAIGN_KIND:-controlled}"
-if [[ "$CAMPAIGN_KIND" == controlled ]]; then
-    ARCH_IDS=(B C D E H)
-elif [[ "$CAMPAIGN_KIND" == reference_half ]]; then
-    ARCH_IDS=(A F G)
+if [[ -n "${CONTROLLED_FUSION_ID:-}" ]]; then
+    [[ "$CAMPAIGN_KIND" == controlled ]] || {
+        echo "Explicit CONTROLLED_FUSION_ID is only valid for the controlled campaign." >&2
+        exit 2
+    }
+    ARCH_ID="$CONTROLLED_FUSION_ID"
+    [[ "$ARCH_ID" == A_prime ]] || {
+        echo "Explicit non-array evaluation currently supports only A_prime, got $ARCH_ID." >&2
+        exit 2
+    }
+    TASK_TOKEN=A_prime
 else
-    echo "Unsupported fusion campaign kind: $CAMPAIGN_KIND" >&2
-    exit 2
+    ARRAY_INDEX="${SLURM_ARRAY_TASK_ID:?Submit the B/C/D/E/H or A/F/G launcher as an array task.}"
+    if [[ "$CAMPAIGN_KIND" == controlled ]]; then
+        ARCH_IDS=(B C D E H)
+    elif [[ "$CAMPAIGN_KIND" == reference_half ]]; then
+        ARCH_IDS=(A F G)
+    else
+        echo "Unsupported fusion campaign kind: $CAMPAIGN_KIND" >&2
+        exit 2
+    fi
+    if (( ARRAY_INDEX < 0 || ARRAY_INDEX >= ${#ARCH_IDS[@]} )); then
+        echo "Unsupported array index: $ARRAY_INDEX" >&2
+        exit 2
+    fi
+    ARCH_ID="${ARCH_IDS[$ARRAY_INDEX]}"
+    TASK_TOKEN="$ARRAY_INDEX"
 fi
-if (( ARRAY_INDEX < 0 || ARRAY_INDEX >= ${#ARCH_IDS[@]} )); then
-    echo "Unsupported array index: $ARRAY_INDEX" >&2
-    exit 2
-fi
-ARCH_ID="${ARCH_IDS[$ARRAY_INDEX]}"
 
 # Reuse the canonical architecture naming instead of maintaining a second
 # topology table in the Snellius wrapper.
@@ -71,10 +86,16 @@ else
     CAMPAIGN_EVAL_ROOT=reference_fusion_half_official
 fi
 
-TRAIN_OUTPUT_ROOT="$CAMPAIGN_CHECKPOINT_ROOT/official_${SUFFIX}_4n4g_16gpu_${TRAIN_ARRAY_JOB_ID}_${ARRAY_INDEX}"
+if [[ "$ARCH_ID" == A_prime && "${FUSION_EXPECTED_MAX_STEPS:-1622}" == 1 ]]; then
+    TRAIN_OUTPUT_ROOT="$TRAIN_SAVE_ROOT/controlled_fusion_smoke/SMOKE_${SUFFIX}_4n4g_16gpu_${TRAIN_ARRAY_JOB_ID}"
+    CAMPAIGN_EVAL_ROOT=controlled_fusion_smoke
+else
+    TRAIN_OUTPUT_ROOT="$CAMPAIGN_CHECKPOINT_ROOT/official_${SUFFIX}_4n4g_16gpu_${TRAIN_ARRAY_JOB_ID}_${TASK_TOKEN}"
+fi
+EXPECTED_MAX_STEPS="${FUSION_EXPECTED_MAX_STEPS:-1622}"
 EVAL_STAGE="${FUSION_EVAL_STAGE:-final}"
 case "$EVAL_STAGE" in
-    final) EXPECTED_RATIO=""; EXPECTED_STEP=1622; PRETRAINED_LOCAL="$TRAIN_OUTPUT_ROOT" ;;
+    final) EXPECTED_RATIO=""; EXPECTED_STEP="$EXPECTED_MAX_STEPS"; PRETRAINED_LOCAL="$TRAIN_OUTPUT_ROOT" ;;
     p01) EXPECTED_RATIO=0.01; EXPECTED_STEP=17; PRETRAINED_LOCAL="$TRAIN_OUTPUT_ROOT/checkpoint-17" ;;
     p05) EXPECTED_RATIO=0.05; EXPECTED_STEP=82; PRETRAINED_LOCAL="$TRAIN_OUTPUT_ROOT/checkpoint-82" ;;
     p25) EXPECTED_RATIO=0.25; EXPECTED_STEP=406; PRETRAINED_LOCAL="$TRAIN_OUTPUT_ROOT/checkpoint-406" ;;
@@ -84,7 +105,7 @@ esac
 export PRETRAINED_LOCAL
 case "${CONTROLLED_FUSION_EVAL_CONFIG_ONLY:-False}" in
     1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn])
-        echo "[OFFICIAL EVAL PLAN] campaign=$CAMPAIGN_KIND arch=$ARCH_ID stage=$EVAL_STAGE training_array=$TRAIN_ARRAY_JOB_ID task=$ARRAY_INDEX"
+        echo "[OFFICIAL EVAL PLAN] campaign=$CAMPAIGN_KIND arch=$ARCH_ID stage=$EVAL_STAGE training_job=$TRAIN_ARRAY_JOB_ID task=$TASK_TOKEN"
         echo "[OFFICIAL EVAL PLAN] checkpoint=$PRETRAINED_LOCAL"
         exit 0
         ;;
@@ -143,7 +164,7 @@ fi
 # requires its own protected checkpoint; a final eval requires the completed
 # root plus every milestone.
 "$VLM3R_CONDA_PREFIX/bin/python" - \
-    "$TRAIN_OUTPUT_ROOT" "$PRETRAINED_LOCAL" "$EVAL_STAGE" "$EXPECTED_RATIO" "$EXPECTED_STEP" <<'PY'
+    "$TRAIN_OUTPUT_ROOT" "$PRETRAINED_LOCAL" "$EVAL_STAGE" "$EXPECTED_RATIO" "$EXPECTED_STEP" "$EXPECTED_MAX_STEPS" <<'PY'
 import json
 import math
 import sys
@@ -154,12 +175,13 @@ checkpoint = Path(sys.argv[2])
 stage = sys.argv[3]
 expected_ratio = float(sys.argv[4]) if sys.argv[4] else None
 requested_step = int(sys.argv[5])
+expected_max_steps = int(sys.argv[6])
 trainer_state = json.loads((checkpoint / "trainer_state.json").read_text(encoding="utf-8"))
 manifest = json.loads((root / "checkpoint_milestones.json").read_text(encoding="utf-8"))
 
 max_steps = manifest.get("max_steps")
-if max_steps != 1622:
-    raise SystemExit(f"official campaign expected max_steps=1622, got {max_steps!r}")
+if max_steps != expected_max_steps:
+    raise SystemExit(f"campaign expected max_steps={expected_max_steps}, got {max_steps!r}")
 if trainer_state.get("max_steps") != max_steps:
     raise SystemExit(
         "trainer/manifest max-step mismatch: "
@@ -242,7 +264,7 @@ case "${FUSION_EVAL_PREFLIGHT_ONLY:-False}" in
         ;;
 esac
 
-JOB_TMP_ROOT="/scratch-local/${SLURM_JOB_ID}/fusion_eval_${CAMPAIGN_KIND}_${ARRAY_INDEX}_${EVAL_STAGE}"
+JOB_TMP_ROOT="/scratch-local/${SLURM_JOB_ID}/fusion_eval_${CAMPAIGN_KIND}_${TASK_TOKEN}_${EVAL_STAGE}"
 export TMPDIR="$JOB_TMP_ROOT/tmp"
 export XDG_CACHE_HOME="$JOB_TMP_ROOT/xdg_cache"
 export TRITON_CACHE_DIR="$JOB_TMP_ROOT/triton_cache"
@@ -263,10 +285,10 @@ if grep -En '/leonardo_|cache_dir: vsibench$' "$TASK_DIR/vsibench.yaml"; then
     exit 2
 fi
 
-EVAL_TOKEN="${SLURM_ARRAY_JOB_ID:-${SLURM_JOB_ID}}_${SLURM_ARRAY_TASK_ID}"
-OUTPUT_PATH="$VLM3R_LOG_ROOT/eval/$CAMPAIGN_EVAL_ROOT/${SUFFIX}_${TRAIN_ARRAY_JOB_ID}_${ARRAY_INDEX}/${EVAL_STAGE}_${EVAL_TOKEN}"
+EVAL_TOKEN="${SLURM_ARRAY_JOB_ID:-${SLURM_JOB_ID}}_${SLURM_ARRAY_TASK_ID:-$TASK_TOKEN}"
+OUTPUT_PATH="$VLM3R_LOG_ROOT/eval/$CAMPAIGN_EVAL_ROOT/${SUFFIX}_${TRAIN_ARRAY_JOB_ID}_${TASK_TOKEN}/${EVAL_STAGE}_${EVAL_TOKEN}"
 RUNTIME_ROOT="$JOB_TMP_ROOT/runtime"
-RUN_NAME="eval_official_${SUFFIX}_${EVAL_STAGE}_${TRAIN_ARRAY_JOB_ID}_${ARRAY_INDEX}_${EVAL_TOKEN}"
+RUN_NAME="eval_official_${SUFFIX}_${EVAL_STAGE}_${TRAIN_ARRAY_JOB_ID}_${TASK_TOKEN}_${EVAL_TOKEN}"
 export OUTPUT_PATH RUNTIME_ROOT RUN_NAME TASK_DIR
 export TASK_FILE="$TASK_DIR/vsibench.yaml"
 export SUBMODULE_DIR="$REPO_DIR/thinking-in-space"
@@ -284,17 +306,18 @@ else
 fi
 export NUM_PROCESSES=4
 export BATCH_SIZE=1
-export LIMIT=0
+export LIMIT="${FUSION_EVAL_LIMIT:-0}"
 export MAX_FRAMES_NUM=32
 export CHECK_SPATIAL_SIDECARS=True
 export MODEL_ATTN_IMPLEMENTATION=sdpa
 
-echo "[OFFICIAL EVAL] campaign=$CAMPAIGN_KIND arch=$ARCH_ID stage=$EVAL_STAGE training_array=$TRAIN_ARRAY_JOB_ID task=$ARRAY_INDEX"
+echo "[OFFICIAL EVAL] campaign=$CAMPAIGN_KIND arch=$ARCH_ID stage=$EVAL_STAGE training_job=$TRAIN_ARRAY_JOB_ID task=$TASK_TOKEN"
 echo "[OFFICIAL EVAL] checkpoint=$PRETRAINED_LOCAL"
 echo "[OFFICIAL EVAL] output=$OUTPUT_PATH"
 
 if [[ "$CAMPAIGN_KIND" == controlled ]]; then
     case "$ARCH_ID" in
+        A_prime) EVAL_WRAPPER="eval_controlled_fusion_A_prime_preprojector_crossattn_patchonly_dec12_vsibench.sh" ;;
         B) EVAL_WRAPPER="eval_controlled_fusion_B_pre_projector_add_dec12_vsibench.sh" ;;
         C) EVAL_WRAPPER="eval_controlled_fusion_C_cross_attn_dec12_llm0_vsibench.sh" ;;
         D) EVAL_WRAPPER="eval_controlled_fusion_D_add_dec12_llm0_vsibench.sh" ;;

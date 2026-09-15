@@ -191,6 +191,7 @@ MODEL_FUSION_BLOCK="${MODEL_FUSION_BLOCK:-}"
 MODEL_TUNE_FUSION_BLOCK="${MODEL_TUNE_FUSION_BLOCK:-False}"
 MODEL_PRE_PROJECTOR_ADD_SOURCE_LAYER="${MODEL_PRE_PROJECTOR_ADD_SOURCE_LAYER:-12}"
 MODEL_PRE_PROJECTOR_ADD_ZERO_INIT="${MODEL_PRE_PROJECTOR_ADD_ZERO_INIT:-True}"
+MODEL_PRE_PROJECTOR_CROSS_ATTENTION_SOURCE_LAYER="${MODEL_PRE_PROJECTOR_CROSS_ATTENTION_SOURCE_LAYER:-12}"
 MODEL_USE_GEOMETRY_AWARE_PROJECTION="False"
 MODEL_TUNE_GEOMETRY_AWARE_PROJECTION="False"
 MODEL_USE_AUXILIARY_GEOMETRY_HEAD="False"
@@ -213,6 +214,7 @@ MODEL_LLM_VISUAL_3D_ROPE_ENABLE="False"
 
 MODEL_TUNE_SPATIAL_TOWER="${MODEL_TUNE_SPATIAL_TOWER:-False}"
 MODEL_TUNE_MM_MLP_ADAPTER="${MODEL_TUNE_MM_MLP_ADAPTER:-False}"
+CONTROLLED_FUSION_SMOKE_TELEMETRY="${CONTROLLED_FUSION_SMOKE_TELEMETRY:-False}"
 MODEL_VERSION="${MODEL_VERSION:-qwen_1_5}"
 MODEL_MM_PROJECTOR_TYPE="${MODEL_MM_PROJECTOR_TYPE:-mlp2x_gelu}"
 MODEL_MM_VISION_SELECT_LAYER="${MODEL_MM_VISION_SELECT_LAYER:--2}"
@@ -556,6 +558,7 @@ declare -A MODEL_ARGS=(
     [fusion_block]="$MODEL_FUSION_BLOCK"
     [pre_projector_add_source_layer]="$MODEL_PRE_PROJECTOR_ADD_SOURCE_LAYER"
     [pre_projector_add_zero_init]="$MODEL_PRE_PROJECTOR_ADD_ZERO_INIT"
+    [pre_projector_cross_attention_source_layer]="$MODEL_PRE_PROJECTOR_CROSS_ATTENTION_SOURCE_LAYER"
     [use_bev_supervision]="$MODEL_USE_BEV_SUPERVISION"
     [use_depth_supervision]="$MODEL_USE_DEPTH_SUPERVISION"
     [use_pointmap_supervision]="$MODEL_USE_POINTMAP_SUPERVISION"
@@ -640,6 +643,7 @@ declare -A TRAINING_ARGS=(
     [dataloader_drop_last]="$DATALOADER_DROP_LAST"
     [seed]="$SEED"
     [data_seed]="$SEED"
+    [controlled_fusion_smoke_telemetry]="$CONTROLLED_FUSION_SMOKE_TELEMETRY"
     [spatial_rank_loss_enable]="$SPATIAL_RANK_LOSS_ENABLE"
     [lambda_sim]="$LAMBDA_SIM"
     [spatial_rank_margin]="$SPATIAL_RANK_MARGIN"
@@ -703,6 +707,16 @@ elif [[ "$MODEL_FUSION_BLOCK" == "pre_projector_add" ]]; then
     assert_arg_value tune_fusion_block True
     assert_arg_value tune_mm_mlp_adapter True
     echo "[PRE_PROJECTOR_ADD] OK: CUT3R dec12 residual fusion enabled before mm_projector; fusion block and mm_projector are trainable."
+elif [[ "$MODEL_FUSION_BLOCK" == "pre_projector_cross_attention_patch_only" ]]; then
+    assert_arg_value use_cut3r_spatialstack False
+    assert_arg_value tune_cut3r_spatialstack False
+    assert_arg_value fusion_block pre_projector_cross_attention_patch_only
+    assert_arg_value pre_projector_cross_attention_source_layer 12
+    assert_arg_value spatial_tower_select_feature patch_tokens
+    assert_arg_value use_cut3r_camera_tokens False
+    assert_arg_value tune_fusion_block True
+    assert_arg_value tune_mm_mlp_adapter True
+    echo "[PRE_PROJECTOR_CROSS_ATTN_PATCH_ONLY] OK: CUT3R dec12 patch-only K/V cross-attention enabled before mm_projector; camera tokens are disabled; fusion block and mm_projector are trainable."
 elif is_true "$MODEL_USE_CUT3R_SPATIALSTACK"; then
     assert_arg_value use_cut3r_spatialstack True
     assert_arg_value tune_cut3r_spatialstack True

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Shared VSI-Bench handoff for controlled fusion candidates B/C/D/E/H.
+# Shared VSI-Bench handoff for controlled fusion candidates A_prime/B/C/D/E/H.
 set -euo pipefail
 
-ARCH_ID="${CONTROLLED_FUSION_ID:?Set CONTROLLED_FUSION_ID to B, C, D, E, or H}"
+ARCH_ID="${CONTROLLED_FUSION_ID:?Set CONTROLLED_FUSION_ID to A_prime, B, C, D, E, or H}"
 FAST_ROOT="${FAST_ROOT:-/leonardo_scratch/fast/EUHPC_D32_006}"
 TRAIN_MODEL_ROOT="${TRAIN_MODEL_ROOT:-/leonardo_work/EUHPC_D32_006/Train_Model/VLM3R}"
 
@@ -10,6 +10,9 @@ export PRESERVE_CHECKPOINT_CONFIG=True
 export EXPECTED_USE_CUT3R_SPATIALSTACK=True
 export EXPECTED_FUSION_BLOCK=none
 export EXPECTED_PRE_PROJECTOR_ADD_SOURCE_LAYER=""
+export EXPECTED_PRE_PROJECTOR_CROSS_ATTENTION_SOURCE_LAYER=""
+export EXPECTED_SPATIAL_TOWER_SELECT_FEATURE=""
+export EXPECTED_USE_CUT3R_CAMERA_TOKENS=""
 export EXPECTED_CUT3R_SPATIALSTACK_LAYERS=""
 export EXPECTED_CUT3R_SPATIALSTACK_LLM_LAYERS=""
 export EXPECTED_CUT3R_SPATIALSTACK_FUSION_TYPE=""
@@ -20,6 +23,18 @@ export SPATIAL_FEATURES_SUBDIR="${SPATIAL_FEATURES_SUBDIR:-12:spatial_features}"
 export CHECK_SPATIAL_SIDECARS="${CHECK_SPATIAL_SIDECARS:-True}"
 
 case "$ARCH_ID" in
+    A_prime)
+        RUN_BASENAME="controlled_A_prime_preprojector_crossattn_patchonly_dec12"
+        export EXPECTED_USE_CUT3R_SPATIALSTACK=False
+        export EXPECTED_FUSION_BLOCK=pre_projector_cross_attention_patch_only
+        export EXPECTED_PRE_PROJECTOR_CROSS_ATTENTION_SOURCE_LAYER=12
+        export EXPECTED_SPATIAL_TOWER_SELECT_FEATURE=patch_tokens
+        export EXPECTED_USE_CUT3R_CAMERA_TOKENS=False
+        export EXPECTED_CUT3R_SPATIALSTACK_PROJECTOR_TYPE=""
+        export EXPECTED_CUT3R_SPATIALSTACK_PROJECTOR_BINDING=""
+        export CUT3R_SPATIALSTACK_LAYERS=12
+        export CUT3R_SPATIALSTACK_LLM_LAYERS=0
+        ;;
     B)
         RUN_BASENAME="controlled_B_pre_projector_add_dec12_once"
         export EXPECTED_USE_CUT3R_SPATIALSTACK=False
@@ -56,7 +71,7 @@ case "$ARCH_ID" in
         export EXPECTED_CUT3R_SPATIALSTACK_FUSION_TYPE=cross_attn
         ;;
     *)
-        echo "[ERROR] Unsupported CONTROLLED_FUSION_ID=$ARCH_ID (expected B/C/D/E/H)."
+        echo "[ERROR] Unsupported CONTROLLED_FUSION_ID=$ARCH_ID (expected A_prime/B/C/D/E/H)."
         exit 2
         ;;
 esac

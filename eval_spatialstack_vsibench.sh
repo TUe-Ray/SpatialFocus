@@ -65,6 +65,9 @@ EXPECTED_CUT3R_SPATIALSTACK_FUSION_TYPE="${EXPECTED_CUT3R_SPATIALSTACK_FUSION_TY
 EXPECTED_USE_CUT3R_SPATIALSTACK="${EXPECTED_USE_CUT3R_SPATIALSTACK:-True}"
 EXPECTED_FUSION_BLOCK="${EXPECTED_FUSION_BLOCK:-}"
 EXPECTED_PRE_PROJECTOR_ADD_SOURCE_LAYER="${EXPECTED_PRE_PROJECTOR_ADD_SOURCE_LAYER:-}"
+EXPECTED_PRE_PROJECTOR_CROSS_ATTENTION_SOURCE_LAYER="${EXPECTED_PRE_PROJECTOR_CROSS_ATTENTION_SOURCE_LAYER:-}"
+EXPECTED_SPATIAL_TOWER_SELECT_FEATURE="${EXPECTED_SPATIAL_TOWER_SELECT_FEATURE:-}"
+EXPECTED_USE_CUT3R_CAMERA_TOKENS="${EXPECTED_USE_CUT3R_CAMERA_TOKENS:-}"
 
 if [[ ! "$NUM_PROCESSES" =~ ^[1-9][0-9]*$ ]]; then
   echo "[ERROR] NUM_PROCESSES must be a positive integer, got: $NUM_PROCESSES"
@@ -163,7 +166,10 @@ if is_true "$PRESERVE_CHECKPOINT_CONFIG"; then
     "$EXPECTED_CUT3R_SPATIALSTACK_FUSION_TYPE" \
     "$EXPECTED_USE_CUT3R_SPATIALSTACK" \
     "$EXPECTED_FUSION_BLOCK" \
-    "$EXPECTED_PRE_PROJECTOR_ADD_SOURCE_LAYER" <<'PY'
+    "$EXPECTED_PRE_PROJECTOR_ADD_SOURCE_LAYER" \
+    "$EXPECTED_PRE_PROJECTOR_CROSS_ATTENTION_SOURCE_LAYER" \
+    "$EXPECTED_SPATIAL_TOWER_SELECT_FEATURE" \
+    "$EXPECTED_USE_CUT3R_CAMERA_TOKENS" <<'PY'
 import json
 import sys
 
@@ -177,6 +183,9 @@ import sys
     expected_use_spatialstack,
     expected_fusion_block,
     expected_pre_projector_source,
+    expected_pre_projector_cross_attention_source,
+    expected_spatial_select_feature,
+    expected_use_camera_tokens,
 ) = sys.argv[1:]
 
 with open(cfg_path, "r", encoding="utf-8") as f:
@@ -209,6 +218,12 @@ checks = (
     ("cut3r_spatialstack_fusion_type", expected_fusion_type, lambda value: str(value).strip().lower()),
     ("fusion_block", expected_fusion_block, lambda value: str(value).strip().lower()),
     ("pre_projector_add_source_layer", expected_pre_projector_source, lambda value: str(int(value))),
+    (
+        "pre_projector_cross_attention_source_layer",
+        expected_pre_projector_cross_attention_source,
+        lambda value: str(int(value)),
+    ),
+    ("spatial_tower_select_feature", expected_spatial_select_feature, lambda value: str(value).strip().lower()),
 )
 for key, expected, normalize in checks:
     if not expected:
@@ -224,6 +239,12 @@ for key, expected, normalize in checks:
         raise SystemExit(
             f"[ERROR] Checkpoint config mismatch for {key}: expected {expected!r}, got {actual!r}."
         )
+
+if expected_use_camera_tokens and as_bool(cfg.get("use_cut3r_camera_tokens", False)) != as_bool(expected_use_camera_tokens):
+    raise SystemExit(
+        "[ERROR] Checkpoint config mismatch for use_cut3r_camera_tokens: "
+        f"expected {expected_use_camera_tokens!r}, got {cfg.get('use_cut3r_camera_tokens', False)!r}."
+    )
 
 print("[CHECKPOINT CONFIG] SpatialStack settings will be loaded without eval-time overrides:")
 for key in (

@@ -504,6 +504,7 @@ class Cut3RTokenOnlyOptimizerTelemetryCallback(TrainerCallback):
 
     def on_train_begin(self, args, state: TrainerState, control: TrainerControl, **kwargs):
         self.trainer._install_cut3r_token_only_optimizer_hook(kwargs.get("optimizer"))
+        self.trainer._install_controlled_fusion_optimizer_hook(kwargs.get("optimizer"))
         return control
 
 
@@ -515,6 +516,8 @@ class LLaVATrainer(Trainer):
         self._cut3r_token_only_optimizer_hook_installed = False
         self._cut3r_token_only_pending_scans = {}
         self._cut3r_token_only_optimizer_evidence = {}
+        self._controlled_fusion_optimizer_hook_installed = False
+        self._controlled_fusion_optimizer_evidence = {}
         self.add_callback(Cut3RTokenOnlyOptimizerTelemetryCallback(self))
 
     def _cut3r_token_only_base_model(self):
@@ -748,6 +751,162 @@ class LLaVATrainer(Trainer):
 
         optimizer.step = wrapped_step
         self._cut3r_token_only_optimizer_hook_installed = True
+
+    def _controlled_fusion_smoke_active(self):
+        base_model = self._cut3r_token_only_base_model()
+        return bool(
+            base_model is not None
+            and bool(getattr(self.args, "controlled_fusion_smoke_telemetry", False))
+            and getattr(base_model.config, "fusion_block", None)
+            == "pre_projector_cross_attention_patch_only"
+        )
+
+    def _controlled_fusion_named_parameter_groups(self):
+        named_parameters = sorted(self.model.named_parameters(), key=lambda item: item[0])
+
+        def bounded_sample(fragment):
+            candidates = [
+                (name, parameter)
+                for name, parameter in named_parameters
+                if fragment in name and parameter.requires_grad
+            ]
+            weights = [item for item in candidates if item[0].endswith("weight")]
+            candidates = weights or candidates
+            if len(candidates) <= 6:
+                return candidates
+            middle = len(candidates) // 2
+            return [*candidates[:2], *candidates[middle : middle + 2], *candidates[-2:]]
+
+        return {
+            "fusion": bounded_sample("fusion_block"),
+            "mm_projector": bounded_sample("mm_projector"),
+        }
+
+    def _write_controlled_fusion_optimizer_evidence(self, evidence):
+        if not self.is_world_process_zero():
+            return
+        step = int(evidence["optimizer_step"])
+        self._controlled_fusion_optimizer_evidence[step] = dict(evidence)
+        line = json.dumps(self._jsonable(evidence), sort_keys=True)
+        rank0_print(f"[CONTROLLED_FUSION][OPTIMIZER_STEP] {line}")
+        os.makedirs(self.args.output_dir, exist_ok=True)
+        path = os.path.join(self.args.output_dir, "controlled_fusion_optimizer_steps.jsonl")
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+
+    def _capture_controlled_fusion_pre_update(self):
+        groups = self._controlled_fusion_named_parameter_groups()
+        if any(not parameters for parameters in groups.values()):
+            raise RuntimeError(
+                "Controlled A-prime smoke telemetry found an empty trainable group: "
+                + ", ".join(name for name, parameters in groups.items() if not parameters)
+            )
+        return {
+            name: {
+                "before": self._cut3r_group_snapshot(parameters),
+                "stats": self._cut3r_group_stats(parameters, include_grad=True),
+            }
+            for name, parameters in groups.items()
+        }
+
+    def _capture_controlled_fusion_post_update(self, optimizer_step, before, optimizer_was_run):
+        groups = self._controlled_fusion_named_parameter_groups()
+        evidence = {
+            "optimizer_step": int(optimizer_step),
+            "optimizer_was_run": bool(optimizer_was_run),
+        }
+        for name, parameters in groups.items():
+            pre = before[name]["stats"]
+            post = self._cut3r_group_stats(
+                parameters,
+                before=before[name]["before"],
+                include_grad=False,
+            )
+            evidence.update(
+                {
+                    f"{name}_parameter_finite": bool(
+                        pre["parameter_finite"] and post["parameter_finite"]
+                    ),
+                    f"{name}_grad_norm": pre["gradient_norm"],
+                    f"{name}_grad_finite": bool(pre["gradient_finite"]),
+                    f"{name}_grad_nonzero": bool(pre["gradient_nonzero"]),
+                    f"{name}_update_delta_norm": post["update_delta_norm"],
+                    f"{name}_update_finite": bool(post["update_finite"]),
+                    f"{name}_weight_updated": bool(
+                        optimizer_was_run and post["update_nonzero"]
+                    ),
+                    f"{name}_sampled_parameter_names": [
+                        parameter_name for parameter_name, _ in parameters
+                    ],
+                }
+            )
+        evidence["all_finite"] = all(
+            bool(evidence[f"{name}_{suffix}"])
+            for name in groups
+            for suffix in ("parameter_finite", "grad_finite", "update_finite")
+        )
+        base_model = self._cut3r_token_only_base_model()
+        evidence["forward_metrics"] = dict(
+            getattr(
+                base_model,
+                "_last_pre_projector_cross_attention_patch_only_metrics",
+                {},
+            )
+        )
+        self._write_controlled_fusion_optimizer_evidence(evidence)
+
+    def _install_controlled_fusion_optimizer_hook(self, optimizer=None):
+        if not self._controlled_fusion_smoke_active():
+            return
+        if self.is_world_process_zero():
+            rank0_print("[CONTROLLED_FUSION][TELEMETRY] A_prime optimizer step 1 enabled")
+        if self._controlled_fusion_optimizer_hook_installed:
+            return
+        engine = getattr(self, "deepspeed", None)
+        if engine is None:
+            wrapped_engine = getattr(self.accelerator, "deepspeed_engine_wrapped", None)
+            engine = getattr(wrapped_engine, "engine", None)
+        if engine is not None:
+            original_engine_step = engine.step
+
+            def wrapped_engine_step(*args, **kwargs):
+                boundary = bool(engine.is_gradient_accumulation_boundary())
+                optimizer_step = int(getattr(self.state, "global_step", 0) or 0) + 1
+                before = None
+                if boundary and optimizer_step == 1:
+                    before = self._capture_controlled_fusion_pre_update()
+                result = original_engine_step(*args, **kwargs)
+                if before is not None:
+                    self._capture_controlled_fusion_post_update(
+                        optimizer_step,
+                        before,
+                        bool(getattr(engine, "_step_applied", False)),
+                    )
+                return result
+
+            engine.step = wrapped_engine_step
+            self._controlled_fusion_optimizer_hook_installed = True
+            return
+        optimizer = optimizer or self.optimizer
+        if optimizer is None:
+            raise RuntimeError("Controlled A-prime smoke telemetry could not find the optimizer.")
+        original_step = optimizer.step
+
+        def wrapped_step(*args, **kwargs):
+            optimizer_step = int(getattr(self.state, "global_step", 0) or 0) + 1
+            before = self._capture_controlled_fusion_pre_update() if optimizer_step == 1 else None
+            result = original_step(*args, **kwargs)
+            if before is not None:
+                optimizer_was_run = not bool(
+                    getattr(self.accelerator, "optimizer_step_was_skipped", False)
+                )
+                self._capture_controlled_fusion_post_update(
+                    optimizer_step, before, optimizer_was_run
+                )
+            return result
+
+        optimizer.step = wrapped_step
+        self._controlled_fusion_optimizer_hook_installed = True
 
     def training_step(self, model, inputs):
         started = time.monotonic()

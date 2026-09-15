@@ -9,6 +9,17 @@ from .video_3d_llm_block import video_3d_llm_fusion_block
 from ..cut3r_spatialstack import Cut3RSpatialStackMerger
 
 
+def align_patch_tokens_to_visual_grid(spatial_features, target_tokens):
+    """Apply the controlled pre-projector square-grid alignment per frame."""
+    return torch.stack(
+        [
+            Cut3RSpatialStackMerger.resize_square_grid(frame_tokens, target_tokens)
+            for frame_tokens in spatial_features
+        ],
+        dim=0,
+    )
+
+
 class PassthroughFusion(nn.Module):
     """Identity container for pure visual-token geometry projection runs."""
 
@@ -1103,13 +1114,7 @@ class PreProjectorAddFusion(nn.Module):
             dtype=clip_features.dtype,
             non_blocking=True,
         )
-        aligned = torch.stack(
-            [
-                Cut3RSpatialStackMerger.resize_square_grid(frame_tokens, target_tokens)
-                for frame_tokens in spatial_for_projection
-            ],
-            dim=0,
-        )
+        aligned = align_patch_tokens_to_visual_grid(spatial_for_projection, target_tokens)
         z_pre_raw = self._forward_linear(
             self.spatial_proj_in,
             self._forward_norm(aligned),
@@ -1146,6 +1151,72 @@ class PreProjectorAddFusion(nn.Module):
                 "delta": self._c1_moments(projected),
             }
         return fused
+
+
+class PreProjectorCrossAttentionPatchOnlyFusion(CrossAttentionFusion):
+    """Original VLM3R cross-attention with B-aligned dec12 patch-only K/V."""
+
+    def __init__(self, d_clip, d_spatial_encoder, d_attn, num_heads, source_layer=12):
+        super().__init__(
+            d_clip=d_clip,
+            d_spatial_encoder=d_spatial_encoder,
+            d_attn=d_attn,
+            num_heads=num_heads,
+        )
+        self.d_clip = int(d_clip)
+        self.d_spatial_encoder = int(d_spatial_encoder)
+        self.source_layer = int(source_layer)
+        self.last_debug = {}
+
+    def forward(self, clip_features, spatial_features):
+        if clip_features.dim() != 3 or spatial_features.dim() != 3:
+            raise ValueError(
+                "pre_projector_cross_attention_patch_only expects [frames,tokens,dim] tensors, got "
+                f"clip={tuple(clip_features.shape)}, spatial={tuple(spatial_features.shape)}."
+            )
+        if int(clip_features.shape[0]) != int(spatial_features.shape[0]):
+            raise ValueError(
+                "pre_projector_cross_attention_patch_only frame count mismatch: "
+                f"clip={int(clip_features.shape[0])}, spatial={int(spatial_features.shape[0])}."
+            )
+        if int(clip_features.shape[-1]) != self.d_clip:
+            raise ValueError(
+                "pre_projector_cross_attention_patch_only SigLIP dim mismatch: "
+                f"got {int(clip_features.shape[-1])}, expected {self.d_clip}."
+            )
+        if int(spatial_features.shape[-1]) != self.d_spatial_encoder:
+            raise ValueError(
+                "pre_projector_cross_attention_patch_only CUT3R dim mismatch: "
+                f"got {int(spatial_features.shape[-1])}, expected {self.d_spatial_encoder}."
+            )
+
+        spatial_for_attention = spatial_features.to(
+            device=clip_features.device,
+            dtype=clip_features.dtype,
+            non_blocking=True,
+        )
+        aligned = align_patch_tokens_to_visual_grid(
+            spatial_for_attention,
+            int(clip_features.shape[1]),
+        )
+        fused, attn_weights = super().forward(clip_features, aligned)
+        if not torch.isfinite(fused).all():
+            raise RuntimeError(
+                "pre_projector_cross_attention_patch_only produced non-finite fused vision features."
+            )
+        self.last_debug = {
+            "fusion_type": "pre_projector_cross_attention_patch_only",
+            "fusion_stage": "pre_mm_projector",
+            "cut3r_source_layer": self.source_layer,
+            "geometry_tokens": "patch_only",
+            "camera_token_count": 0,
+            "visual_query_shape": list(clip_features.shape),
+            "raw_patch_shape": list(spatial_features.shape),
+            "geometry_kv_shape": list(aligned.shape),
+            "fused_shape": list(fused.shape),
+            "finite": True,
+        }
+        return fused, attn_weights
 
 class ConcatMLPFusion(nn.Module):
     def __init__(self, d_llm, d_spatial_encoder):
@@ -1307,6 +1378,14 @@ def build_multimodal_fusion_block(config, delay_load=False, **kwargs):
             d_spatial_encoder=d_spatial_encoder,
             source_layer=getattr(config, "pre_projector_add_source_layer", 12),
             zero_init=zero_init,
+        )
+    elif fusion_block_type == "pre_projector_cross_attention_patch_only":
+        return PreProjectorCrossAttentionPatchOnlyFusion(
+            d_clip=d_clip,
+            d_spatial_encoder=d_spatial_encoder,
+            d_attn=d_attn,
+            num_heads=18,
+            source_layer=getattr(config, "pre_projector_cross_attention_source_layer", 12),
         )
     elif fusion_block_type == "transformer":
         return TransformerFusion(
