@@ -17,6 +17,7 @@ if str(REPO_ROOT) not in sys.path:
 from scripts.probing.legacy_pre_sft_completion_specs import (
     FULL_FEATURE_LEVELS,
     LEGACY_PARTIAL_CANDIDATES,
+    REPO_OUTPUTS,
 )
 
 
@@ -67,6 +68,12 @@ def parse_args() -> argparse.Namespace:
         "--eomt-root",
         type=Path,
         default=Path("/home/shaoruei/probe_cache/eomt_consumer_grid_v2"),
+    )
+    parser.add_argument(
+        "--c1-root",
+        type=Path,
+        default=REPO_OUTPUTS,
+        help="Relocated root containing the candidate C1 trees recorded by the immutable specifications.",
     )
     parser.add_argument("--reuse-existing", action="store_true")
     return parser.parse_args()
@@ -156,6 +163,7 @@ def main() -> None:
 
     candidates: dict[str, dict[str, Any]] = {}
     for candidate in LEGACY_PARTIAL_CANDIDATES:
+        c1_path = args.c1_root / candidate.c1_artifact.relative_to(REPO_OUTPUTS)
         record: dict[str, Any] = {
             "label": candidate.label,
             "display_name": candidate.display_name,
@@ -163,12 +171,13 @@ def main() -> None:
             "spatial_features_subdir": candidate.spatial_features_subdir,
             "spatialstack_cut3r_layers": candidate.spatialstack_cut3r_layers,
             "spatialstack_llm_layers": candidate.spatialstack_llm_layers,
-            "c1": validate_c1(candidate.c1_artifact, candidate.c1_architecture),
+            "c1": validate_c1(c1_path, candidate.c1_architecture),
             "uses_eomt_selective_gate": candidate.uses_eomt_selective_gate,
         }
         if candidate.geometry_c1_activation is not None:
+            geometry_c1_path = args.c1_root / candidate.geometry_c1_activation.relative_to(REPO_OUTPUTS)
             record["geometry_c1"] = validate_geometry_activation(
-                candidate.geometry_c1_activation, str(candidate.geometry_architecture)
+                geometry_c1_path, str(candidate.geometry_architecture)
             )
         candidates[candidate.identifier] = record
 
