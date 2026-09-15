@@ -60,6 +60,13 @@ class Candidate:
 
 CANDIDATES = (
     Candidate(
+        "ss_depth",
+        "ss_depth",
+        "SS + depth (C1 pre-SFT, fresh point-map head)",
+        Path("/home/shaoruei/probe_cache/pre_sft_logme_remaining6_recache/ss_depth"),
+        "loss_only_pointmap_head",
+    ),
+    Candidate(
         "geo_rope_fusion",
         "c1_geo_rope_fusion",
         "GeoRoPE Fusion (C1 pre-SFT)",
@@ -138,6 +145,19 @@ def validate_candidate(candidate: Candidate, sample_indices: Path) -> tuple[dict
             for assertion in assertions
         ):
             failures.append("eomt_object_first_video_runtime_assertions")
+    elif candidate.required_special_provenance == "loss_only_pointmap_head":
+        attestation = payload.get("loss_only_forward_equivalence_attestation")
+        if not isinstance(attestation, dict):
+            failures.append("loss_only_forward_equivalence_attestation")
+        elif not (
+            attestation.get("loss") == "pointmap"
+            and attestation.get("auxiliary_head_class") == "PointMapHead"
+            and attestation.get("auxiliary_head_freshly_initialized") is True
+            and int(attestation.get("auxiliary_head_parameters", 0)) > 0
+            and attestation.get("no_optimizer") is True
+            and attestation.get("no_post_sft_state") is True
+        ):
+            failures.append("fresh_pointmap_head_provenance")
     if failures:
         return None, "invalid pre-SFT provenance: " + ",".join(failures)
     return payload, None

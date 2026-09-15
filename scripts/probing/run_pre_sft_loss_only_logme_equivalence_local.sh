@@ -25,9 +25,21 @@ LOG_DIR="$OUTPUT_DIR/equivalence_logs"
 FULL_FEATURES="siglip_output,fusion_output,projected_features,layer_0,layer_1,layer_2,layer_3,layer_6,layer_9,layer_12,layer_15,layer_18,layer_21,layer_24,layer_27"
 mkdir -p "$CACHE_ROOT" "$LOG_DIR"
 
+cache_complete() {
+  local output_root="$1" label="$2" level
+  [[ -f "$output_root/features/$label/extraction_provenance.json" ]] || return 1
+  for level in 1 3 6 9 15 21 27; do
+    [[ "$(find "$output_root/features/$label/layer_$level" -maxdepth 1 -type f -name 'frame_*.pt' 2>/dev/null | wc -l)" -eq 2 ]] || return 1
+  done
+}
+
 extract_one() {
   local output_name="$1" label="$2" variant="$3" artifact="$4" subdirs="$5" loss="${6:-}"
   local output_root="$CACHE_ROOT/$output_name"
+  if cache_complete "$output_root" "$label"; then
+    echo "[REUSE] complete one-video equivalence cache: $output_name/$label"
+    return 0
+  fi
   local program=("$REPO_ROOT/scripts/probing/extract_depth_probe_features.py")
   if [[ -n "$loss" ]]; then
     program=("$REPO_ROOT/scripts/probing/extract_pre_sft_loss_only_attestation.py" --attestation-loss "$loss")
@@ -67,6 +79,7 @@ extract_one() {
 BASELINE_C1="/home/shaoruei/probe_outputs/c1_vlm3r_v1/official/vlm3r.json"
 SS012_C1="/home/shaoruei/probe_outputs/c1_additive_v1/official/spatialstack_add.json"
 extract_one baseline_depth c1_vlm3r_depth_loss_attestation c1_vlm3r "$BASELINE_C1" spatial_features depth
+extract_one ss012_reference c1_ss012_equivalence_reference c1_ss_add "$SS012_C1" '6:spatial_features_dec_6,9:spatial_features_dec_9,12:spatial_features'
 extract_one ss_depth c1_ss012_pointmap_loss_attestation c1_ss_add "$SS012_C1" '6:spatial_features_dec_6,9:spatial_features_dec_9,12:spatial_features' pointmap
 
 conda run --no-capture-output -n "$ENV_NAME" python -u \

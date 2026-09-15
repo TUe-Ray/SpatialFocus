@@ -35,6 +35,9 @@ done
 echo "[RUN] Baseline+depth and SS+depth loss-only forward-equivalence smoke" >>"$QUEUE_LOG"
 bash "$REPO_ROOT/scripts/probing/run_pre_sft_loss_only_logme_equivalence_local.sh" >>"$QUEUE_LOG" 2>&1
 
+echo "[RUN] SS+depth full current-code pre-SFT extraction + Common-7 LogME" >>"$QUEUE_LOG"
+bash "$REPO_ROOT/scripts/probing/run_pre_sft_logme_remaining_recache_local.sh" ss_depth >>"$QUEUE_LOG" 2>&1
+
 echo "[RUN] Extra Object Token full pre-SFT extraction + Common-7 LogME" >>"$QUEUE_LOG"
 bash "$REPO_ROOT/scripts/probing/run_pre_sft_logme_remaining_recache_local.sh" extra_object_token >>"$QUEUE_LOG" 2>&1
 

@@ -24,11 +24,11 @@ from scripts.probing.run_pre_sft_logme_proxy import write_csv, write_json
 
 
 LAYERS = (1, 3, 6, 9, 15, 21, 27)
-ALL_FEATURES = (
-    "siglip_output", "fusion_output", "projected_features",
-    "layer_0", "layer_1", "layer_2", "layer_3", "layer_6", "layer_9",
-    "layer_12", "layer_15", "layer_18", "layer_21", "layer_24", "layer_27",
-)
+# Compare exactly the retained hidden layers whose formal LogME values are
+# reused.  The historical C1 source caches did not retain shared front-end
+# features or v1-only L12/L18/L24, so requiring those would test files that
+# are outside the amended Common-7 score rather than representation identity.
+ALL_FEATURES = tuple(f"layer_{layer}" for layer in LAYERS)
 SPLIT_SHA = "d478cb684958dfc25066821ec83d5216469577c9e282e33bdf87d3c88b200d8e"
 FORMAL_ROWS = REPO_ROOT / "logs" / "pre_sft_logme_proxy_v2_common7" / "logme_per_layer.csv"
 
@@ -157,7 +157,7 @@ def main() -> None:
     results = [
         compare_pair("Baseline + depth", Path("/home/shaoruei/probe_cache/c1_vlm3r_v1/full"), "c1_vlm3r",
                      cache / "baseline_depth", "c1_vlm3r_depth_loss_attestation", "depth"),
-        compare_pair("SS + depth", Path("/home/shaoruei/probe_cache/c1_additive_v1/full"), "c1_spatialstack_add",
+        compare_pair("SS + depth", cache / "ss012_reference", "c1_ss012_equivalence_reference",
                      cache / "ss_depth", "c1_ss012_pointmap_loss_attestation", "pointmap"),
     ]
     attestation_path = output / "loss_only_forward_equivalence.json"
@@ -165,16 +165,18 @@ def main() -> None:
         "schema_version": "pre_sft_loss_only_forward_equivalence_v1",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "assessment": "PASS" if all(row["assessment"] == "PASS_BITWISE_IDENTICAL" for row in results) else "FAIL",
-        "definition": "Loss-only auxiliary heads consume hidden states after the representation forward; bitwise identity permits exact LogME reuse.",
+        "definition": (
+            "Loss-only auxiliary heads consume hidden states after the representation forward. Baseline+depth "
+            "is compared directly with its retained formal source cache and permits exact LogME reuse. "
+            "SS+depth is compared with a current-code reference; its older formal source cache exhibits "
+            "code-version numerical drift, so SS+depth must receive an independent full-cache LogME fit."
+        ),
         "results": results,
     })
 
     with FORMAL_ROWS.open(newline="", encoding="utf-8") as handle:
         formal = list(csv.DictReader(handle))
-    aliases = (
-        ("baseline_depth", "Baseline + depth", 59.6, "c1_vlm3r"),
-        ("ss_depth", "SS + depth", 61.3, "c1_spatialstack_add"),
-    )
+    aliases = (("baseline_depth", "Baseline + depth", 59.6, "c1_vlm3r"),)
     rows = []
     scores = []
     for label, display, vsi, source in aliases:

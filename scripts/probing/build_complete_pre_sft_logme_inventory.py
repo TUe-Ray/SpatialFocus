@@ -195,11 +195,13 @@ def main() -> None:
     summary = {
         "created_at": datetime.now(timezone.utc).isoformat(),
         "model_count": 17,
-        "distinct_pre_sft_representations": 14,
+        "distinct_pre_sft_result_series": 16,
         "exact_representation_aliases": {
-            "ss_depth": "c1_spatialstack_add",
             "baseline_depth": "c1_vlm3r",
-            "0_spatial": "pre_sft_base_vlm",
+        },
+        "identity_construction": {"0_spatial": "pre_sft_base_vlm"},
+        "independent_code_drift_fit": {
+            "ss_depth": "independent full current-code cache; not aliased to the older formal c1_spatialstack_add cache"
         },
         "sources": {name: str(path) for name, path in sources.items()},
         "data_checks": checks,
@@ -231,7 +233,7 @@ def main() -> None:
         *per_layer_table, "",
         "## Protocol", "",
         "All rows use L1/L3/L6/L9/L15/L21/L27, 1,006 calibration/train videos, 2,012 selected frames, 394,352 valid target tokens per layer, D=3,584 and the same target signature. LogME evidence is float64 and cache-only; there is no optimizer, update, SFT checkpoint substitution, or VLM forward during evidence fitting.", "",
-        "`SS + depth` and `Baseline + depth` are exact aliases only after a one-video, all-retained-level bitwise hidden-feature equality test with fresh auxiliary heads. `0 spatial / Base VLM` uses the current extension protocol's explicit `plain_base` pre-SFT construction.", "",
+        "`Baseline + depth` is an exact alias only after a one-video Common-7 bitwise hidden-feature equality test with a fresh depth head. `SS + depth` passed a same-current-code loss-only equivalence test but receives an independent full-cache LogME fit because the older formal SpatialStack cache predates numerical forward changes. `0 spatial / Base VLM` uses the current extension protocol's explicit `plain_base` pre-SFT construction.", "",
         "## Frozen official result", "",
         f"Formal five Common-7 Spearman rho: **{float(primary['spearman_rho']):.12f}**; Kendall tau-b: **{float(primary['kendall_tau_b']):.12f}**.", "",
         "## Sources", "",
