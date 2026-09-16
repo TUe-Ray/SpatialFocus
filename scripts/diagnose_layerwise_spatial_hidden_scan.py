@@ -12,6 +12,7 @@ import argparse
 from contextlib import contextmanager
 import gc
 import csv
+import hashlib
 import inspect
 import json
 import math
@@ -393,6 +394,26 @@ def seeded_fusion_initialization(seed: int):
         yield
 
 
+def module_state_sha256(module: nn.Module) -> str:
+    """Hash an initialized module state without using checkpoint serialization.
+
+    ``torch.save`` embeds container details that can vary across PyTorch
+    releases.  This canonical stream makes the official constructor seed and
+    every tensor name/shape/dtype/value directly auditable.
+    """
+    digest = hashlib.sha256()
+    for name, value in sorted(module.state_dict().items()):
+        tensor = value.detach().cpu().contiguous()
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(tensor.dtype).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(json.dumps(list(tensor.shape), separators=(",", ":")).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(tensor.view(torch.uint8).numpy().tobytes())
+    return digest.hexdigest()
+
+
 class Cut3rSidecarOnlySpatialTower(nn.Module):
     """Minimal CUT3R marker used when a forward consumes cached sidecars."""
 
@@ -535,6 +556,18 @@ def install_pre_sft_fusion(
             config.pre_projector_add_zero_init = True
             base.spatial_tower = Cut3rSidecarOnlySpatialTower()
             base.fusion_block = build_multimodal_fusion_block(config)
+        elif controlled_spec is not None and controlled_spec.identifier == "A_prime":
+            config.use_cut3r_spatialstack = False
+            config.spatial_tower = "cut3r"
+            config.mm_spatial_tower = "cut3r"
+            config.spatial_tower_preextracted_only = True
+            config.spatial_feature_dim = 768
+            config.spatial_tower_select_feature = "patch_tokens"
+            config.cut3r_spatialstack_feature_key = "cut3r_dec_layers"
+            config.fusion_block = "pre_projector_cross_attention_patch_only"
+            config.pre_projector_cross_attention_source_layer = 12
+            base.spatial_tower = Cut3rSidecarOnlySpatialTower()
+            base.fusion_block = build_multimodal_fusion_block(config)
         elif variant in {"ss_identity", "ss_zero", "c1_ss_add", "c1_ss_cross_attn_v1"} or (
             controlled_spec is not None
         ):
@@ -668,6 +701,8 @@ def install_pre_sft_fusion(
         or base.get_fusion_block()
         or base.get_geometry_aware_projection()
     )
+    is_controlled_a_prime = controlled_spec is not None and controlled_spec.identifier == "A_prime"
+    fresh_fusion_state_sha256 = module_state_sha256(module) if is_controlled_a_prime else None
     # Newly constructed fusion modules default to float32, while the loaded
     # pre-SFT VLM/SigLIP path is commonly dispatched in float16.  Match the
     # freshly initialized module to the common model dtype before its first
@@ -678,8 +713,18 @@ def install_pre_sft_fusion(
             (parameter.dtype for parameter in model.parameters() if not parameter.is_meta),
             None,
         )
+    module_device = None
+    if is_controlled_a_prime:
+        get_vision_tower = getattr(model, "get_vision_tower", None)
+        vision_tower = get_vision_tower() if callable(get_vision_tower) else None
+        candidate_device = getattr(vision_tower, "device", None)
+        if isinstance(candidate_device, (str, torch.device)):
+            module_device = torch.device(candidate_device)
     if isinstance(module_dtype, torch.dtype):
-        module.to(dtype=module_dtype)
+        if module_device is None:
+            module.to(dtype=module_dtype)
+        else:
+            module.to(device=module_device, dtype=module_dtype)
     if controlled_spec is not None and controlled_spec.identifier == "A_prime":
         # A-prime's official pre-SFT state is the default PyTorch
         # initialization constructed under training seed 42.  Do not replace
@@ -687,7 +732,9 @@ def install_pre_sft_fusion(
         pass
     elif controlled_spec is not None and controlled_spec.identifier == "B":
         apply_pre_projector_add_c1(base.get_fusion_block())
-    elif variant == "c1_ss_add" or variant == "c1_ss_cross_attn_v1" or controlled_spec is not None:
+    elif variant == "c1_ss_add" or variant == "c1_ss_cross_attn_v1" or (
+        controlled_spec is not None and controlled_spec.identifier in {"C", "D", "E", "H"}
+    ):
         apply_spatialstack_c1(base.get_cut3r_spatialstack_merger(), qk_basis_mode="shared_canonical")
     elif variant in {"c1_vlm3r", "c1_eomt_object"}:
         apply_vlm3r_c1(base.get_fusion_block(), qk_basis_mode="shared_canonical")
@@ -731,6 +778,16 @@ def install_pre_sft_fusion(
             "spatialstack_llm_layers": getattr(config, "cut3r_spatialstack_llm_layers", None),
         "fusion_parameter_dtype": str(module_dtype) if isinstance(module_dtype, torch.dtype) else None,
     }
+    if is_controlled_a_prime:
+        metadata.update(
+            {
+                "fresh_fusion_state_sha256": fresh_fusion_state_sha256,
+                "fresh_fusion_state_hash_format": "sorted_state_dict_name_dtype_shape_raw_bytes_v1",
+                "fresh_fusion_state_dtype": "torch.float32",
+                "runtime_fusion_state_sha256": module_state_sha256(module),
+                "fusion_execution_device": str(module_device) if module_device is not None else "cpu",
+            }
+        )
     model._pre_sft_fusion_metadata = metadata
     return metadata
 

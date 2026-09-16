@@ -2550,6 +2550,7 @@ class LlavaMetaForCausalLM(ABC):
                     image_features = self.get_model().mm_projector(image_features)
                     metrics = {
                         **dict(getattr(fusion_block, "last_debug", {})),
+                        "cut3r_detached": True,
                         "mm_projector_input_shape": pre_projector_shape,
                         "mm_projector_output_shape": list(image_features.shape),
                     }

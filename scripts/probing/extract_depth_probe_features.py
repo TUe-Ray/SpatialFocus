@@ -1379,6 +1379,83 @@ def assert_first_pre_sft_fusion_video_runtime(
     return result
 
 
+def assert_first_controlled_a_prime_runtime(
+    *,
+    model: torch.nn.Module,
+    hidden_states: Any,
+    metadata: dict[str, Any],
+    selected_frames: list[int],
+    model_forward_inputs: dict[str, Any],
+) -> dict[str, Any]:
+    """Fail fast unless A-prime executed its exact patch-only pre-projector path."""
+    result = assert_first_pre_sft_fusion_video_runtime(
+        hidden_states=hidden_states,
+        metadata=metadata,
+        selected_frames=selected_frames,
+        model_forward_inputs=model_forward_inputs,
+    )
+    metrics = getattr(
+        model.get_model(), "_last_pre_projector_cross_attention_patch_only_metrics", None
+    )
+    if not isinstance(metrics, dict):
+        raise RuntimeError("controlled_a_prime emitted no pre-projector runtime telemetry")
+    expected_scalars = {
+        "fusion_type": "pre_projector_cross_attention_patch_only",
+        "fusion_stage": "pre_mm_projector",
+        "cut3r_source_layer": 12,
+        "geometry_tokens": "patch_only",
+        "camera_token_count": 0,
+        "finite": True,
+        "cut3r_detached": True,
+    }
+    for name, expected in expected_scalars.items():
+        if metrics.get(name) != expected:
+            raise RuntimeError(
+                f"controlled_a_prime telemetry mismatch for {name}: "
+                f"expected={expected!r}, observed={metrics.get(name)!r}"
+            )
+    expected_shapes = {
+        "visual_query_shape": [32, 729, 1152],
+        "raw_patch_shape": [32, 729, 768],
+        "geometry_kv_shape": [32, 729, 768],
+        "fused_shape": [32, 729, 1152],
+        "mm_projector_input_shape": [32, 729, 1152],
+        "mm_projector_output_shape": [32, 729, 3584],
+    }
+    for name, expected in expected_shapes.items():
+        observed = metrics.get(name)
+        if observed != expected:
+            raise RuntimeError(
+                f"controlled_a_prime telemetry mismatch for {name}: "
+                f"expected={expected}, observed={observed}"
+            )
+    if metrics["visual_query_shape"][:2] != metrics["geometry_kv_shape"][:2]:
+        raise RuntimeError("controlled_a_prime Q and aligned K/V frame-token dimensions differ")
+    if metrics["visual_query_shape"] != metrics["mm_projector_input_shape"]:
+        raise RuntimeError("controlled_a_prime fused residual did not enter mm_projector unchanged")
+    configured_spatialstack = getattr(model.config, "use_cut3r_spatialstack", False)
+    if isinstance(configured_spatialstack, str):
+        configured_spatialstack = configured_spatialstack.lower() in {"1", "true", "yes", "on"}
+    if configured_spatialstack:
+        raise RuntimeError("controlled_a_prime unexpectedly enabled SpatialStack")
+    fusion = model.get_model().get_fusion_block()
+    if (
+        fusion is None
+        or int(fusion.cross_attention.num_heads) != 18
+        or float(fusion.cross_attention.dropout) != 0.0
+        or float(fusion.dropout.p) != 0.1
+        or bool(fusion.c1_enabled.item())
+    ):
+        raise RuntimeError("controlled_a_prime fusion-module architecture/default initialization contract failed")
+    return {
+        **result,
+        "architecture": "A_prime",
+        "runtime_telemetry": dict(metrics),
+        "cut3r_detached": metrics["cut3r_detached"],
+        "spatialstack_disabled": True,
+    }
+
+
 def normalize_captured_video_tokens(
     model: torch.nn.Module,
     tensor: torch.Tensor,
@@ -2178,6 +2255,17 @@ def extract_for_video(
                 runtime_dtypes=runtime_dtypes,
                 model_forward_inputs=model_forward_inputs,
             )
+        elif (
+            args.model_loading_mode == "pre_sft_fusion"
+            and args.pre_sft_fusion_variant == "controlled_a_prime"
+        ):
+            first_video_runtime_assertions = assert_first_controlled_a_prime_runtime(
+                model=model,
+                hidden_states=hidden_states,
+                metadata=metadata,
+                selected_frames=selected_frames,
+                model_forward_inputs=model_forward_inputs,
+            )
         elif args.model_loading_mode in {"pre_sft_fusion", "adapter"} and not args.pre_llm_feature_names:
             first_video_runtime_assertions = assert_first_pre_sft_fusion_video_runtime(
                 hidden_states=hidden_states,
@@ -2442,6 +2530,7 @@ def main() -> None:
             "controlled_a_prime",
             "c1_controlled_b", "c1_controlled_c", "c1_controlled_d",
             "c1_controlled_e", "c1_controlled_h",
+            "controlled_a_prime",
         ],
         default=None,
         help="Architecture attached to the plain base VLM in pre_sft_fusion mode.",
@@ -2885,6 +2974,12 @@ def main() -> None:
                     else "zero" if args.pre_sft_fusion_variant == "ss_zero" else None
                 ),
                 "shared_llm_layers": list(args.llm_layers),
+                "fusion_install_metadata": dict(
+                    getattr(model, "_pre_sft_fusion_metadata", {})
+                ),
+                "fresh_fusion_state_sha256": getattr(
+                    model, "_pre_sft_fusion_metadata", {}
+                ).get("fresh_fusion_state_sha256"),
                 "c1_calibration_json": str(Path(args.c1_calibration_json).resolve()) if args.c1_calibration_json else None,
                 "c1_calibration_sha256": sha256_file(Path(args.c1_calibration_json)) if args.c1_calibration_json else None,
                 "c1_artifact_architecture": c1_artifact.get("architecture") if c1_artifact else None,

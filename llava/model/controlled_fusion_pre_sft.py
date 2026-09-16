@@ -95,6 +95,11 @@ ALL_CONTROLLED_FUSION_PRE_SFT_SPECS = {
     **CONTROLLED_FUSION_PRE_SFT_SPECS,
 }
 
+# Backward-compatible descriptive name used by the dedicated depth-probe
+# workflow.  Keep one object/definition so LogME and depth probing cannot
+# diverge on the A-prime topology.
+CONTROLLED_A_PRIME_PRE_SFT_SPEC = A_PRIME_PRE_SFT_SPEC
+
 CONTROLLED_FUSION_BY_PRE_SFT_VARIANT = {
     spec.pre_sft_variant: spec for spec in ALL_CONTROLLED_FUSION_PRE_SFT_SPECS.values()
 }
