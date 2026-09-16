@@ -49,9 +49,22 @@ Current asset audit:
   `point_maps_ref`, plus a frozen no-training C1 activation.
 - Selective fusion has a PASS EoMT consumer grid with 1,199 scenes and 3,597
   payload files.
-- Object Token has the same complete EoMT consumer grid and can be prepared
-  as a separate full-policy campaign. Its validation still records actual-VLM
-  forward parity as pending, so it must pass an architecture-specific smoke.
+- Object Token has the same complete EoMT consumer grid and is available as
+  candidate `OBJECT`. Because the grid validation predates actual-VLM
+  integration, every clean campaign must still pass the architecture-specific
+  smoke that proves nonzero auxiliary tokens were appended.
 - Visual GeoRoPE has the same 1,199 full point-map sidecars and a frozen
-  no-training C1 activation. It lacks a complete 15-feature pre-SFT run, not
-  an input asset.
+  no-training C1 activation and is available as candidate `VISUAL`. Its smoke
+  must prove that `visual_3d_rope` consumed `point_maps_ref`.
+
+Run the two additional representation candidates in an isolated campaign:
+
+```bash
+CANDIDATES="OBJECT VISUAL" \
+  CACHE_ROOT=/home/shaoruei/probe_cache/additional_pre_sft_completion_v1 \
+  DURABLE_ROOT=/home/shaoruei/probe_outputs/additional_pre_sft_completion_v1 \
+  LOG_ROOT=/home/shaoruei/SpatialFocus/logs/additional_pre_sft_completion_v1 \
+  scripts/probing/run_legacy_pre_sft_completion_local.sh smoke
+```
+
+Use the same environment variables with `full` only after this smoke passes.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Complete the current 15-feature policy for seven historical pre-SFT probes.
+# Complete the current 15-feature policy for historical pre-SFT probes.
 set -euo pipefail
 
 MODE="${1:-}"
@@ -51,6 +51,8 @@ candidate_field() {
     VLM3R:label) printf 'c1_vlm3r' ;; VLM3R:variant) printf 'c1_vlm3r' ;; VLM3R:c1) printf '/home/shaoruei/probe_outputs/c1_vlm3r_v1/official/vlm3r.json' ;; VLM3R:subdir) printf 'spatial_features' ;; VLM3R:sources|VLM3R:layers) printf '' ;;
     GEOROPE:label) printf 'c1_geo_rope_fusion' ;; GEOROPE:variant) printf 'c1_geo_rope_fusion' ;; GEOROPE:c1) printf '/home/shaoruei/probe_outputs/c1_vlm3r_v1/official/vlm3r.json' ;; GEOROPE:subdir) printf 'spatial_features' ;; GEOROPE:sources|GEOROPE:layers) printf '' ;;
     SELECTIVE:label) printf 'c1_vlm3r_eomt_selective' ;; SELECTIVE:variant) printf 'c1_vlm3r' ;; SELECTIVE:c1) printf '/home/shaoruei/probe_outputs/c1_vlm3r_v1/official/vlm3r.json' ;; SELECTIVE:subdir) printf 'spatial_features' ;; SELECTIVE:sources|SELECTIVE:layers) printf '' ;;
+    OBJECT:label) printf 'c1_eomt_object' ;; OBJECT:variant) printf 'c1_eomt_object' ;; OBJECT:c1) printf '/home/shaoruei/probe_outputs/c1_vlm3r_v1/official/vlm3r.json' ;; OBJECT:subdir) printf 'spatial_features' ;; OBJECT:sources|OBJECT:layers) printf '' ;;
+    VISUAL:label) printf 'c1_visual_geo_rope' ;; VISUAL:variant) printf 'c1_visual_geo_rope' ;; VISUAL:c1) printf '/home/shaoruei/probe_outputs/c1_vlm3r_v1/official/vlm3r.json' ;; VISUAL:subdir) printf 'spatial_features' ;; VISUAL:sources|VISUAL:layers) printf '' ;;
     *) echo "Unsupported candidate/field: $id/$field" >&2; return 2 ;;
   esac
 }
@@ -58,7 +60,7 @@ candidate_field() {
 validate_candidates() {
   local id
   for id in $CANDIDATES; do
-    [[ "$id" =~ ^(SS012|SS123|SS036|SSCROSS|VLM3R|GEOROPE|SELECTIVE)$ ]] || { echo "Unsupported CANDIDATES entry: $id" >&2; exit 2; }
+    [[ "$id" =~ ^(SS012|SS123|SS036|SSCROSS|VLM3R|GEOROPE|SELECTIVE|OBJECT|VISUAL)$ ]] || { echo "Unsupported CANDIDATES entry: $id" >&2; exit 2; }
   done
 }
 
@@ -143,11 +145,16 @@ extract_candidate() {
     --dtype float16 --cache-dtype float16 --runtime-root "$output/runtime/$label" --pre-sft-gpu-weight-budget "$GPU_WEIGHT_BUDGET"
     --pre-sft-cpu-offload-budget "$CPU_OFFLOAD_BUDGET" --assert-first-video --resume)
   [[ -z "$sources" ]] || command+=(--spatialstack-cut3r-layers "$sources" --spatialstack-llm-layers "$layers")
-  if [[ "$id" == GEOROPE ]]; then
-    command+=(--geometry-c1-calibration-json /home/shaoruei/probe_outputs/c1_geometry_pre_sft_v1/geo_rope_fusion/c1_activation.json
+  if [[ "$id" == GEOROPE || "$id" == VISUAL ]]; then
+    local geometry_architecture
+    [[ "$id" == GEOROPE ]] && geometry_architecture=geo_rope_fusion || geometry_architecture=visual_geo_rope
+    command+=(--geometry-c1-calibration-json "/home/shaoruei/probe_outputs/c1_geometry_pre_sft_v1/$geometry_architecture/c1_activation.json"
       --geometry-spatial-features-root "$GEOMETRY_ROOT" --geometry-spatial-features-subdir spatial_features_points --geometry-point-map-key point_maps_ref)
   elif [[ "$id" == SELECTIVE ]]; then
     command+=(--eomt-selective-kv-gate --eomt-consumer-cache-root "$EOMT_ROOT" --eomt-cache-validation "$EOMT_ROOT/validation.json")
+    [[ "$namespace" == smoke ]] && command+=(--verify-eomt-file-checksum)
+  elif [[ "$id" == OBJECT ]]; then
+    command+=(--eomt-consumer-cache-root "$EOMT_ROOT" --eomt-cache-validation "$EOMT_ROOT/validation.json")
     [[ "$namespace" == smoke ]] && command+=(--verify-eomt-file-checksum)
   fi
   env CUDA_VISIBLE_DEVICES="$CUDA_DEVICES" MPLCONFIGDIR=/tmp/legacy_presft_mpl conda run -n "$ENV_NAME" python -u "${command[@]}" 2>&1 | tee "$log"
@@ -197,7 +204,7 @@ recycle_features() {
   local id="$1" label target
   label="$(candidate_field "$id" label)"; target="$CACHE_ROOT/full/$id/features/$label"
   [[ "$RECYCLE_FEATURE_CACHE" == 1 ]] || return 0
-  case "$target" in "$CACHE_ROOT"/full/SS012/features/c1_spatialstack_add|"$CACHE_ROOT"/full/SS123/features/c1_spatialstack_add_123|"$CACHE_ROOT"/full/SS036/features/c1_spatialstack_add_036|"$CACHE_ROOT"/full/SSCROSS/features/c1_spatialstack_cross_attn_v1|"$CACHE_ROOT"/full/VLM3R/features/c1_vlm3r|"$CACHE_ROOT"/full/GEOROPE/features/c1_geo_rope_fusion|"$CACHE_ROOT"/full/SELECTIVE/features/c1_vlm3r_eomt_selective) ;; *) echo "Refusing unexpected cleanup target: $target" >&2; exit 1;; esac
+  case "$target" in "$CACHE_ROOT"/full/SS012/features/c1_spatialstack_add|"$CACHE_ROOT"/full/SS123/features/c1_spatialstack_add_123|"$CACHE_ROOT"/full/SS036/features/c1_spatialstack_add_036|"$CACHE_ROOT"/full/SSCROSS/features/c1_spatialstack_cross_attn_v1|"$CACHE_ROOT"/full/VLM3R/features/c1_vlm3r|"$CACHE_ROOT"/full/GEOROPE/features/c1_geo_rope_fusion|"$CACHE_ROOT"/full/SELECTIVE/features/c1_vlm3r_eomt_selective|"$CACHE_ROOT"/full/OBJECT/features/c1_eomt_object|"$CACHE_ROOT"/full/VISUAL/features/c1_visual_geo_rope) ;; *) echo "Refusing unexpected cleanup target: $target" >&2; exit 1;; esac
   [[ -d "$target" ]] || return 0
   echo "[RECYCLE] removing regenerated feature tensors after durable result preservation: $target"; rm -rf -- "$target"
 }

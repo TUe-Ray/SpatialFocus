@@ -81,11 +81,29 @@ def main() -> None:
             raise ValueError(f"{identifier}: C1 artifact differs from locked manifest")
         if candidate.get("geometry_c1") and provenance.get("geometry_c1_calibration_sha256") != candidate["geometry_c1"]["sha256"]:
             raise ValueError(f"{identifier}: geometry C1 artifact differs from locked manifest")
-        if candidate.get("uses_eomt_selective_gate"):
-            if provenance.get("eomt_selective_kv_gate") is not True:
-                raise ValueError(f"{identifier}: selective EoMT gate was not active")
+        if candidate.get("uses_eomt_selective_gate") or candidate.get("uses_eomt_object_tokens"):
             if provenance.get("eomt_cache_validation_sha256") != manifest["eomt"]["validation_sha256"]:
                 raise ValueError(f"{identifier}: EoMT validation differs from locked manifest")
+        if candidate.get("uses_eomt_selective_gate") and provenance.get("eomt_selective_kv_gate") is not True:
+            raise ValueError(f"{identifier}: selective EoMT gate was not active")
+        if candidate.get("uses_eomt_object_tokens"):
+            assertion = provenance.get("extraction_samples", [{}])[0].get("first_video_runtime_assertions", {})
+            if (
+                provenance.get("experiment_variant") != "c1_eomt_object"
+                or assertion.get("assessment") != "PASS"
+                or assertion.get("architecture") != "eomt_object"
+                or int(assertion.get("eomt_object_auxiliary_token_count", 0)) <= 0
+            ):
+                raise ValueError(f"{identifier}: full extraction lacks the object-token runtime proof")
+        if candidate.get("geometry_c1", {}).get("architecture") == "visual_geo_rope":
+            assertion = provenance.get("extraction_samples", [{}])[0].get("first_video_runtime_assertions", {})
+            if (
+                provenance.get("active_geometry_architecture") != "visual_3d_rope"
+                or provenance.get("geometry_point_map_key") != "point_maps_ref"
+                or assertion.get("assessment") != "PASS"
+                or assertion.get("architecture") != "visual_3d_rope"
+            ):
+                raise ValueError(f"{identifier}: full extraction lacks the Visual GeoRoPE runtime proof")
         provenance_records[identifier] = {"path": str(provenance_path), "sha256": sha256(provenance_path)}
         for level in levels:
             metric_path = root / "probes" / level / "metrics.json"

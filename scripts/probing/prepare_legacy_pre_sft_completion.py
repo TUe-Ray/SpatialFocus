@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Lock and validate inputs for the seven legacy pre-SFT probe completions."""
+"""Lock and validate inputs for legacy pre-SFT probe completions."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.probing.legacy_pre_sft_completion_specs import (
+    ALL_COMPLETION_CANDIDATES,
     FULL_FEATURE_LEVELS,
     LEGACY_PARTIAL_CANDIDATES,
     REPO_OUTPUTS,
@@ -156,7 +157,7 @@ def validate_eomt(root: Path) -> dict[str, Any]:
 def main() -> None:
     args = parse_args()
     selected_ids = [value.strip() for value in args.candidates.split(",") if value.strip()]
-    known_ids = {candidate.identifier for candidate in LEGACY_PARTIAL_CANDIDATES}
+    known_ids = {candidate.identifier for candidate in ALL_COMPLETION_CANDIDATES}
     unknown_ids = sorted(set(selected_ids).difference(known_ids))
     if unknown_ids or not selected_ids or len(selected_ids) != len(set(selected_ids)):
         raise ValueError(
@@ -175,7 +176,7 @@ def main() -> None:
     eomt = validate_eomt(args.eomt_root)
 
     candidates: dict[str, dict[str, Any]] = {}
-    for candidate in LEGACY_PARTIAL_CANDIDATES:
+    for candidate in ALL_COMPLETION_CANDIDATES:
         if candidate.identifier not in selected_ids:
             continue
         c1_path = args.c1_root / candidate.c1_artifact.relative_to(REPO_OUTPUTS)
@@ -189,6 +190,8 @@ def main() -> None:
             "c1": validate_c1(c1_path, candidate.c1_architecture),
             "uses_eomt_selective_gate": candidate.uses_eomt_selective_gate,
         }
+        if candidate.uses_eomt_object_tokens:
+            record["uses_eomt_object_tokens"] = True
         if candidate.geometry_c1_activation is not None:
             geometry_c1_path = args.c1_root / candidate.geometry_c1_activation.relative_to(REPO_OUTPUTS)
             record["geometry_c1"] = validate_geometry_activation(

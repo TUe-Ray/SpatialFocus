@@ -1,4 +1,4 @@
-"""Immutable definitions for completing the seven legacy pre-SFT depth probes.
+"""Immutable definitions for completing legacy pre-SFT depth probes.
 
 These candidates already have historical partial depth-probe artifacts.  This
 module records the exact fresh pre-SFT construction and C1 inputs required for
@@ -30,6 +30,7 @@ class CompletionCandidate:
     geometry_c1_activation: Path | None = None
     geometry_architecture: str | None = None
     uses_eomt_selective_gate: bool = False
+    uses_eomt_object_tokens: bool = False
 
 
 REPO_OUTPUTS = Path("/home/shaoruei/probe_outputs")
@@ -112,7 +113,32 @@ LEGACY_PARTIAL_CANDIDATES: tuple[CompletionCandidate, ...] = (
     ),
 )
 
-BY_IDENTIFIER = {candidate.identifier: candidate for candidate in LEGACY_PARTIAL_CANDIDATES}
+ADDITIONAL_REPRESENTATION_CANDIDATES: tuple[CompletionCandidate, ...] = (
+    CompletionCandidate(
+        "OBJECT",
+        "c1_eomt_object",
+        "Object-Token Injection",
+        "c1_eomt_object",
+        VLM3R_C1,
+        "vlm3r",
+        "spatial_features",
+        uses_eomt_object_tokens=True,
+    ),
+    CompletionCandidate(
+        "VISUAL",
+        "c1_visual_geo_rope",
+        "Visual Geometry-RoPE",
+        "c1_visual_geo_rope",
+        VLM3R_C1,
+        "vlm3r",
+        "spatial_features",
+        geometry_c1_activation=REPO_OUTPUTS / "c1_geometry_pre_sft_v1/visual_geo_rope/c1_activation.json",
+        geometry_architecture="visual_geo_rope",
+    ),
+)
+
+ALL_COMPLETION_CANDIDATES = LEGACY_PARTIAL_CANDIDATES + ADDITIONAL_REPRESENTATION_CANDIDATES
+BY_IDENTIFIER = {candidate.identifier: candidate for candidate in ALL_COMPLETION_CANDIDATES}
 FULL_FEATURE_LEVELS = tuple(
     [*PRE_SFT_PRE_LLM_FEATURES, *(f"layer_{layer}" for layer in COMMON_PROBE_LAYERS)]
 )
