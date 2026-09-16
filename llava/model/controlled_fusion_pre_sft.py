@@ -1,4 +1,4 @@
-"""Exact pre-SFT topology definitions for controlled fusion B/C/D/E/H.
+"""Exact pre-SFT topology definitions for controlled fusion A-prime/B/C/D/E/H.
 
 These definitions describe architecture only.  They never identify or load a
 post-SFT checkpoint.  Keeping the topology in one importable table prevents
@@ -22,6 +22,21 @@ class ControlledFusionPreSFTSpec:
     display_name: str
 
 
+A_PRIME_PRE_SFT_SPEC = ControlledFusionPreSFTSpec(
+    identifier="A_prime",
+    pre_sft_variant="controlled_a_prime",
+    architecture="pre_projector_cross_attention_patch_only",
+    cut3r_source_layers=(12,),
+    llm_injection_layers=(),
+    fusion_type="pre_projector_cross_attention_patch_only",
+    projector_binding="source_specific",
+    display_name="A-prime: pre-projector cross-attention, CUT3R dec12 patch-only",
+)
+
+
+# These five entries remain the legacy C1-controlled set.  A-prime is kept
+# separate because its official pre-SFT state is default initialization at
+# seed 42, not a C1-canonicalized state.
 CONTROLLED_FUSION_PRE_SFT_SPECS = {
     "B": ControlledFusionPreSFTSpec(
         identifier="B",
@@ -75,18 +90,23 @@ CONTROLLED_FUSION_PRE_SFT_SPECS = {
     ),
 }
 
+ALL_CONTROLLED_FUSION_PRE_SFT_SPECS = {
+    "A_PRIME": A_PRIME_PRE_SFT_SPEC,
+    **CONTROLLED_FUSION_PRE_SFT_SPECS,
+}
+
 CONTROLLED_FUSION_BY_PRE_SFT_VARIANT = {
-    spec.pre_sft_variant: spec for spec in CONTROLLED_FUSION_PRE_SFT_SPECS.values()
+    spec.pre_sft_variant: spec for spec in ALL_CONTROLLED_FUSION_PRE_SFT_SPECS.values()
 }
 
 
 def controlled_fusion_spec(identifier: str) -> ControlledFusionPreSFTSpec:
     key = str(identifier).strip().upper()
     try:
-        return CONTROLLED_FUSION_PRE_SFT_SPECS[key]
+        return ALL_CONTROLLED_FUSION_PRE_SFT_SPECS[key]
     except KeyError as exc:
         raise ValueError(
-            f"Unsupported controlled-fusion ID {identifier!r}; expected B/C/D/E/H."
+            f"Unsupported controlled-fusion ID {identifier!r}; expected A_prime/B/C/D/E/H."
         ) from exc
 
 

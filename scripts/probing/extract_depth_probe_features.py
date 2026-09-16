@@ -990,6 +990,84 @@ def assert_first_adapter_pre_llm_video_runtime(
     return result
 
 
+def assert_first_a_prime_video_runtime(
+    *,
+    model: torch.nn.Module,
+    captured: dict[str, torch.Tensor],
+    normalized_pre_llm: dict[str, torch.Tensor],
+    requested_feature_names: list[str],
+    metadata: dict[str, Any],
+    selected_frames: list[int],
+    num_frames: int,
+    model_forward_inputs: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate the exact default-initialized A-prime pre-projector path."""
+    result = assert_first_adapter_pre_llm_video_runtime(
+        captured=captured,
+        normalized_pre_llm=normalized_pre_llm,
+        requested_feature_names=requested_feature_names,
+        metadata=metadata,
+        selected_frames=selected_frames,
+        num_frames=num_frames,
+        model_forward_inputs=model_forward_inputs,
+    )
+    expected_raw = {
+        "siglip_output": (32, 729, 1152),
+        "fusion_output": (32, 729, 1152),
+        "projected_features": (32, 729, 3584),
+    }
+    raw_shapes: dict[str, list[int] | None] = {}
+    for name, expected in expected_raw.items():
+        value = captured.get(name)
+        raw_shapes[name] = list(value.shape) if isinstance(value, torch.Tensor) else None
+        if value is None or tuple(value.shape) != expected:
+            raise RuntimeError(
+                f"A-prime raw {name} contract failed: expected={list(expected)}, "
+                f"observed={raw_shapes[name]}"
+            )
+    metrics = getattr(
+        model.get_model(),
+        "_last_pre_projector_cross_attention_patch_only_metrics",
+        None,
+    )
+    if not isinstance(metrics, dict):
+        raise RuntimeError("A-prime forward did not record pre-projector cross-attention metrics.")
+    expected_metrics = {
+        "fusion_type": "pre_projector_cross_attention_patch_only",
+        "fusion_stage": "pre_mm_projector",
+        "cut3r_source_layer": 12,
+        "geometry_tokens": "patch_only",
+        "camera_token_count": 0,
+        "visual_query_shape": [32, 729, 1152],
+        "raw_patch_shape": [32, 729, 768],
+        "geometry_kv_shape": [32, 729, 768],
+        "fused_shape": [32, 729, 1152],
+        "mm_projector_input_shape": [32, 729, 1152],
+        "mm_projector_output_shape": [32, 729, 3584],
+        "finite": True,
+    }
+    mismatches = {
+        key: {"expected": expected, "observed": metrics.get(key)}
+        for key, expected in expected_metrics.items()
+        if metrics.get(key) != expected
+    }
+    if mismatches:
+        raise RuntimeError(f"A-prime runtime telemetry mismatch: {mismatches}")
+    result.update(
+        {
+            "architecture": "controlled_a_prime",
+            "initialization": "default_pytorch_seed_42",
+            "c1_calibration_applied": False,
+            "raw_pre_llm_shapes": raw_shapes,
+            "a_prime_metrics": metrics,
+            "camera_tokens_excluded": True,
+            "cut3r_frozen_preextracted": True,
+            "spatialstack_disabled": True,
+        }
+    )
+    return result
+
+
 def assert_zero_spatial_post_fusion_projector_capture(
     captured: dict[str, torch.Tensor],
 ) -> dict[str, Any]:
@@ -2112,15 +2190,23 @@ def extract_for_video(
                 ),
             )
         elif args.model_loading_mode in {"pre_sft_fusion", "adapter"} and args.pre_llm_feature_names:
-            first_video_runtime_assertions = assert_first_adapter_pre_llm_video_runtime(
-                captured=captured,
-                normalized_pre_llm=normalized_pre_llm,
-                requested_feature_names=args.pre_llm_feature_names,
-                metadata=metadata,
-                selected_frames=selected_frames,
-                num_frames=num_frames,
-                model_forward_inputs=model_forward_inputs,
+            assertion = (
+                assert_first_a_prime_video_runtime
+                if args.pre_sft_fusion_variant == "controlled_a_prime"
+                else assert_first_adapter_pre_llm_video_runtime
             )
+            assertion_kwargs = {
+                "captured": captured,
+                "normalized_pre_llm": normalized_pre_llm,
+                "requested_feature_names": args.pre_llm_feature_names,
+                "metadata": metadata,
+                "selected_frames": selected_frames,
+                "num_frames": num_frames,
+                "model_forward_inputs": model_forward_inputs,
+            }
+            if assertion is assert_first_a_prime_video_runtime:
+                assertion_kwargs["model"] = model
+            first_video_runtime_assertions = assertion(**assertion_kwargs)
         else:
             first_video_runtime_assertions = assert_first_base_video_runtime(
                 captured=captured,
@@ -2353,6 +2439,7 @@ def main() -> None:
         choices=[
             "ss_identity", "ss_zero", "vlm3r_native", "c1_ss_add", "c1_ss_cross_attn_v1", "c1_vlm3r",
             "c1_eomt_object", "c1_geo_rope_fusion", "c1_visual_geo_rope",
+            "controlled_a_prime",
             "c1_controlled_b", "c1_controlled_c", "c1_controlled_d",
             "c1_controlled_e", "c1_controlled_h",
         ],
@@ -2790,6 +2877,9 @@ def main() -> None:
                 "experiment_variant": args.pre_sft_fusion_variant,
                 "fusion_init_seed": int(args.fusion_init_seed or 0),
                 "common_model_init_seed": int(args.common_model_init_seed),
+                "pre_sft_fusion_metadata": dict(
+                    getattr(model, "_pre_sft_fusion_metadata", {}) or {}
+                ),
                 "spatialstack_output_init": (
                     "identity" if args.pre_sft_fusion_variant == "ss_identity"
                     else "zero" if args.pre_sft_fusion_variant == "ss_zero" else None

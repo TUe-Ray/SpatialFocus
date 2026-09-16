@@ -4,6 +4,11 @@ import torch
 import torch.nn as nn
 
 from llava.model.llava_arch import LlavaMetaForCausalLM
+from llava.model.controlled_fusion_pre_sft import (
+    A_PRIME_PRE_SFT_SPEC,
+    controlled_fusion_spec,
+    controlled_fusion_spec_for_variant,
+)
 from llava.model.multimodal_fusion_block.builder import (
     CrossAttentionFusion,
     PreProjectorAddFusion,
@@ -180,3 +185,13 @@ def test_builder_constructs_explicit_patch_only_pre_projector_cross_attention():
     assert isinstance(fusion, PreProjectorCrossAttentionPatchOnlyFusion)
     assert fusion.cross_attention.num_heads == 18
     assert fusion.source_layer == 12
+
+
+def test_a_prime_pre_sft_spec_is_default_initialized_patch_only_pre_projector_control():
+    spec = controlled_fusion_spec("A_prime")
+    assert spec is A_PRIME_PRE_SFT_SPEC
+    assert controlled_fusion_spec_for_variant("controlled_a_prime") is spec
+    assert spec.architecture == "pre_projector_cross_attention_patch_only"
+    assert spec.cut3r_source_layers == (12,)
+    assert spec.llm_injection_layers == ()
+    assert spec.fusion_type == "pre_projector_cross_attention_patch_only"

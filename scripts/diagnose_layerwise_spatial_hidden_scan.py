@@ -460,7 +460,7 @@ def install_pre_sft_fusion(
         "c1_controlled_b", "c1_controlled_c", "c1_controlled_d",
         "c1_controlled_e", "c1_controlled_h",
     }
-    if variant not in {"ss_identity", "ss_zero", "vlm3r_native", *c1_variants}:
+    if variant not in {"ss_identity", "ss_zero", "vlm3r_native", "controlled_a_prime", *c1_variants}:
         raise ValueError(f"Unsupported pre-SFT fusion variant: {variant!r}")
     base = model.get_model()
     config = model.config
@@ -499,14 +499,30 @@ def install_pre_sft_fusion(
                 f"Controlled fusion {controlled_spec.identifier} requires LLM injection layers "
                 f"{controlled_spec.llm_injection_layers}, got {tuple(llm_layers)}."
             )
-    pre_projector_control = controlled_spec is not None and controlled_spec.identifier == "B"
+    pre_projector_control = (
+        controlled_spec is not None
+        and controlled_spec.identifier in {"A_prime", "B"}
+    )
     if not pre_projector_control and len(cut3r_layers) != len(llm_layers):
         raise ValueError(
             "spatialstack CUT3R and LLM layer mappings must have equal length, "
             f"got {cut3r_layers!r} and {llm_layers!r}."
         )
     with seeded_fusion_initialization(fusion_init_seed):
-        if controlled_spec is not None and controlled_spec.identifier == "B":
+        if controlled_spec is not None and controlled_spec.identifier == "A_prime":
+            config.use_cut3r_spatialstack = False
+            config.spatial_tower = "cut3r"
+            config.mm_spatial_tower = "cut3r"
+            config.spatial_tower_preextracted_only = True
+            config.spatial_feature_dim = 768
+            config.spatial_tower_select_feature = "patch_tokens"
+            config.use_cut3r_camera_tokens = False
+            config.cut3r_spatialstack_feature_key = "cut3r_dec_layers"
+            config.fusion_block = "pre_projector_cross_attention_patch_only"
+            config.pre_projector_cross_attention_source_layer = 12
+            base.spatial_tower = Cut3rSidecarOnlySpatialTower()
+            base.fusion_block = build_multimodal_fusion_block(config)
+        elif controlled_spec is not None and controlled_spec.identifier == "B":
             config.use_cut3r_spatialstack = False
             config.spatial_tower = "cut3r"
             config.mm_spatial_tower = "cut3r"
@@ -664,7 +680,12 @@ def install_pre_sft_fusion(
         )
     if isinstance(module_dtype, torch.dtype):
         module.to(dtype=module_dtype)
-    if controlled_spec is not None and controlled_spec.identifier == "B":
+    if controlled_spec is not None and controlled_spec.identifier == "A_prime":
+        # A-prime's official pre-SFT state is the default PyTorch
+        # initialization constructed under training seed 42.  Do not replace
+        # it with C1 canonicalization or any trained fusion state.
+        pass
+    elif controlled_spec is not None and controlled_spec.identifier == "B":
         apply_pre_projector_add_c1(base.get_fusion_block())
     elif variant == "c1_ss_add" or variant == "c1_ss_cross_attn_v1" or controlled_spec is not None:
         apply_spatialstack_c1(base.get_cut3r_spatialstack_merger(), qk_basis_mode="shared_canonical")
