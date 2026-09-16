@@ -45,10 +45,15 @@ def require(condition: bool, message: str) -> None:
         raise ValueError(message)
 
 
-def frame_files(path: Path) -> set[str]:
+def frame_files(path: Path, *, allowed_sidecars: set[str] | None = None) -> set[str]:
     require(path.is_dir(), f"Missing cache directory: {path}")
     files = {item.stem.removeprefix("frame_") for item in path.glob("frame_*.pt")}
-    unexpected = sorted(item.name for item in path.iterdir() if item.is_file() and not item.name.startswith("frame_"))
+    allowed_sidecars = allowed_sidecars or set()
+    unexpected = sorted(
+        item.name
+        for item in path.iterdir()
+        if item.is_file() and not item.name.startswith("frame_") and item.name not in allowed_sidecars
+    )
     require(not unexpected, f"Unexpected files under {path}: {unexpected[:5]}")
     return files
 
@@ -106,7 +111,7 @@ def main() -> None:
     coverage: dict[str, Any] = {}
     for level in FULL_FEATURE_LEVELS:
         path = args.cache_root / "features" / args.model_label / level
-        found = frame_files(path)
+        found = frame_files(path, allowed_sidecars={"provenance.json"})
         require(found == expected_frames, f"{level}: frame population differs from the fixed manifest")
         coverage[level] = {"path": str(path), "frames": len(found), "exact_manifest_match": True}
     for cache_name in ("gt_depth", "metadata"):
