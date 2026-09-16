@@ -1068,6 +1068,39 @@ def assert_first_a_prime_video_runtime(
     return result
 
 
+def assert_first_a_prime_post_sft_video_runtime(
+    *,
+    model: torch.nn.Module,
+    captured: dict[str, torch.Tensor],
+    normalized_pre_llm: dict[str, torch.Tensor],
+    requested_feature_names: list[str],
+    metadata: dict[str, Any],
+    selected_frames: list[int],
+    num_frames: int,
+    model_forward_inputs: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate trained A-prime without claiming fresh pre-SFT initialization."""
+    result = assert_first_a_prime_video_runtime(
+        model=model,
+        captured=captured,
+        normalized_pre_llm=normalized_pre_llm,
+        requested_feature_names=requested_feature_names,
+        metadata=metadata,
+        selected_frames=selected_frames,
+        num_frames=num_frames,
+        model_forward_inputs=model_forward_inputs,
+    )
+    result.update(
+        {
+            "architecture": "controlled_a_prime_post_sft",
+            "initialization": "trained_post_sft_checkpoint",
+            "c1_calibration_applied": None,
+            "post_sft_checkpoint_state_loaded": True,
+        }
+    )
+    return result
+
+
 def assert_zero_spatial_post_fusion_projector_capture(
     captured: dict[str, torch.Tensor],
 ) -> dict[str, Any]:
@@ -2278,11 +2311,17 @@ def extract_for_video(
                 ),
             )
         elif args.model_loading_mode in {"pre_sft_fusion", "adapter"} and args.pre_llm_feature_names:
-            assertion = (
-                assert_first_a_prime_video_runtime
-                if args.pre_sft_fusion_variant == "controlled_a_prime"
-                else assert_first_adapter_pre_llm_video_runtime
+            is_post_sft_a_prime = (
+                args.model_loading_mode == "adapter"
+                and str(getattr(model.config, "fusion_block", "") or "").strip().lower()
+                == "pre_projector_cross_attention_patch_only"
             )
+            if args.pre_sft_fusion_variant == "controlled_a_prime":
+                assertion = assert_first_a_prime_video_runtime
+            elif is_post_sft_a_prime:
+                assertion = assert_first_a_prime_post_sft_video_runtime
+            else:
+                assertion = assert_first_adapter_pre_llm_video_runtime
             assertion_kwargs = {
                 "captured": captured,
                 "normalized_pre_llm": normalized_pre_llm,
@@ -2292,7 +2331,10 @@ def extract_for_video(
                 "num_frames": num_frames,
                 "model_forward_inputs": model_forward_inputs,
             }
-            if assertion is assert_first_a_prime_video_runtime:
+            if assertion in {
+                assert_first_a_prime_video_runtime,
+                assert_first_a_prime_post_sft_video_runtime,
+            }:
                 assertion_kwargs["model"] = model
             first_video_runtime_assertions = assertion(**assertion_kwargs)
         else:

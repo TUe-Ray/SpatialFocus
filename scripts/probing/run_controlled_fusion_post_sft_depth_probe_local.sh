@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Full-policy post-SFT ScanNet depth probes for controlled B/C/D/E/H.
+# Full-policy post-SFT ScanNet depth probes for controlled A-prime/B/C/D/E/H.
 # Extraction is sequential and feature caches are recycled only after durable
 # probe metrics/checkpoints/provenance pass completeness verification.
 set -euo pipefail
@@ -13,7 +13,7 @@ fi
 MODE="${1:-}"
 CANDIDATE="${2:-}"
 if [[ ! "$MODE" =~ ^(preflight|smoke-one|smoke-all|run-one|run-all|summarize|status)$ ]]; then
-  echo "Usage: $0 {preflight|smoke-one <B|C|D|E|H>|smoke-all|run-one <B|C|D|E|H>|run-all|summarize|status}" >&2
+  echo "Usage: $0 {preflight|smoke-one <A_prime|B|C|D|E|H>|smoke-all|run-one <A_prime|B|C|D|E|H>|run-all|summarize|status}" >&2
   exit 2
 fi
 
@@ -37,7 +37,7 @@ RECYCLE_FULL_CACHE="${RECYCLE_FULL_CACHE:-1}"
 SPATIAL_SUBDIR="12:spatial_features"
 GPU_WEIGHT_BUDGETS="${GPU_WEIGHT_BUDGETS:-6GiB,10GiB}"
 CPU_WEIGHT_BUDGET="${CPU_WEIGHT_BUDGET:-40GiB}"
-CANDIDATES=(B C D E H)
+CANDIDATES=(A_prime B C D E H)
 
 source "$REPO_ROOT/scripts/probing/common_probe_layers.sh"
 PRE_LLM_FEATURES="fusion_output,projected_features"
@@ -52,23 +52,25 @@ log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$*"; }
 candidate_field() {
   local id="$1" field="$2"
   case "$id:$field" in
+    A_prime:checkpoint) printf 'official_controlled_A_prime_preprojector_crossattn_patchonly_dec12_4n4g_16gpu_26764149_A_prime' ;;
     B:checkpoint) printf 'official_controlled_B_pre_projector_add_dec12_once_4n4g_16gpu_26484327_0' ;;
     C:checkpoint) printf 'official_controlled_C_cross_attn_dec12_llm0_once_4n4g_16gpu_26484327_1' ;;
     D:checkpoint) printf 'official_controlled_D_add_dec12_llm0_once_4n4g_16gpu_26484327_2' ;;
     E:checkpoint) printf 'official_controlled_E_add_dec12x3_llm0_1_2_repeat_siteproj_4n4g_16gpu_26484327_3' ;;
     H:checkpoint) printf 'official_controlled_H_cross_attn_dec12x3_llm0_1_2_repeat_4n4g_16gpu_26484327_4' ;;
+    A_prime:label) printf 'controlled_a_prime_post_sft' ;;
     B:label) printf 'controlled_b_post_sft' ;; C:label) printf 'controlled_c_post_sft' ;;
     D:label) printf 'controlled_d_post_sft' ;; E:label) printf 'controlled_e_post_sft' ;;
     H:label) printf 'controlled_h_post_sft' ;;
-    B:preset) printf 'original' ;;
+    A_prime:preset|B:preset) printf 'original' ;;
     C:preset|D:preset|E:preset|H:preset) printf 'spatialstack' ;;
     *) echo "Unsupported controlled candidate/field: $id/$field" >&2; return 2 ;;
   esac
 }
 
 validate_candidate() {
-  [[ "$1" =~ ^(B|C|D|E|H)$ ]] || {
-    echo "Expected candidate B, C, D, E, or H; got ${1:-<empty>}" >&2
+  [[ "$1" =~ ^(A_prime|B|C|D|E|H)$ ]] || {
+    echo "Expected candidate A_prime, B, C, D, E, or H; got ${1:-<empty>}" >&2
     exit 2
   }
 }
@@ -113,6 +115,19 @@ required_files = {
     "config.json", "generation_config.json",
 }
 specs = {
+    "A_prime": {
+        "directory": "official_controlled_A_prime_preprojector_crossattn_patchonly_dec12_4n4g_16gpu_26764149_A_prime",
+        "config": {"use_cut3r_spatialstack": None,
+                   "fusion_block": "pre_projector_cross_attention_patch_only",
+                   "pre_projector_cross_attention_source_layer": 12,
+                   "spatial_tower_select_feature": "patch_tokens"},
+        "required_keys": ("fusion_block.clip_query_proj.weight",
+                          "fusion_block.spatial_encoder_key_proj.weight",
+                          "fusion_block.spatial_encoder_value_proj.weight",
+                          "fusion_block.cross_attention.in_proj_weight",
+                          "fusion_block.out_proj.weight",
+                          "mm_projector.0.weight", "mm_projector.2.weight"),
+    },
     "B": {
         "directory": "official_controlled_B_pre_projector_add_dec12_once_4n4g_16gpu_26484327_0",
         "config": {"use_cut3r_spatialstack": None, "fusion_block": "pre_projector_add",
@@ -164,8 +179,8 @@ expected_dirs = sorted(spec["directory"] for spec in specs.values())
 if actual_dirs != expected_dirs:
     failures.append(f"checkpoint directories differ: expected={expected_dirs}, actual={actual_dirs}")
 all_checkpoint_files = list(checkpoint_root.glob("*/*"))
-if len([path for path in all_checkpoint_files if path.is_file()]) != 25:
-    failures.append("controlled checkpoint root does not contain exactly 25 files")
+if len([path for path in all_checkpoint_files if path.is_file()]) != 30:
+    failures.append("controlled checkpoint root does not contain exactly 30 files")
 for candidate, spec in specs.items():
     root = checkpoint_root / spec["directory"]
     actual_files = {path.name for path in root.iterdir() if path.is_file()} if root.is_dir() else set()
@@ -344,7 +359,7 @@ preserve_and_recycle() {
     >"$DURABLE_ROOT/provenance/$label/checkpoint_sha256.txt"
   if [[ "$RECYCLE_FULL_CACHE" == 1 ]]; then
     case "$root" in
-      "$CACHE_ROOT"/full/[BCDEH]) rm -rf -- "$root" ;;
+      "$CACHE_ROOT"/full/A_prime|"$CACHE_ROOT"/full/[BCDEH]) rm -rf -- "$root" ;;
       *) echo "Refusing unexpected cache cleanup target: $root" >&2; exit 1 ;;
     esac
     log "Verified durable results retained; recycled $root"

@@ -41,11 +41,31 @@ class ControlledFusionPostSftProbeTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             assert_baseline_or_zero_spatial_forward_contract(model)
 
+    def test_local_token_contract_accepts_a_prime_patch_only_cross_attention(self) -> None:
+        model = _Model(
+            spatial_tower="cut3r",
+            fusion_block="pre_projector_cross_attention_patch_only",
+            pre_projector_cross_attention_source_layer=12,
+            use_cut3r_spatialstack=False,
+        )
+        assert_baseline_or_zero_spatial_forward_contract(model)
+
+    def test_local_token_contract_rejects_a_prime_wrong_source(self) -> None:
+        model = _Model(
+            spatial_tower="cut3r",
+            fusion_block="pre_projector_cross_attention_patch_only",
+            pre_projector_cross_attention_source_layer=9,
+            use_cut3r_spatialstack=False,
+        )
+        with self.assertRaises(RuntimeError):
+            assert_baseline_or_zero_spatial_forward_contract(model)
+
     def test_runner_uses_full_policy_and_rolling_cache(self) -> None:
         runner = (PROBING_DIR / "run_controlled_fusion_post_sft_depth_probe_local.sh").read_text()
         self.assertIn('PRE_LLM_FEATURES="fusion_output,projected_features"', runner)
         self.assertIn('COMMON_PROBE_LAYER_LEVELS_CSV', runner)
-        self.assertIn('CANDIDATES=(B C D E H)', runner)
+        self.assertIn('CANDIDATES=(A_prime B C D E H)', runner)
+        self.assertIn("A_prime:label) printf 'controlled_a_prime_post_sft'", runner)
         self.assertIn('SPATIAL_SUBDIR="12:spatial_features"', runner)
         self.assertIn('RECYCLE_FULL_CACHE="${RECYCLE_FULL_CACHE:-1}"', runner)
         self.assertIn('--assert-first-video --resume', runner)
