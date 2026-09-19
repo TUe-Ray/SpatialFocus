@@ -3,6 +3,7 @@ import json
 import math
 import os
 import sys
+import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
@@ -147,6 +148,84 @@ def extract_vggt_tokens(vggt, pixel_values, image_size, layer_indices):
     return tokens_by_layer, int(patch_start_idx), views.shape[-2:]
 
 
+def validate_sidecar(
+    path,
+    layer_indices,
+    input_size,
+    expected_frame_idx=None,
+    expected_source_video=None,
+):
+    """Load and strictly validate one completed VGGT aggregated-token sidecar."""
+    payload = torch.load(path, map_location="cpu")
+    if not isinstance(payload, dict) or set(payload) != {"frames", "meta"}:
+        raise ValueError(f"unexpected top-level schema: {type(payload)} {getattr(payload, 'keys', lambda: [])()}")
+
+    frames = payload["frames"]
+    meta = payload["meta"]
+    if not isinstance(frames, dict) or set(frames) != {"aggregated_tokens", "frame_idx"}:
+        raise ValueError(f"unexpected frames schema: {type(frames)} {getattr(frames, 'keys', lambda: [])()}")
+    if not isinstance(meta, dict):
+        raise ValueError(f"meta is not a dict: {type(meta)}")
+
+    frame_idx = frames["frame_idx"]
+    if not isinstance(frame_idx, torch.Tensor):
+        raise ValueError(f"frame_idx is not a tensor: {type(frame_idx)}")
+    if frame_idx.device.type != "cpu" or frame_idx.dtype != torch.int64 or frame_idx.ndim != 1:
+        raise ValueError(
+            f"invalid frame_idx tensor: shape={tuple(frame_idx.shape)} "
+            f"dtype={frame_idx.dtype} device={frame_idx.device}"
+        )
+    if expected_frame_idx is not None and not torch.equal(frame_idx, expected_frame_idx.cpu()):
+        raise ValueError("stored frame_idx does not match forced Decord sampling")
+
+    expected_layer_keys = {str(idx) for idx in layer_indices}
+    tokens_by_layer = frames["aggregated_tokens"]
+    if not isinstance(tokens_by_layer, dict) or set(tokens_by_layer) != expected_layer_keys:
+        raise ValueError(
+            f"invalid layer keys: expected={sorted(expected_layer_keys)} "
+            f"actual={sorted(tokens_by_layer) if isinstance(tokens_by_layer, dict) else type(tokens_by_layer)}"
+        )
+
+    expected_tokens = 5 + (int(input_size) // 14) ** 2
+    expected_shape = (len(frame_idx), expected_tokens, 2048)
+    for layer_key in sorted(expected_layer_keys, key=int):
+        tensor = tokens_by_layer[layer_key]
+        if not isinstance(tensor, torch.Tensor):
+            raise ValueError(f"layer {layer_key} is not a tensor: {type(tensor)}")
+        if tensor.device.type != "cpu" or tensor.dtype != torch.bfloat16:
+            raise ValueError(
+                f"invalid layer {layer_key} dtype/device: {tensor.dtype} {tensor.device}"
+            )
+        if tuple(tensor.shape) != expected_shape:
+            raise ValueError(
+                f"invalid layer {layer_key} shape: expected={expected_shape} "
+                f"actual={tuple(tensor.shape)}"
+            )
+
+    expected_meta = {
+        "num_frames": len(frame_idx),
+        "input_size": int(input_size),
+        "model_image_hw": (int(input_size), int(input_size)),
+        "patch_size": 14,
+        "patch_start_idx": 5,
+        "feature_dim": 2048,
+        "intermediate_layer_idx": list(layer_indices),
+        "token_dtype": "bfloat16",
+        "schema": "vggt_aggregated_tokens_v1",
+    }
+    for key, expected in expected_meta.items():
+        if meta.get(key) != expected:
+            raise ValueError(f"invalid meta.{key}: expected={expected!r} actual={meta.get(key)!r}")
+    if expected_source_video is not None and meta.get("source_video") != str(expected_source_video):
+        raise ValueError(
+            f"invalid meta.source_video: expected={str(expected_source_video)!r} "
+            f"actual={meta.get('source_video')!r}"
+        )
+    if not isinstance(meta.get("vggt_weights_path"), str):
+        raise ValueError("meta.vggt_weights_path is missing or not a string")
+    return payload
+
+
 def process_videos_on_gpu(rank, gpu_id, args, video_files_chunk, input_base_dir, output_dir):
     device = torch.device(f"cuda:{gpu_id}")
     torch.cuda.set_device(device)
@@ -208,8 +287,23 @@ def process_videos_on_gpu(rank, gpu_id, args, video_files_chunk, input_base_dir,
             output_path = get_output_path(video_path, input_base_dir, output_dir)
             output_path.parent.mkdir(parents=True, exist_ok=True)
             if output_path.exists() and not args.overwrite:
-                skipped_in_batch += 1
-                continue
+                try:
+                    expected_frame_idx = compute_frame_idx_with_decord(str(video_path), data_args)
+                    validate_sidecar(
+                        output_path,
+                        layer_indices,
+                        args.vggt_input_size,
+                        expected_frame_idx=expected_frame_idx,
+                        expected_source_video=video_path,
+                    )
+                    skipped_in_batch += 1
+                    rank0_print(f"[GPU {gpu_id}] VALID_EXISTING: {output_path}")
+                    continue
+                except Exception as exc:
+                    rank0_print(
+                        f"[GPU {gpu_id}] INVALID_EXISTING: {output_path}: {exc}. "
+                        "Re-extracting to an atomic temporary file."
+                    )
 
             preprocessed = load_and_preprocess_video_frames(
                 str(video_path), data_args, image_processor, rank=gpu_id
@@ -219,6 +313,9 @@ def process_videos_on_gpu(rank, gpu_id, args, video_files_chunk, input_base_dir,
                 rank0_print(f"[GPU {gpu_id}] Failed to load/preprocess {video_path}. Skipping.")
                 continue
 
+            temporary_path = output_path.with_name(
+                f".{output_path.name}.tmp.{os.getpid()}.{time.time_ns()}"
+            )
             try:
                 pixel_values = preprocessed["frames_tensor"].to(device=device, dtype=model_dtype)
                 with torch.cuda.amp.autocast(dtype=model_dtype):
@@ -246,19 +343,28 @@ def process_videos_on_gpu(rank, gpu_id, args, video_files_chunk, input_base_dir,
                         "schema": "vggt_aggregated_tokens_v1",
                     },
                 }
-                torch.save(payload, output_path)
+                torch.save(payload, temporary_path)
+                validate_sidecar(
+                    temporary_path,
+                    layer_indices,
+                    args.vggt_input_size,
+                    expected_frame_idx=preprocessed["frame_idx"],
+                    expected_source_video=video_path,
+                )
+                os.replace(temporary_path, output_path)
                 processed_in_batch += 1
+                rank0_print(f"[GPU {gpu_id}] SUCCESS: {video_path} -> {output_path}")
             except Exception as exc:
                 skipped_in_batch += 1
                 rank0_print(
-                    f"[GPU {gpu_id}] Error during VGGT inference/save for {video_path}: "
+                    f"[GPU {gpu_id}] FAILURE during VGGT inference/save for {video_path}: "
                     f"{exc}\n{traceback.format_exc()}"
                 )
-                if output_path.exists():
+                if temporary_path.exists():
                     try:
-                        output_path.unlink()
+                        temporary_path.unlink()
                     except OSError:
-                        rank0_print(f"Warning: could not remove partial file {output_path}")
+                        rank0_print(f"Warning: could not remove partial file {temporary_path}")
 
         processed_count += processed_in_batch
         skipped_count += skipped_in_batch
