@@ -241,7 +241,10 @@ def main() -> None:
                 projected_selected[frame_index] = grid14(projected.reshape(256, -1), 16)
             all_projected.append(projected.squeeze(0))
         video_prompt = "\n".join(f"Frame {i + 1}: <image>" for i in range(32))
-        human = prompts[str(video["video_sample_id"])].replace("<image>", video_prompt, 1)
+        human = prompts[str(video["video_sample_id"])]
+        if human.count("<image>") > 1:
+            raise RuntimeError(f"Unexpected multiple annotation image placeholders: {scene}")
+        human = human.replace("<image>", video_prompt, 1) if "<image>" in human else video_prompt + "\n" + human
         template = copy.deepcopy(model.conv_template)
         template.system_message = model.system_message
         template.append_message(template.roles[0], human)
