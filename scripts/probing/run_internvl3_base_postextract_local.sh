@@ -7,8 +7,9 @@ SAMPLES=/home/shaoruei/probe_outputs/scannet_depth_layers_v1/full/provenance/sca
 PYTHON=/home/shaoruei/miniconda3/envs/vlm3r/bin/python
 MANIFEST="$OUTPUT_ROOT/internvl3_8b_base_presft_run_manifest.json"
 LOGME_LOG="$OUTPUT_ROOT/logme_common7.log"
-DEPTH_LOG="$OUTPUT_ROOT/depth_probes.log"
 LEVELS=visual_output,fusion_output,projected_features,layer_0,layer_1,layer_2,layer_3,layer_6,layer_9,layer_12,layer_15,layer_18,layer_21,layer_24,layer_27
+LEVELS_GPU0=visual_output,projected_features,layer_0,layer_2,layer_6,layer_12,layer_18,layer_24
+LEVELS_GPU1=fusion_output,layer_1,layer_3,layer_9,layer_15,layer_21,layer_27
 
 cd "$REPO_ROOT"
 if [[ ! -f "$MANIFEST" ]]; then
@@ -34,10 +35,36 @@ CUDA_VISIBLE_DEVICES=0 "$PYTHON" -u scripts/probing/run_internvl3_base_common7_l
 
 CUDA_VISIBLE_DEVICES=0 "$PYTHON" -u scripts/probing/train_depth_probes.py \
   --output-root "$OUTPUT_ROOT" --sample-indices "$SAMPLES" \
+  --model-labels internvl3_8b_base_presft --feature-levels "$LEVELS_GPU0" \
+  --probe-subdir probes --result-stem internvl3_8b_base_depth \
+  --epochs 50 --batch-size 32 --lr 0.001 --early-stop-patience 10 \
+  --probe-seed 0 --device cuda:0 --skip-existing --no-write-aggregate \
+  > "$OUTPUT_ROOT/depth_probes_gpu0.log" 2>&1 &
+PID_GPU0=$!
+CUDA_VISIBLE_DEVICES=1 "$PYTHON" -u scripts/probing/train_depth_probes.py \
+  --output-root "$OUTPUT_ROOT" --sample-indices "$SAMPLES" \
+  --model-labels internvl3_8b_base_presft --feature-levels "$LEVELS_GPU1" \
+  --probe-subdir probes --result-stem internvl3_8b_base_depth \
+  --epochs 50 --batch-size 32 --lr 0.001 --early-stop-patience 10 \
+  --probe-seed 0 --device cuda:0 --skip-existing --no-write-aggregate \
+  > "$OUTPUT_ROOT/depth_probes_gpu1.log" 2>&1 &
+PID_GPU1=$!
+STATUS_GPU0=0
+STATUS_GPU1=0
+wait "$PID_GPU0" || STATUS_GPU0=$?
+wait "$PID_GPU1" || STATUS_GPU1=$?
+if [[ "$STATUS_GPU0" -ne 0 || "$STATUS_GPU1" -ne 0 ]]; then
+  echo "Depth workers failed: GPU0=$STATUS_GPU0 GPU1=$STATUS_GPU1" >&2
+  exit 1
+fi
+
+CUDA_VISIBLE_DEVICES=0 "$PYTHON" -u scripts/probing/train_depth_probes.py \
+  --output-root "$OUTPUT_ROOT" --sample-indices "$SAMPLES" \
   --model-labels internvl3_8b_base_presft --feature-levels "$LEVELS" \
   --probe-subdir probes --result-stem internvl3_8b_base_depth \
   --epochs 50 --batch-size 32 --lr 0.001 --early-stop-patience 10 \
-  --probe-seed 0 --device cuda:0 --skip-existing > "$DEPTH_LOG" 2>&1
+  --probe-seed 0 --device cpu --skip-existing \
+  > "$OUTPUT_ROOT/depth_probes_aggregate.log" 2>&1
 
 "$PYTHON" -c '
 import json, pathlib, sys
